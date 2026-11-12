@@ -190,17 +190,12 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/gemm_bw $(BIN)/cache_bw $(BIN)/fp8_decode
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode
 bench: $(BENCHBIN)
 
 $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
-
-$(BIN)/gemm_bw: bench/gemm_bw.c src/core/dsv4_matmul.c
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/gemm_bw.c src/core/dsv4_matmul.c \
-	      -o $@ $(LDFLAGS)
 
 $(BIN)/cache_bw: bench/cache_bw.c src/cache/dsv4_cache.c src/io/dsv4_st.c
 	@mkdir -p $(BIN)
@@ -224,7 +219,7 @@ help:
 	@echo "  make               build everything"
 	@echo "  make test          the gate ladder (19 gates; the trunk gate"
 	@echo "                     needs DSV4_MODEL and DSV4_TRUNK to make 20)"
-	@echo "  make bench         matmul_bw, gemm_bw, cache_bw"
+	@echo "  make bench         matmul_bw, cache_bw"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make clean"
 	@echo ""

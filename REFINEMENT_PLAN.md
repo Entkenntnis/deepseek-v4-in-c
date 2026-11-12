@@ -263,60 +263,17 @@ There is no large in-situ gap left. That also weakens item 6's expected payoff:
 overlap can only hide I/O behind compute, and the I/O is no longer the
 underperforming half.
 
-### 9. Prefill batching — DONE, and worth 9%, not the 2–3x estimated here
+### 9. Prefill batching — REMOVED
 **From:** the r/OpenSourceAI post's own contribution ask; unchanged by comments.
 
-**Shipped** in `857f43e` (batched matmuls) and `7e50219` (end to end).
-`--batch N`, default 32, bit-exact against the per-token path and gated by the
-whole-model oracle at several chunk sizes.
+Batching was built, measured at **9%** TTFT on a 53-token prompt (`--budget 16`,
+CPU only, interleaved), and then removed. It bought less than the estimate
+because the expert union ate the cache hits that made the batch cheap. Keeping
+it also meant maintaining a second forward path and a separate matmul family.
 
-**The estimate this section used to carry is retracted.** It projected 2–3x on
-long-prompt prefill from the time breakdown. Measured on a 53-token prompt at
-`--budget 16`, CPU only, interleaved and with both orderings run: **9%**, TTFT
-81.7/85.8 s → 73.6/78.0 s. The GEMMs delivered exactly what `bench/gemm_bw.c`
-priced them at — routed expert matmul −45%, shared expert −35% — and an I/O
-regression ate most of it.
-
-**Why: the union eats its own cache hits.** Deduplicating the batch's expert
-requests removes precisely the repeat requests that were the cache's hits. Hit
-rate by batch size, and these counters are bit-identical run to run:
-
-    batch      1      2      4      8     16     32     64
-    hits    50.1%  40.5%  29.2%   1.8%   2.1%   0.9%   0.9%
-
-The cliff between 4 and 8 is exact: batch 4's per-layer union still fits the
-767-slot / 9.55 GB cache and batch 8's does not. But **the cost cancels** —
-batch 4 runs matmul 23.3–29.2 s against disk 9.3–10.0 s, batch 32 runs matmul
-17.8–18.8 s against disk 15.0–15.2 s. Batching past 4 buys ~5 s of matmul and
-pays ~5 s of exposed I/O for it, which is why TTFT is flat from 4 to 32 and why
-the default was left at 32.
-
-**Two claims made during this work did not survive re-measurement, and are
-withdrawn:**
-
-- A **+13% attention regression** on identical unbatched work, asserted in
-  `7e50219`'s message. It does not reproduce: at matched thermal state batch-32
-  attention is 43.1 s against batch-1's 41.1/45.3 s. The original figure came
-  from comparing two arms measured at different thermal states. What may still
-  be real, but rests on single runs, is attention rising above batch 8 —
-  34.8 / 37.6 / 43.1 / 52.5 s at nt = 8 / 16 / 32 / 64.
-- **Batch 4 as the optimum**, from a sweep showing 78.1 s against 84.3 s at 32.
-  An interleaved A/B gave 32 → 80.5, 4 → 80.5, 32 → 85.4, 4 → 93.4 s: TTFT rose
-  with position in the sequence, not with batch size.
-
-**The method rule both of those earned:** on this machine the route and cache
-counters are deterministic and can be trusted from a single run, but any timing
-difference under ~10% needs interleaving *and* both orderings — and even then a
-monotonic drift across the sequence can manufacture a trend. Restating it
-because three separate conclusions died to it in one afternoon.
-
-**Also fixed here:** `test_model_oracle` built its expert source with `.get`
-alone, so neither the per-token overlap nor the batched one was ever reached by
-the gate that claims to protect them. It now wires `begin`/`end`.
-
-**Left open:** `dsv4_mmq_n` has no CUDA branch, so `--gpu` plus batching
-silently runs every FP8 matmul on the CPU. And the attention half is still
-per-token inside the batch — 46% of batched TTFT, and the only remaining 2x.
+Prompt tokens now go through the same per-token path as generated ones, so
+prefill and decode timings are directly comparable. `--batch`,
+`dsv4_layer_forward_n`, `dsv4_mmq_n`, and `bench/gemm_bw.c` are gone.
 
 ---
 
@@ -374,8 +331,7 @@ which is this repo's entire claim to trust.
 If it is built: separate flag, separate README section, output quality measured
 rather than asserted, and every existing exactness claim scoped explicitly to the
 default path. It must be impossible to read a benchmark table and not know which
-mode produced it. Note it also composes with item 9 — a prefill union of experts
-is the same computation, minus the approximation.
+mode produced it.
 
 ---
 
@@ -410,5 +366,6 @@ is the same computation, minus the approximation.
    io_uring or striping is worth building at all.
 4. Items 6, then 7 — the async machinery, cheapest exact user first.
 5. Item 2 — the estimator, once 6 and 7 have changed the numbers it models.
-6. Item 9 — prefill batching. DONE, and it was not the big one: 9%, not 2-3x.
+6. Item 9 — prefill batching. Removed: it was 9%, not 2-3x, and one forward
+   path is worth more than that for measurement work.
 7. Items 10, 11 — only with data from item 8 and a decision from item 1.

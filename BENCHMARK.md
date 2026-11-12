@@ -3,7 +3,7 @@
 This file records the baseline this machine produces, so a change can be judged
 against something. It is intentionally narrow: **decode only, one fixed
 invocation, one machine.** Kernel microbenchmarks live in `bench/matmul_bw.c`,
-`bench/gemm_bw.c`, `bench/cache_bw.c` and `bench/fp8_decode.c`; throughput
+`bench/cache_bw.c` and `bench/fp8_decode.c`; throughput
 claims for those belong in the README, not here.
 
 ## The metric
@@ -20,7 +20,7 @@ tokens actually decoded:
     decode_s_per_token = (T - TTFT) / (N - 1)
 
 Prefill is deliberately **not** measured. It is a different question (disk
-layout, batched GEMM, prompt length) and mixing the two hides changes in both.
+layout, prompt length) and mixing the two hides changes in both.
 
 **Current baseline (2026-11-12, after both changes below): 1.210 s/token
 decode, 1.2% spread over 3 runs.** The earlier numbers are kept in the change
@@ -200,7 +200,7 @@ The two medians differ by 2.1%, with identical ids and counters, so quote
 **~1.22** as the consensus and treat differences under ~3% as machine state.
 
 **Verified:** `bin/test_matmul` passes, including AVX2-vs-scalar bitwise
-equality, the 1-vs-8-thread gate, and batched-GEMM equality.
+equality and the 1-vs-8-thread gate.
 
 ## Measurement rules this machine earned
 
