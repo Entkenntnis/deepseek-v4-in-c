@@ -141,6 +141,7 @@ int dsv4_scratch_init(DSV4Scratch *s, const DSV4Cfg *c, int max_pos)
         + inter * 3                                 /* expert gate/up/out  */
         + (size_t)c->n_heads * nidx                 /* attn scratch, PER HEAD */
         + (size_t)c->topk * d                       /* expert_acc, one per k */
+        + d                                         /* shared_acc          */
         + 4u * (size_t)c->head_dim                  /* comp kv/score in    */
         + (size_t)c->index_n_heads * (size_t)c->index_head_dim  /* idx q  */
         + (size_t)c->index_n_heads                  /* idx head weights    */
@@ -174,6 +175,7 @@ int dsv4_scratch_init(DSV4Scratch *s, const DSV4Cfg *c, int max_pos)
     s->attn_scratch = p; p += nidx;
     s->expert_acc = p;   p += (size_t)c->topk * d;
     s->expert_acc_stride = c->hidden;
+    s->shared_acc = p;   p += d;
     s->comp_kv_in = p;   p += 2u * (size_t)c->head_dim;
     s->comp_sc_in = p;   p += 2u * (size_t)c->head_dim;
     s->idx_q = p;        p += (size_t)c->index_n_heads * (size_t)c->index_head_dim;
@@ -435,6 +437,23 @@ static void moe(float *out, const float *x, const DSV4LayerW *w,
         }
         dsv4_prof.expert_mm += pnow() - t0;
 
+        /* THE SHARED EXPERT GOES HERE, BEFORE end(), AND THIS IS THE POINT.
+         *
+         * It does not depend on the router at all -- only on x, which is
+         * already final -- but it used to run after the routed sum, with every
+         * read finished and the CPU idle. So it was pure serial time. Running
+         * it while the misses are still being read fills that window with work
+         * that has to be done anyway.
+         *
+         * The output lands in shared_acc, not expert_acc: the streamed experts
+         * will overwrite the per-k buffers when they land. The final add below
+         * is still strictly after the routed k-order sum, so the floating-point
+         * additions into `out` happen in exactly the order they did before. */
+        t0 = pnow();
+        expert_forward(s->shared_acc, x, &w->moe.shared, s, c->hidden,
+                       c->moe_inter * c->n_shared, c->swiglu_limit);
+        dsv4_prof.shared += pnow() - t0;
+
         /* Whatever the drive still owes. Counted as I/O because that is what it
          * is: time this thread spent blocked with nothing left to overlap. As
          * the overlap works this shrinks, which makes expert_io the number to
@@ -442,6 +461,14 @@ static void moe(float *out, const float *x, const DSV4LayerW *w,
         t0 = pnow();
         src->end(src->ctx, ex);
         dsv4_prof.expert_io += pnow() - t0;
+    } else {
+        /* No reads to hide behind: this is the pre-overlap path, used by the
+         * gates. Compute the shared expert here so it is done exactly once on
+         * every path; its position is deliberately the same afterwards. */
+        t0 = pnow();
+        expert_forward(s->shared_acc, x, &w->moe.shared, s, c->hidden,
+                       c->moe_inter * c->n_shared, c->swiglu_limit);
+        dsv4_prof.shared += pnow() - t0;
     }
 
     t0 = pnow();
@@ -477,11 +504,7 @@ static void moe(float *out, const float *x, const DSV4LayerW *w,
     dsv4_prof.expert_mm += pnow() - t0;
 
     /* The shared expert is added UNWEIGHTED, after the routed sum. */
-    t0 = pnow();
-    expert_forward(s->expert_acc, x, &w->moe.shared, s, c->hidden,
-                   c->moe_inter * c->n_shared, c->swiglu_limit);
-    for (int i = 0; i < c->hidden; i++) out[i] += s->expert_acc[i];
-    dsv4_prof.shared += pnow() - t0;
+    for (int i = 0; i < c->hidden; i++) out[i] += s->shared_acc[i];
 }
 
 /* One decoder layer. `h` is [hc_mult][hidden] in and out. */

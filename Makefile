@@ -227,7 +227,7 @@ bench-decode: $(BIN)/dsv4
 
 # ---------------------------------------------------------------- TUI --------
 tui: $(BIN)/dsv4-serve
-	python3 tui/dsv4_tui.py --budget 12 --ctx 8192 --gen 512
+	python3 tui/dsv4_tui.py --budget 18 --ctx 8192 --gen 512
 
 clean:
 	rm -rf $(BUILD) $(BIN)

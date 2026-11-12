@@ -434,6 +434,49 @@ most of the kernel gain was absorbed by the other components. The change is
 kept because it is strictly faster and bitwise-neutral, not because it moves
 the full model much.
 
+## The shared expert runs during the expert reads — 2026-11-12
+
+**Change:** `moe()` now computes the shared expert between `begin()` and
+`end()`, into a new `DSV4Scratch.shared_acc`, instead of after the routed sum.
+The final `out[i] += shared[i]` still runs immediately after the routed k-order
+sum, so the arithmetic into `out` is unchanged.
+
+**Why:** the shared expert depends only on the MoE input `x`, not on the router
+or any routed expert. It was 62 ms/pass of pure serial time, run after every
+read had finished and the compute team was idle. The expert-read window already
+exists for the resident experts; this puts work that has to happen anyway into
+it.
+
+**Measured** as five interleaved pairs at `--budget 16 --gen 20`, same prompt,
+alternating which build ran first (baseline first in rounds 1–3, new build first
+in rounds 4–5):
+
+| arm | runs (decode s/token) | median |
+|---|---|---:|
+| baseline | 0.895 / 0.885 / 0.885 / 0.900 / 0.885 | 0.885 |
+| **shared expert overlapped** | 0.860 / 0.830 / 0.840 / 0.925 / 0.835 | **0.840** |
+
+That is **−5.1%** on the median. One new-build run (0.925) was a thermal
+outlier; the median of five is why it does not decide the result. Every round
+produced identical generated ids, and all ten runs agreed.
+
+Components, medians of the five runs:
+
+| | baseline | overlapped | delta |
+|---|---:|---:|---:|
+| exposed expert I/O | 314.2 ms/pass | 259.3 ms/pass | **−54.9** |
+| routed-expert matmul | 302.1 ms/pass | 293.8 ms/pass | −8.3 (noise) |
+| shared expert | 62.3 ms/pass | 71.8 ms/pass | **+9.5** |
+
+The shared expert itself got 15% slower: it now runs while the reader pool is
+streaming into cache slots, so it pays the same DMA-versus-DRAM contention the
+resident-expert matmuls already pay. The exposed I/O falls by more than that
+contention costs, which is the whole trade.
+
+**Verified:** generated ids identical across all ten runs; `bin/test_layer`
+passes; the cache and trunk-bind gates still pass. The model/layer oracle
+fixtures are not installed on this machine, so those were not run.
+
 ## Measurement rules this machine earned
 
 - **Do not A/B two 60 s runs back to back and believe a 10% difference.** The

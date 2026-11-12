@@ -26,6 +26,15 @@ typedef struct {
      * see it; the whole-block oracle caught it. */
     float *expert_acc;   /* topk buffers of `hidden`, contiguous */
     int    expert_acc_stride;
+    /* The shared expert's output, deliberately separate from expert_acc.
+     *
+     * The shared expert is independent of routing, so it is computed between
+     * begin() and end() -- while the misses are still being read -- instead of
+     * after the routed experts. Its 2048-wide matmuls therefore land in the
+     * same idle window the resident experts already use. It needs its own
+     * output buffer because expert_acc is overwritten by the streamed experts
+     * later, and the shared term must survive until the final, k-ordered add. */
+    float *shared_acc;
     float *comp_kv_in, *comp_sc_in;   /* compressor projections, one token */
     float *idx_q, *idx_w, *idx_scores; /* CSA indexer working set          */
     int    idx_cap;                    /* how many scores idx_scores holds  */
