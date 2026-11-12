@@ -89,6 +89,20 @@ typedef struct {
     void     *raw;         /* one allocation backing everything */
 } DSV4Tok;
 
+/* ---- decoding ------------------------------------------------------------
+ * The vocab blob stores each token's bytes in the ByteLevel alphabet (space is
+ * U+0120, newline U+010A, ...), not as ordinary UTF-8. Decoding therefore has
+ * to undo that map, byte by byte. Added/special tokens are the exception: their
+ * stored spelling is already literal text ("<｜User｜>"), so those are copied
+ * through unchanged.
+ *
+ * decode() writes the ORIGINAL BYTES of one token, not UTF-8 text. A token may
+ * end in the middle of a multi-byte UTF-8 character, so a caller streaming text
+ * has to buffer these bytes and decode them incrementally. Returns the number
+ * of bytes written (never more than cap), or 0 for an unrepresentable id. */
+int  dsv4_tok_is_added(const DSV4Tok *t, int32_t id);
+int  dsv4_tok_decode(const DSV4Tok *t, int32_t id, unsigned char *out, int cap);
+
 /* ---- byte-level alphabet -------------------------------------------------
  * GPT-2's map: printable ASCII and most Latin-1 stay put, everything else
  * moves to U+0100.. so that no token ever contains a raw control byte. */

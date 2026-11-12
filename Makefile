@@ -15,7 +15,7 @@ LDFLAGS ?= -lm -fopenmp -pthread
 BUILD := build
 BIN   := bin
 
-.PHONY: all test bench bench-decode cfg-fixtures st-fixtures ref-fixtures tok-fixtures fixtures clean help
+.PHONY: all test bench bench-decode cfg-fixtures st-fixtures ref-fixtures tok-fixtures fixtures clean help tui
 
 # EVERY binary depends on EVERY engine source and header.
 #
@@ -30,7 +30,7 @@ ENGINE := $(wildcard src/core/*.c src/core/*.h src/io/*.c src/io/*.h \
                      src/cache/*.c src/cache/*.h src/model/*.c src/model/*.h \
                      src/tokenizer/*.c src/tokenizer/*.h \
                      include/dsv4/*.h third_party/*.h)
-ALLBIN := $(BIN)/test_pro $(BIN)/dsv4 $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_oracle $(BIN)/test_layer_oracle $(BIN)/test_trunk $(BIN)/test_tok $(BIN)/test_model_oracle
+ALLBIN := $(BIN)/test_pro $(BIN)/dsv4 $(BIN)/dsv4-serve $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_oracle $(BIN)/test_layer_oracle $(BIN)/test_trunk $(BIN)/test_tok $(BIN)/test_model_oracle
 
 all: $(ALLBIN)
 
@@ -133,6 +133,13 @@ $(BIN)/dsv4: src/cli/dsv4_run.c $(DSV4_ENGINE)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_run.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
 
+# The TUI backend. Same engine, one JSON event per line on stdout. Kept separate
+# from dsv4_run.c so the one-shot CLI stays exactly what the gates and docs
+# describe.
+$(BIN)/dsv4-serve: src/cli/dsv4_serve.c $(DSV4_ENGINE)
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_serve.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
+
 $(BIN)/test_pro: tests/unit/test_pro.c $(DSV4_ENGINE)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_pro.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
@@ -210,6 +217,10 @@ $(BIN)/fp8_decode: bench/fp8_decode.c src/core/dsv4_matmul.c
 bench-decode: $(BIN)/dsv4
 	python3 bench/bench_decode.py --reps 3
 
+# ---------------------------------------------------------------- TUI --------
+tui: $(BIN)/dsv4-serve
+	python3 tui/dsv4_tui.py --budget 12 --ctx 8192 --gen 512
+
 clean:
 	rm -rf $(BUILD) $(BIN)
 
@@ -221,6 +232,7 @@ help:
 	@echo "                     needs DSV4_MODEL and DSV4_TRUNK to make 20)"
 	@echo "  make bench         matmul_bw, cache_bw"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
+	@echo "  make tui           build the streaming backend and launch the Python TUI"
 	@echo "  make clean"
 	@echo ""
 	@echo "fixtures (only needed if you change a kernel or a format):"
@@ -236,6 +248,10 @@ help:
 	@echo "  python3 tools/pack_tokenizer.py <model_dir> <tok.bin>"
 	@echo "  ./bin/dsv4 <model_dir> --trunk <dir> --tok <file> \\"
 	@echo "             --prompt TEXT --gen 25 --budget 16"
+	@echo ""
+	@echo "live TUI (chat + timings/cache/disk/RSS while it runs):"
+	@echo "  python3 tui/dsv4_tui.py --demo      # no checkpoint needed"
+	@echo "  python3 tui/dsv4_tui.py             # real model, defaults in tui/README.md"
 	@echo ""
 	@echo "  --budget must exceed one pass's working set (Flash 3.21 GB)"
 	@echo "  plus the trunk (6.27 GB), or the expert cache cannot hit at all."

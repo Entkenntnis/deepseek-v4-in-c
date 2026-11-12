@@ -134,6 +134,24 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--gpu` | put the dense trunk's FP8 matrices in VRAM (opt-in) |
 | `--route-log FILE` | record every expert request, for `tools/sim_cache.py` |
 
+### Live TUI
+
+`tui/dsv4_tui.py` is a standard-library-only curses front end. It keeps the
+engine resident across turns and streams a JSON event per decoder layer, so the
+transcript sits next to live expert-cache hit rate, trunk residency, RSS, disk
+throughput, CPU and the engine's own time breakdown:
+
+```sh
+make tui                          # builds bin/dsv4-serve, launches the TUI
+python3 tui/dsv4_tui.py --demo    # synthetic backend, no checkpoint needed
+```
+
+`--budget 10` is the TUI default (the trunk pins at ~6.3 GB, leaving enough
+expert-cache slots to beat the 3.21 GB working set). `/help` lists the in-app
+commands; [tui/README.md](tui/README.md) explains the panel, the optional
+Markdown rendering (`pip install -r tui/requirements.txt`) and the JSON-lines
+protocol. The one-shot `bin/dsv4` and every correctness gate are unchanged.
+
 ### It scales down to 3.2 GB
 
 Every row below produces **identical tokens** — the budget buys speed, never

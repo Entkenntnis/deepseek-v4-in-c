@@ -1,0 +1,9 @@
+# Optional dependency for Markdown rendering in the TUI.
+#
+# The TUI runs without this (plain-text assistant output). Install it to get
+# headings, lists, quotes, tables and syntax-highlighted code:
+#
+#   python3 -m pip install -r tui/requirements.txt
+#   # or, if your system Python is managed:
+#   uv pip install --system -r tui/requirements.txt
+rich>=13
