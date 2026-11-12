@@ -463,6 +463,13 @@ is the scalar path against the AVX2 path — not a tolerance:
 | fp8 attn wo_b 4096x8192 | 14.9 GF/s | 19.7 GF/s | 1.32x | yes |
 | fp8 attn wq_b 32768x1024 | 15.1 GF/s | 19.1 GF/s | 1.26x | yes |
 
+On the P-core-only compute path the FP8 decoder is the 8-wide gather from
+the same 256-entry table: **1.20–1.29x** over the old four-load form in
+`bench/fp8_decode`, and **1.04 → 0.95 s/token** end to end (see
+[BENCHMARK.md](BENCHMARK.md#p-core-fp8-decode-gather8-is-now-the-default--2026-11-12)).
+Gather is the only FP8 decoder; the four-load path and its environment override
+have been removed.
+
 FP8 barely moving is the informative part: those matrices are 33.5 MB and are
 re-read from RAM every layer, so they are bandwidth-bound rather than
 conversion-bound. That is the measurement that argues for putting the trunk in

@@ -16,10 +16,10 @@
  *   Makefile stops the compiler fusing anything behind our back. The point is
  *   that a performance change can never quietly become an accuracy change.
  *
- *   No AVX2 path exists yet. When one is added it must reproduce this tree
- *   lane-for-lane and be gated on bit equality against the scalar path, exactly
- *   as K3 does. Adding a faster kernel that is merely *close* would forfeit the
- *   property this whole file is arranged around.
+ *   An AVX2 path exists and reproduces this tree lane for lane; test_matmul
+ *   gates it on bit equality against the scalar path, exactly as K3 does.
+ *   Adding a faster kernel that is merely *close* would forfeit the property
+ *   this whole file is arranged around.
  *
  * WHERE THE SCALES GO
  *   inference/kernel.py fp4_gemm applies the weight scale to the ACCUMULATOR
@@ -135,21 +135,14 @@ static inline __m256d load4_bf16(const uint16_t *row, int i)
  * 6.7-10x faster (45-59 GF/s against 3.5-7 GF/s) and bitwise identical.
  *
  * The table is generated from dsv4_e4m3_to_f32 and the matmul gate compares
- * this AVX2 path against that scalar path over random matrices, so the two
+ * the AVX2 path against that scalar path over random matrices, so the two
  * cannot drift. 1 KB, permanently in L1.
  *
- * WHY NOT A GATHER. bench/fp8_decode.c also times a vpgatherdd form, one gather
- * per 8 weights. It is 1.15-1.3x faster than these four loads on the P-cores,
- * but 2x SLOWER on the E-cores (Skymont's gather is microcoded), and decode now
- * runs on both because the loops are dynamically scheduled. Four scalar loads
- * win on the core mix this engine actually uses. The gather prototype is kept
- * in the bench, not here.
- *
- * _mm_set_ps, NOT a stack array reloaded with _mm_loadu_ps: four scalar stores
- * followed by a 128-bit load is a store-to-load forwarding stall, and it cost
- * more than the vector arithmetic saved. The first version of this file
- * measured the expert matmuls at 41.8 s against the scalar path's 27.7 s for
- * exactly that reason. */
+ * The table is read eight entries at a time with vpgatherdd (load8_fp8). An
+ * earlier four-scalar-load form was faster on the E-cores, where Skymont's
+ * gather is microcoded, but the compute team is now the four P-cores only.
+ * There the gather is 1.20-1.29x ahead on every shape this model uses, so the
+ * four-load path has been removed and gather is the only AVX2 FP8 decoder. */
 static const uint32_t dsv4_e4m3_bits[256] = {
     0x00000000u, 0x3B000000u, 0x3B800000u, 0x3BC00000u, 0x3C000000u, 0x3C200000u, 0x3C400000u, 0x3C600000u,
     0x3C800000u, 0x3C900000u, 0x3CA00000u, 0x3CB00000u, 0x3CC00000u, 0x3CD00000u, 0x3CE00000u, 0x3CF00000u,
@@ -185,19 +178,25 @@ static const uint32_t dsv4_e4m3_bits[256] = {
     0xC3800000u, 0xC3900000u, 0xC3A00000u, 0xC3B00000u, 0xC3C00000u, 0xC3D00000u, 0xC3E00000u, 0xFFC00000u,
 };
 
-static inline float dsv4_bits_f32(uint32_t bits)
+/* EIGHT FP8 VALUES FROM THE SAME 256-ENTRY TABLE, IN ONE GATHER.
+ *
+ * This is the only AVX2 FP8 decoder. It was rejected once because Skymont's
+ * vpgatherdd is microcoded and made it ~2x slower than four scalar loads. The
+ * engine now runs its compute team on the four P-cores (Lion Cove), where the
+ * interleaved benchmark puts it 1.20-1.29x ahead on all four shapes, and the
+ * whole-model A/B agrees: attention 7.5-7.7 -> 6.3-6.5 s, shared expert
+ * 1.5-1.6 -> 1.3 s, and 1.04 -> 0.95 s/token with identical ids.
+ *
+ * The table entries are exact f32 bit patterns generated from
+ * dsv4_e4m3_to_f32, and test_matmul checks the AVX2 path against the scalar
+ * definition. */
+static inline __m256 load8_fp8(const uint8_t *wb, int i)
 {
-    union { uint32_t u; float f; } v;
-    v.u = bits;
-    return v.f;
-}
-
-static inline __m256d load4_fp8(const uint8_t *wb, int i)
-{
-    return _mm256_cvtps_pd(_mm_set_ps(dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 3]]),
-                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 2]]),
-                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 1]]),
-                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 0]])));
+    const __m128i b8 = _mm_loadl_epi64((const __m128i *)(wb + i));
+    const __m256i idx = _mm256_cvtepu8_epi32(b8);
+    const __m256i bits = _mm256_i32gather_epi32((const int *)dsv4_e4m3_bits,
+                                                idx, 4);
+    return _mm256_castsi256_ps(bits);
 }
 
 static inline __m256d load4_fp4(const uint8_t *row, int64_t base, int i)
@@ -251,15 +250,19 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
 #define PD_LO(f) _mm256_cvtps_pd(_mm256_castps256_ps128(f))
 #define PD_HI(f) _mm256_cvtps_pd(_mm256_extractf128_ps((f), 1))
 
-/* Same tree, same grouping, same order -- only the dequant changes. */
-#define BLOCK_DOT_V_FP4(LOAD1, LOAD4)                                          \
+/* ONE EIGHT-WIDE DEQUANT BODY FOR FP4 AND FP8.
+ *
+ * Both loaders hand back eight f32 weights per call; only the dequant itself
+ * differs. The double tree, its grouping and its order are untouched, which is
+ * what keeps both paths bit-identical to the scalar definition. */
+#define BLOCK_DOT_V_8(LOAD1, LOAD8)                                            \
     do {                                                                       \
         __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();            \
         __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();            \
         int i = 0;                                                             \
         for (; i + 15 < n; i += 16) {                                          \
-            const __m256 f0 = fp4_8(row, (int64_t)c0 + i);                     \
-            const __m256 f1 = fp4_8(row, (int64_t)c0 + i + 8);                 \
+            const __m256 f0 = LOAD8(i);                                        \
+            const __m256 f1 = LOAD8(i + 8);                                    \
             v0 = _mm256_fmadd_pd(PD_LO(f0), XB4(i),      v0);                  \
             v1 = _mm256_fmadd_pd(PD_HI(f0), XB4(i + 4),  v1);                  \
             v2 = _mm256_fmadd_pd(PD_LO(f1), XB4(i + 8),  v2);                  \
@@ -272,13 +275,16 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
         for (; i < n; i++) acc = fma(LOAD1(i), (double)xb[i], acc);            \
     } while (0)
 
+#define LOAD8_FP4(i) fp4_8(row, (int64_t)c0 + (i))
+#define LOAD8_FP8(i) load8_fp8(wb, (i))
+#define BLOCK_DOT_V_FP4(LOAD1, LOAD4) BLOCK_DOT_V_8(LOAD1, LOAD8_FP4)
+#define BLOCK_DOT_FP8(LOAD1)          BLOCK_DOT_V_8(LOAD1, LOAD8_FP8)
+
 #define LOAD4_BF16(k) load4_bf16(row, (k))
-#define LOAD4_FP8(k)  load4_fp8(wb, (k))
 #define LOAD4_FP4(k)  load4_fp4(row, (int64_t)c0, (k))
 #else
 /* Never expanded without AVX2, but they must still parse. */
 #define LOAD4_BF16(k) 0
-#define LOAD4_FP8(k)  0
 #define LOAD4_FP4(k)  0
 #define BLOCK_DOT_V_FP4(LOAD1, LOAD4) BLOCK_DOT_S(LOAD1)
 #endif
@@ -304,8 +310,9 @@ static double *widen_x(const float *x, int in)
     return d;
 }
 
-/* The scalar tree, called with the vector signature so one body serves both. */
-#define BLOCK_DOT_S2(LOAD1, LOAD4) BLOCK_DOT_S(LOAD1)
+/* The scalar tree, called with the vector signature so one body serves both.
+ * The extra arguments the vector forms take are ignored. */
+#define BLOCK_DOT_S2(LOAD1, ...) BLOCK_DOT_S(LOAD1)
 
 /* ---------------------------------------------------------------- kernels ---
  * Emitted twice: once always, as `..._scalar`, and once as `..._avx2` where the
@@ -313,18 +320,49 @@ static double *widen_x(const float *x, int in)
  * apart, and both are callable at runtime so the gate can compare them on real
  * data instead of trusting the argument that they must agree.
  *
- * WHY DYNAMIC SCHEDULING. The rows are independent and equal in cost, so static
- * looks natural. On a hybrid CPU it is not: a 4P+4E laptop hands every thread
- * the same number of rows, the E-cores take ~2.5x longer per row, and the
- * P-cores idle at the barrier. Measured on the 258V, the process ran at ~4.7 of
- * 8 cores and the P-cores at 53% while the E-cores sat at 65%. Dynamic lets a
- * fast core take the next chunk instead of waiting. Chunk 4 is fine enough to
- * beat the P/E speed ratio and coarse enough that one fetch is negligible
- * against a row of 1024-8192 MACs.
+ * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
+ * default compute team is four threads pinned to the four identical P-cores, so
+ * there is nothing for a dynamic schedule to balance. It was introduced when
+ * these loops also ran on the E-cores, where the P/E cost ratio left the fast
+ * cores waiting at the barrier. That reason is gone: dynamic chunk 4 now only
+ * adds a dispatch fetch per four rows. Interleaved 3-rep A/B in both orders
+ * measured static at 0.945 s/token against dynamic's 0.9525, which is neutral
+ * inside the noise; static is kept because it is simpler, not faster.
  *
  * This cannot change a result: a row's dot product depends only on its own
  * columns, and the reduction inside the row is untouched. Only which thread
  * computes which row changes, and rows do not interact. */
+/* One FP8 GEMV body, emitted for the scalar and AVX2 variants. Kept apart from
+ * GEN_MATMULS so the kernel is the SAME body with a different loader, not a
+ * second implementation that could drift. */
+#define GEN_FP8_BODY(NAME, DOT)                                                \
+void NAME(float *y, const float *x, const uint8_t *W,                          \
+                          const uint8_t *S, int in, int out,                   \
+                          int blk_r, int blk_c)                                \
+{                                                                              \
+    const int sc = (in + blk_c - 1) / blk_c;                                   \
+    double *xd = widen_x(x, in);                                               \
+    if (!xd) return;                                                           \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
+    for (int o = 0; o < out; o++) {                                            \
+        const uint8_t *rw = W + (size_t)o * in;                                \
+        double total = 0.0;                                                    \
+        for (int c0 = 0; c0 < in; c0 += blk_c) {                               \
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;               \
+            const uint8_t *wb  = rw + c0;                                      \
+            const float   *xb  = x + c0;                                       \
+            const double  *xdb = xd + c0; (void)xdb;                           \
+            double acc;                                                        \
+            DOT(LOAD1_FP8);                                                    \
+            /* One multiply per block, as kernel.py does -- not per element. */\
+            total += acc * (double)dsv4_e8m0_to_f32(                           \
+                        S[(o / blk_r) * (size_t)sc + (c0 / blk_c)]);           \
+        }                                                                      \
+        y[o] = (float)total;                                                   \
+    }                                                                          \
+    free(xd);                                                                  \
+}
+
 #define GEN_MATMULS(SUF, DOT, DOT4)                                            \
                                                                                \
 void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
@@ -332,7 +370,7 @@ void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
 {                                                                              \
     double *xd = widen_x(x, in);                                               \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
     for (int o = 0; o < out; o++) {                                            \
         const uint16_t *row = W + (size_t)o * in;                              \
         const float  *xb  = x;                                                 \
@@ -345,33 +383,6 @@ void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
     free(xd);                                                                  \
 }                                                                              \
                                                                                \
-void dsv4_matmul_fp8##SUF(float *y, const float *x, const uint8_t *W,          \
-                          const uint8_t *S, int in, int out,                   \
-                          int blk_r, int blk_c)                                \
-{                                                                              \
-    const int sc = (in + blk_c - 1) / blk_c;                                   \
-    double *xd = widen_x(x, in);                                               \
-    if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
-    for (int o = 0; o < out; o++) {                                            \
-        const uint8_t *rw = W + (size_t)o * in;                                \
-        double total = 0.0;                                                    \
-        for (int c0 = 0; c0 < in; c0 += blk_c) {                               \
-            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;               \
-            const uint8_t *wb  = rw + c0;                                      \
-            const float   *xb  = x + c0;                                       \
-            const double  *xdb = xd + c0; (void)xdb;                           \
-            double acc;                                                        \
-            DOT(LOAD1_FP8, LOAD4_FP8);                                         \
-            /* One multiply per block, as kernel.py does -- not per element. */\
-            total += acc * (double)dsv4_e8m0_to_f32(                           \
-                        S[(o / blk_r) * (size_t)sc + (c0 / blk_c)]);           \
-        }                                                                      \
-        y[o] = (float)total;                                                   \
-    }                                                                          \
-    free(xd);                                                                  \
-}                                                                              \
-                                                                               \
 void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
                           const uint8_t *S, int in, int out,                   \
                           int blk_r, int blk_c)                                \
@@ -379,7 +390,7 @@ void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
     const int sc = (in + blk_c - 1) / blk_c;                                   \
     double *xd = widen_x(x, in);                                               \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
     for (int o = 0; o < out; o++) {                                            \
         /* Stored row is in/2 bytes wide. Getting this stride wrong reads half  \
          * a row of the wrong values and still produces finite numbers. */     \
@@ -401,9 +412,11 @@ void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
 
 
 GEN_MATMULS(_scalar, BLOCK_DOT_S2, BLOCK_DOT_S2)
+GEN_FP8_BODY(dsv4_matmul_fp8_scalar, BLOCK_DOT_S2)
 
 #if defined(__AVX2__) && defined(__FMA__)
 GEN_MATMULS(_avx2, BLOCK_DOT_V, BLOCK_DOT_V_FP4)
+GEN_FP8_BODY(dsv4_matmul_fp8_avx2, BLOCK_DOT_FP8)
 #define PICK(name) name##_avx2
 int dsv4_matmul_has_avx2(void) { return 1; }
 #else

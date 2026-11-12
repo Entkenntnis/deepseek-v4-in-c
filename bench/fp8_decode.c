@@ -294,31 +294,71 @@ int main(int argc, char **argv)
 
         printf("%s\n", job[j].name);
         printf("  %-8s %9s %9s %9s %8s\n",
-               "variant", "ms", "GF/s", "GB/s", "bitwise");
-        double tbit = 0.0, tgather = 0.0, tlut = 0.0;
-        for (unsigned v = 0; v < sizeof var / sizeof var[0]; v++) {
-            if (only && strcmp(only, var[v].name)) continue;
-            double best = 1e30;
-            for (int r = 0; r < reps; r++) {
-                double t0 = now();
+               "variant", "best ms", "med ms", "med GF/s", "bitwise");
+        /* INTERLEAVED per repetition, not one variant at a time.
+         *
+         * The old loop ran all reps of `bit`, then all of `lut4`, then all of
+         * `gather8`. On this laptop the machine cools and throttles within a
+         * single shape, so the variant measured last was systematically the
+         * warmest one. One call of each variant per round makes thermal drift
+         * hit all of them equally, which is the only way a 5% difference here
+         * means anything. */
+        enum { MAXR = 200 };
+        if (reps > MAXR) reps = MAXR;
+        if (reps < 1) reps = 1;
+        const int nv = (int)(sizeof var / sizeof var[0]);
+        double t[3][MAXR];
+        memset(t, 0, sizeof t);
+        for (int v = 0; v < nv; v++)
+            var[v].fn(y, x, W, S, in, out, job[j].br, job[j].bc);  /* warm-up */
+        for (int r = 0; r < reps; r++) {
+            for (int v = 0; v < nv; v++) {
+                if (only && strcmp(only, var[v].name)) continue;
+                const double t0 = now();
                 var[v].fn(y, x, W, S, in, out, job[j].br, job[j].bc);
-                double t1 = now();
-                if (t1 - t0 < best) best = t1 - t0;
+                const double t1 = now();
+                t[v][r] = t1 - t0;
             }
-            int same = memcmp(yr, y, (size_t)out * sizeof *yr) == 0;
-            double flop = 2.0 * (double)in * (double)out;
-            double bytes = (double)in * (double)out;
-            printf("  %-8s %9.3f %9.1f %9.1f %8s\n",
-                   var[v].name, best * 1e3, flop / best * 1e-9,
-                   bytes / best * 1e-9, same ? "yes" : "NO");
-            if (!strcmp(var[v].name, "bit"))    tbit = best;
-            if (!strcmp(var[v].name, "lut4"))   tlut = best;
-            if (!strcmp(var[v].name, "gather8")) tgather = best;
+        }
+
+        double best[3] = {0}, med[3] = {0};
+        int    same_v[3] = {0};
+        double tbit = 0.0, tgather = 0.0, tlut = 0.0;
+        const double flop  = 2.0 * (double)in * (double)out;
+        const double bytes = (double)in * (double)out;
+        for (int v = 0; v < nv; v++) {
+            if (only && strcmp(only, var[v].name)) continue;
+            var[v].fn(y, x, W, S, in, out, job[j].br, job[j].bc);
+            same_v[v] = memcmp(yr, y, (size_t)out * sizeof *yr) == 0;
+            double a[MAXR];
+            int n = 0;
+            for (int r = 0; r < reps; r++) if (t[v][r] > 0.0) a[n++] = t[v][r];
+            if (n == 0) continue;
+            for (int i = 1; i < n; i++) {              /* n <= 200: insertion */
+                const double k = a[i];
+                int q = i - 1;
+                while (q >= 0 && a[q] > k) { a[q + 1] = a[q]; q--; }
+                a[q + 1] = k;
+            }
+            best[v] = a[0];
+            med[v]  = (n & 1) ? a[n / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
+            printf("  %-8s %9.3f %9.3f %9.1f %8s\n",
+                   var[v].name, best[v] * 1e3, med[v] * 1e3,
+                   flop / med[v] * 1e-9, same_v[v] ? "yes" : "NO");
+            (void)bytes;
+        }
+        for (int v = 0; v < nv; v++) {
+            if (!strcmp(var[v].name, "bit"))    tbit = med[v];
+            if (!strcmp(var[v].name, "lut4"))   tlut = med[v];
+            if (!strcmp(var[v].name, "gather8")) tgather = med[v];
         }
         if (tbit > 0.0) {
             if (tlut > 0.0)    printf("  lut4    vs bit: %.2fx\n", tbit / tlut);
             if (tgather > 0.0) printf("  gather8 vs bit: %.2fx\n", tbit / tgather);
         }
+        if (tlut > 0.0 && tgather > 0.0)
+            printf("  gather8 vs lut4: %.2fx %s\n", tlut / tgather,
+                   tgather < tlut ? "(gather wins)" : "(lut wins)");
         free(x); free(yr); free(y); free(W); free(S);
     }
     return bad ? 1 : 0;

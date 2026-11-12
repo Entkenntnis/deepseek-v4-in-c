@@ -22,11 +22,13 @@ tokens actually decoded:
 Prefill is deliberately **not** measured. It is a different question (disk
 layout, prompt length) and mixing the two hides changes in both.
 
-**Current baseline (2026-11-12, after the thread-policy change): 1.04 s/token
-decode, 1.9% spread over 3 runs.** The same build with the previous default
-(8 threads, no affinity) measured 1.18–1.24; the fix and its measurement are in
-[Thread policy](#thread-policy-4-p-cores-beat-all-8--2026-11-12). Earlier numbers
-are kept in the change history so the deltas can be checked.
+**Current baseline (2026-11-12, after the thread-policy and gather8 changes):
+0.965 s/token decode, 2.6% spread over 3 runs.** Same build with the previous
+FP8 decoder (four scalar loads) at the same thread policy measured 1.035; with
+the old 8-thread/no-affinity default it was 1.18–1.24. The measurements are in
+[Thread policy](#thread-policy-4-p-cores-beat-all-8--2026-11-12) and
+[FP8 gather8](#p-core-fp8-decode-gather8-is-now-the-default--2026-11-12).
+Earlier numbers are kept in the change history so the deltas can be checked.
 
 ## How to run
 
@@ -150,9 +152,34 @@ That was the state before the FP8 table change below; the current figure is
 **Verified:** generated ids identical to the pre-change baseline in all runs;
 `bin/test_matmul` passes including the 1-vs-8-thread bit-identity gate.
 
+### 2026-11-12 — static scheduling after P-core pinning
+
+**Change:** `schedule(dynamic, 4)` → `schedule(static)` in the matmul loops.
+
+**Why:** the dynamic schedule existed for a 4P+4E compute team, where equal row
+counts left the P-cores waiting on the E-cores. The default is now four compute
+threads pinned to the four identical P-cores, so there is nothing to balance,
+and dynamic only adds a dispatch fetch per four rows.
+
+**Measured** with two binaries interleaved over two 3-rep rounds in opposite
+order, budget 16, gen 20, identical ids:
+
+| arm | runs (decode s/token) | median |
+|---|---|---:|
+| dynamic, chunk 4 | 0.955 / 0.995 / 0.950 / 0.940 / 0.945 / 0.955 | 0.9525 |
+| **static** | 0.945 / 0.950 / 0.930 / 0.935 / 0.945 / 0.945 | **0.945** |
+
+That is −0.8%, inside the run-to-run noise. The honest conclusion is that
+removing dynamic is **neutral** in the pinned configuration, not a speedup; it
+is kept for the simplification and because the reason dynamic existed is gone.
+
+**Verified:** generated ids identical across both arms and all runs;
+`bin/test_matmul` passes.
+
 ### 2026-11-12 — FP8 decode from a 256-entry table
 
-**Change:** `load4_fp8()` in `src/core/dsv4_matmul.c` now decodes E4M3 through a
+**Change:** the then-current four-load AVX2 FP8 decoder in
+`src/core/dsv4_matmul.c` now decodes E4M3 through a
 1 KB table of exact f32 bit patterns instead of inlining the branchy
 `dsv4_e4m3_to_f32()` bit-twiddle. The table was generated from that function;
 the scalar path still uses the bit-twiddle, so `test_matmul`'s AVX2-vs-scalar
@@ -255,6 +282,42 @@ hardcoded for the Core Ultra 7 258V (`DSV4_P_LO..DSV4_E_HI` in
 `src/core/dsv4_threads.c`, commented); on other CPUs pass `--pin off` or
 `--pin all`. `--threads 4 --pin off` recovers most of the win (1.040) if
 affinity is undesirable.
+
+## P-core FP8 decode: gather8 is now the default — 2026-11-12
+
+The 8-wide `vpgatherdd` decoder had been rejected for a good reason: Skymont's
+gather is microcoded, so it was ~2x slower than four scalar loads there. That
+reason stopped applying when the compute team moved to the four P-cores. On
+Lion Cove the same path is faster on every shape this model uses.
+
+`bench/fp8_decode.c` now interleaves the variants per repetition instead of
+measuring all of one and then all of the next -- the old order made the last
+variant the warmest one. Pinned to CPU 0–3, `OMP_NUM_THREADS=4`, 20 reps, two
+runs, median GF/s:
+
+| FP8 shape | lut4 | gather8 | ratio |
+|---|---:|---:|---:|
+| attn wq_a 1024×4096 | 30.9 | 39.6 | **1.28x** |
+| shared w1 2048×4096 | 34.8 | 42.8 | **1.23x** |
+| attn wo_b 4096×8192 | 31.1 | 39.2 | **1.26x** |
+| attn wq_b 32768×1024 | 29.4 | 35.4 | **1.20x** |
+
+Every variant is bitwise identical to the scalar reference (`test_matmul`
+checks the gather path against it too). Whole-model A/B on the p4r6 thread
+policy, three interleaved pairs, identical token ids:
+
+| arm | runs | median |
+|---|---|---:|
+| four scalar loads | 1.035 / 1.025 / 1.055 | 1.035 |
+| **gather8** | 0.940 / 0.950 / 0.960 | **0.950** |
+
+Components: attention 7.5–7.7 → 6.3–6.5 s, shared expert 1.5–1.6 → 1.3 s;
+routed FP4 is untouched, as it should be. That is **−8.2%** wall clock on top of
+the thread-policy change. A final default 3-rep run measured 0.945 / 0.965 /
+0.970 (median 0.965).
+
+Gather8 is now the only FP8 decoder; the four-load path and its environment
+override have been removed.
 
 ## Measurement rules this machine earned
 
