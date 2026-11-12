@@ -51,6 +51,7 @@
 
 #include "dsv4_cfg.h"
 #include "dsv4_bind.h"
+#include "dsv4_mem.h"
 #include "dsv4_trunk.h"
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
@@ -468,8 +469,9 @@ static int run_end_experts(void *ctx, const DSV4ExpertW **out)
 }
 
 static int engine_init(Engine *e, const char *model, const char *trunkdir,
-                       const char *tokfile, double budget_gb, int ctx,
-                       int gen_default, int think_default, int layers_default)
+                       const char *tokfile, double budget_gb, int budget_auto,
+                       int ctx, int gen_default, int think_default,
+                       int layers_default)
 {
     memset(e, 0, sizeof *e);
     e->model_dir = model;
@@ -508,11 +510,47 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
         return -1;
     }
 
-    const int64_t budget = (int64_t)(budget_gb * 1073741824.0);
+    int64_t budget = (int64_t)(budget_gb * 1073741824.0);
+    if (budget_auto) {
+        const int64_t avail = dsv4_mem_available_bytes();
+        const int64_t model_bytes = dsv4_bind_model_bytes(&e->st, &e->c, 1);
+        const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
+        /* Scratch, KV state, rope tables, tokenizer and allocator overhead.
+         * The budget does not cover these; measured at about 0.34 GiB on
+         * Flash. Keep half a gigabyte so the 1 GiB above is actually spare. */
+        const int64_t runtime = (int64_t)512 << 20;
+        if (avail <= 0) {
+            fprintf(stderr, "--budget auto: cannot read available memory; "
+                            "pass an explicit --budget GB\n");
+            return -1;
+        }
+        if (model_bytes < 0) {
+            fprintf(stderr, "--budget auto: cannot size the model's embed/head "
+                            "weights; pass an explicit --budget GB\n");
+            return -1;
+        }
+        budget = avail - reserve - model_bytes - runtime;
+        if (budget <= 0) {
+            fprintf(stderr, "--budget auto: %.2f GiB available, %.2f GiB model, "
+                            "%.2f GiB reserve + runtime leaves nothing\n",
+                    (double)avail / 1073741824.0,
+                    (double)model_bytes / 1073741824.0,
+                    (double)(reserve + runtime) / 1073741824.0);
+            return -1;
+        }
+        fprintf(stderr, "--budget auto: %.2f GiB available - %.2f GiB model - "
+                        "%.2f GiB reserve - %.2f GiB runtime = %.2f GiB budget\n",
+                (double)avail / 1073741824.0, (double)model_bytes / 1073741824.0,
+                (double)reserve / 1073741824.0,
+                (double)runtime / 1073741824.0,
+                (double)budget / 1073741824.0);
+    }
+
     const int64_t efloor = (int64_t)e->c.topk * dsv4_cache_slot_bytes(&e->c);
     if (budget <= efloor) {
-        fprintf(stderr, "--budget %.1f GB cannot work: one layer's %d experts "
-                        "alone need %.2f GB\n", budget_gb, e->c.topk,
+        fprintf(stderr, "--budget %.2f GB cannot work: one layer's %d experts "
+                        "alone need %.2f GB\n",
+                (double)budget / 1073741824.0, e->c.topk,
                 (double)efloor / 1073741824.0);
         return -1;
     }
@@ -852,7 +890,7 @@ static void usage(const char *me)
 {
     fprintf(stderr,
             "usage: %s <model_dir> --trunk <dir> --tok <file> "
-            "[--budget GB] [--ctx N] [--gen N] [--think] [--no-layers]\n"
+            "[--budget GB|auto] [--ctx N] [--gen N] [--think] [--no-layers]\n"
             "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
             "       [--reader-pin off|all|p|e]\n"
             "\n"
@@ -864,6 +902,7 @@ int main(int argc, char **argv)
 {
     const char *model = NULL, *trunkdir = NULL, *tokfile = NULL;
     double budget_gb = 8.0;
+    int budget_auto = 0;
     int ctx = 8192, ngen = 128, think = 0, layers = 1;
     const char *pin = "p", *reader_pin = "off";
     int threads = 4, readers = 6;
@@ -873,7 +912,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunkdir = argv[++i];
         else if (!strcmp(argv[i], "--tok") && i + 1 < argc) tokfile = argv[++i];
-        else if (!strcmp(argv[i], "--budget") && i + 1 < argc) budget_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--budget") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "auto")) budget_auto = 1;
+            else { budget_auto = 0; budget_gb = atof(v); }
+        }
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) ngen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
@@ -909,7 +952,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
 
     Engine e;
-    if (engine_init(&e, model, trunkdir, tokfile, budget_gb, ctx,
+    if (engine_init(&e, model, trunkdir, tokfile, budget_gb, budget_auto, ctx,
                     ngen, think, layers) != 0) {
         emit_error("engine init failed (see stderr for the loader's message)");
         engine_free(&e);

@@ -130,7 +130,7 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--tok FILE` | packed tokenizer from `pack_tokenizer.py` |
 | `--prompt TEXT` | prompt |
 | `--gen N` | how many tokens to generate |
-| `--budget GB` | total RAM for trunk + expert cache (default 8) |
+| `--budget GB\|auto` | total RAM for trunk + expert cache (default 8); `auto` uses available memory |
 | `--threads N` | OpenMP compute threads (default 4 on this 4P+4E CPU) |
 | `--pin p\|e\|all\|off` | compute affinity (default `p` = P-cores 0–3) |
 | `--readers N` | expert-reader threads, independent of compute (default 6) |
@@ -204,6 +204,19 @@ The budget covers the trunk *and* the cache. Flash's trunk is 6.27 GB, so:
 | **16 GB** | 9.6 GB | **53%** | 61 GB |
 
 The engine prints a warning naming the threshold when you are under it.
+
+`--budget auto` reads the kernel's `MemAvailable`, subtracts the model's
+embed/head weights (they are bound outside the budget), a 1 GiB reserve and
+0.5 GiB for runtime scratch, and uses the rest. It prints the arithmetic at
+startup, for example:
+
+```
+--budget auto: 21.13 GiB available - 1.97 GiB model - 1.00 GiB reserve - 0.50 GiB runtime = 17.66 GiB budget
+```
+
+The value is a snapshot: another process can take memory afterwards, and the
+reserve is what keeps that from turning into an OOM kill. `auto` is a
+convenience, not a reservation.
 
 ## Chat and code
 

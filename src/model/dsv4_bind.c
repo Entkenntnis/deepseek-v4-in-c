@@ -327,6 +327,14 @@ int64_t dsv4_bind_layer_bytes(const DSV4St *s, const DSV4Cfg *c, int L)
     return plan_resolve(&p, s);
 }
 
+int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head)
+{
+    Plan p; memset(&p, 0, sizeof p);
+    DSV4ModelW tmp;
+    plan_model(&p, c, want_head, &tmp);
+    return plan_resolve(&p, s);
+}
+
 int dsv4_bind_layer(const DSV4St *s, const DSV4Cfg *c, int L, DSV4LayerBind *b)
 {
     memset(b, 0, sizeof *b);

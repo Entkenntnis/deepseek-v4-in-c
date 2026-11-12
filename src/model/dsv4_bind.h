@@ -76,6 +76,11 @@ int  dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
                      DSV4ModelBind *m);
 void dsv4_bind_model_free(DSV4ModelBind *m);
 
+/* Bytes dsv4_bind_model() will allocate, without reading any. The budget
+ * planner needs this because `--budget` covers the trunk and expert cache but
+ * NOT embed/head; `auto` has to subtract them before it can promise a spare. */
+int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head);
+
 /* ---- binding from a memory buffer, for the streaming trunk ----------------
  *
  * The trunk holds a layer's tensors as a verbatim copy of their bytes in

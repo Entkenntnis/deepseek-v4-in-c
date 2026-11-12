@@ -26,6 +26,7 @@
 
 #include "dsv4_cfg.h"
 #include "dsv4_bind.h"
+#include "dsv4_mem.h"
 #include "dsv4_trunk.h"
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
@@ -116,7 +117,7 @@ static void hc_head(float *y, const float *x, const DSV4HcW *w,
 static void usage(const char *me)
 {
     printf("usage: %s <model_dir | --model DIR> --trunk <dir> --tok <file> "
-           "[--prompt TEXT] [--gen N] [--budget GB] [--route-log FILE]\n"
+           "[--prompt TEXT] [--gen N] [--budget GB|auto] [--route-log FILE]\n"
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
            "       [--reader-pin off|all|p|e]\n", me);
@@ -131,6 +132,7 @@ int main(int argc, char **argv)
     const char *prompt = "The capital of France is";
     int ngen = 8;
     double budget_gb = 8.0;
+    int budget_auto = 0;
     const char *pin = "p", *reader_pin = "off";
     int threads = 4, readers = 6;
 
@@ -145,7 +147,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--tok")   && i + 1 < argc) tokfile = argv[++i];
         else if (!strcmp(argv[i], "--prompt")&& i + 1 < argc) prompt  = argv[++i];
         else if (!strcmp(argv[i], "--gen")   && i + 1 < argc) ngen    = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--budget")&& i + 1 < argc) budget_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--budget")&& i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "auto")) budget_auto = 1;
+            else { budget_auto = 0; budget_gb = atof(v); }
+        }
         else if (!strcmp(argv[i], "--route-log") && i + 1 < argc) routelog = argv[++i];
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
@@ -191,7 +197,53 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    const int64_t budget = (int64_t)(budget_gb * 1073741824.0);
+    int64_t budget = (int64_t)(budget_gb * 1073741824.0);
+
+    /* `--budget auto`: take what the kernel says is available, keep 1 GiB for
+     * the machine, and subtract the model-level weights.
+     *
+     * The last subtraction is the non-obvious one. `--budget` is the trunk plus
+     * the expert cache; embed and head are bound separately by dsv4_bind_model
+     * and are NOT part of it (about 1.97 GiB on Flash). Setting budget to
+     * MemAvailable - 1 GiB without removing them would put peak RSS about a
+     * gigabyte ABOVE what was available, which is how an "auto" that looks
+     * generous becomes an OOM kill. Ask the binder for the exact blob size
+     * rather than hardcoding 2x vocab x hidden: the checkpoint decides it. */
+    if (budget_auto) {
+        const int64_t avail = dsv4_mem_available_bytes();
+        const int64_t model_bytes = dsv4_bind_model_bytes(&st, &c, 1);
+        const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
+        /* Scratch, KV state, rope tables, tokenizer and allocator overhead.
+         * The budget does not cover these; measured at about 0.34 GiB on
+         * Flash. Keep half a gigabyte so the 1 GiB above is actually spare. */
+        const int64_t runtime = (int64_t)512 << 20;
+        if (avail <= 0) {
+            fprintf(stderr, "--budget auto: cannot read available memory; "
+                            "pass an explicit --budget GB\n");
+            return 1;
+        }
+        if (model_bytes < 0) {
+            fprintf(stderr, "--budget auto: cannot size the model's embed/head "
+                            "weights; pass an explicit --budget GB\n");
+            return 1;
+        }
+        budget = avail - reserve - model_bytes - runtime;
+        if (budget <= 0) {
+            fprintf(stderr, "--budget auto: %.2f GiB available, %.2f GiB model, "
+                            "%.2f GiB reserve + runtime leaves nothing\n",
+                    (double)avail / 1073741824.0,
+                    (double)model_bytes / 1073741824.0,
+                    (double)(reserve + runtime) / 1073741824.0);
+            return 1;
+        }
+        fprintf(stderr, "--budget auto: %.2f GiB available - %.2f GiB model - "
+                        "%.2f GiB reserve - %.2f GiB runtime = %.2f GiB budget\n",
+                (double)avail / 1073741824.0, (double)model_bytes / 1073741824.0,
+                (double)reserve / 1073741824.0,
+                (double)runtime / 1073741824.0,
+                (double)budget / 1073741824.0);
+    }
+
     /* SPLIT THE BUDGET BY WHAT EACH PART CAN USE, NOT BY A FIXED RATIO.
      *
      * This used to hand the trunk 3/4 and the cache 1/4, reasoning that a
@@ -218,9 +270,10 @@ int main(int argc, char **argv)
      * buffer -- but the hard minimum is what is enforced here. */
     const int64_t efloor = (int64_t)c.topk * dsv4_cache_slot_bytes(&c);
     if (budget <= efloor) {
-        fprintf(stderr, "--budget %.1f GB cannot work: one layer's %d experts "
+        fprintf(stderr, "--budget %.2f GB cannot work: one layer's %d experts "
                         "alone need %.2f GB,\n  and the trunk needs room too.\n",
-                budget_gb, c.topk, (double)efloor / 1073741824.0);
+                (double)budget / 1073741824.0, c.topk,
+                (double)efloor / 1073741824.0);
         return 1;
     }
     DSV4Trunk tr;
