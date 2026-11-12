@@ -19,6 +19,7 @@ Usage:
     python3 tui/dsv4_tui.py                    # real model, defaults below
     python3 tui/dsv4_tui.py --demo             # no model needed
     python3 tui/dsv4_tui.py --model DIR --trunk DIR --tok FILE --budget 10
+    python3 tui/dsv4_tui.py --budget auto      # size the budget from free RAM
 
 Keys:
     Enter send, /help for commands, PgUp/PgDn scroll, Ctrl-C or /exit quits.
@@ -569,12 +570,14 @@ class App:
         if self.demo:
             self.backend = DemoBackend(self.sink)
         else:
+            budget = (self.args.budget if isinstance(self.args.budget, str)
+                      else f"{self.args.budget:.2f}")
             argv = [
                 str(self.args.binary),
                 str(self.args.model),
                 "--trunk", str(self.args.trunk),
                 "--tok", str(self.args.tok),
-                "--budget", f"{self.args.budget:.2f}",
+                "--budget", budget,
                 "--ctx", str(self.args.ctx),
                 "--gen", str(self.args.gen),
             ]
@@ -1505,6 +1508,20 @@ class App:
 
 # -------------------------------------------------------------------- main --
 
+def parse_budget(value: str) -> float | str:
+    """Accept a GB number or the literal 'auto' for the engine's own sizing."""
+    if value.strip().lower() == "auto":
+        return "auto"
+    try:
+        gb = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of GB or 'auto', got {value!r}") from None
+    if gb <= 0:
+        raise argparse.ArgumentTypeError("budget must be greater than 0 GB")
+    return gb
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Live TUI for deepseek-v4-in-c (streams tokens, timings, "
@@ -1517,8 +1534,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="packed tokenizer file (default: %(default)s)")
     p.add_argument("--binary", default=str(DEFAULT_BINARY),
                    help="dsv4-serve binary (default: %(default)s)")
-    p.add_argument("--budget", type=float, default=10.0,
-                   help="RAM budget in GB handed to trunk+cache (default: 10)")
+    p.add_argument("--budget", type=parse_budget, default=10.0,
+                   metavar="GB|auto",
+                   help="RAM budget in GB handed to trunk+cache, or 'auto' to "
+                        "size it from available memory (default: 10)")
     p.add_argument("--ctx", type=int, default=4096,
                    help="context capacity in tokens (default: 4096)")
     p.add_argument("--gen", type=int, default=256,

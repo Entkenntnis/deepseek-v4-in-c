@@ -92,7 +92,7 @@ The defaults match the development machine:
 | `--trunk` | `~/colibri-models/dsv4-trunk-flash` |
 | `--tok` | `~/colibri-models/dsv4-tok-flash.bin` |
 | `--binary` | `bin/dsv4-serve` (relative to this repo) |
-| `--budget` | `10.0` GB |
+| `--budget` | `10.0` GB (or `auto`) |
 | `--ctx` | `4096` tokens |
 | `--gen` | `256` tokens per turn |
 
@@ -101,7 +101,9 @@ experts; a budget below roughly 9.5 GB leaves the expert cache with fewer slots
 than a forward pass needs, so it misses on every request. At `--budget 10` the
 cache is a little above that working set. Raise it if you have the RAM; the TUI
 shows the hit rate directly, so the effect of the number is visible rather than
-theoretical.
+theoretical. `--budget auto` reads `MemAvailable` and subtracts the model's
+embed/head weights, a 1 GiB reserve and 0.5 GiB of runtime, which is the right
+choice on a machine whose free memory is not known in advance.
 
 `--ctx` sizes the per-layer KV state and the RoPE tables. 4096 is cheap on this
 model; raise it for longer conversations.
