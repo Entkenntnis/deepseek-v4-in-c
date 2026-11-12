@@ -578,6 +578,16 @@ class App:
                 "--ctx", str(self.args.ctx),
                 "--gen", str(self.args.gen),
             ]
+            # None means "let the engine use its default", so the TUI follows
+            # the same thread policy as bin/dsv4 without duplicating it here.
+            if self.args.threads is not None:
+                argv += ["--threads", str(self.args.threads)]
+            if self.args.pin is not None:
+                argv += ["--pin", self.args.pin]
+            if self.args.readers is not None:
+                argv += ["--readers", str(self.args.readers)]
+            if self.args.reader_pin is not None:
+                argv += ["--reader-pin", self.args.reader_pin]
             if self.args.think:
                 argv.append("--think")
             if self.args.no_layers:
@@ -1513,6 +1523,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="context capacity in tokens (default: 4096)")
     p.add_argument("--gen", type=int, default=256,
                    help="max tokens per turn (default: 256)")
+    p.add_argument("--threads", type=int, default=None,
+                   help="OpenMP compute threads; default: engine policy")
+    p.add_argument("--pin", choices=["off", "all", "p", "e"], default=None,
+                   help="compute affinity: off, all, P-cores (p) or E-cores (e); "
+                        "default: engine policy")
+    p.add_argument("--readers", type=int, default=None,
+                   help="expert-reader threads; default: engine policy (6)")
+    p.add_argument("--reader-pin", choices=["off", "all", "p", "e"],
+                   default=None,
+                   help="affinity for the expert-reader threads; default: engine")
     p.add_argument("--system", default="",
                    help="system prompt for a new context")
     p.add_argument("--think", action="store_true",

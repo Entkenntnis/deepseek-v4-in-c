@@ -22,9 +22,11 @@ tokens actually decoded:
 Prefill is deliberately **not** measured. It is a different question (disk
 layout, prompt length) and mixing the two hides changes in both.
 
-**Current baseline (2026-11-12, after both changes below): 1.210 s/token
-decode, 1.2% spread over 3 runs.** The earlier numbers are kept in the change
-history so the deltas can be checked.
+**Current baseline (2026-11-12, after the thread-policy change): 1.04 s/token
+decode, 1.9% spread over 3 runs.** The same build with the previous default
+(8 threads, no affinity) measured 1.18–1.24; the fix and its measurement are in
+[Thread policy](#thread-policy-4-p-cores-beat-all-8--2026-11-12). Earlier numbers
+are kept in the change history so the deltas can be checked.
 
 ## How to run
 
@@ -54,7 +56,11 @@ Useful options:
 | `--reps N` | repetitions; median is reported (default 3) |
 | `--gen N` | generated tokens (default 20) |
 | `--budget G` | expert-cache budget in GB (default 16) |
-| `--pin pcores` | `taskset -c 0-3` + `OMP_NUM_THREADS=4` |
+| `--pin pcores` | legacy alias for `--cpu-pin p --threads 4 --readers 4` |
+| `--cpu-pin X` | engine affinity: `off`, `p`, `e` or `all` |
+| `--threads N` | compute threads passed to the engine |
+| `--readers N` | expert-reader threads (independent of compute) |
+| `--reader-pin X` | affinity for the reader threads |
 | `--keep DIR` | keep raw logs |
 | `--json FILE` | write every parsed repetition |
 
@@ -201,6 +207,54 @@ The two medians differ by 2.1%, with identical ids and counters, so quote
 
 **Verified:** `bin/test_matmul` passes, including AVX2-vs-scalar bitwise
 equality and the 1-vs-8-thread gate.
+
+## Thread policy: 4 P-cores beat all 8 — 2026-11-12
+
+This machine is 4 P-cores (CPUs 0–3) + 4 LP E-cores (4–7), no SMT. The engine
+was measuring a **confound**: `--pin pcores` in the bench meant `taskset -c 0-3`
+**and** `OMP_NUM_THREADS=4`, and `OMP_NUM_THREADS` also sized the expert-reader
+pool (`nbounce = omp_get_max_threads()`), so it changed core selection, compute
+width and queue depth at once. The reader width is now independent
+(`max(compute threads, DSV4_READERS)`, default 6), and the engine pins itself.
+
+Matrix, `--budget 16`, `--gen 20`, one rep per cell, two rounds in opposite
+order. All cells produced **identical token ids**.
+
+| config | compute | affinity | readers | decode s/token |
+|---|---|---|---:|---|
+| base | 8 | off | 6 | 1.180 / 1.235 |
+| t4all | 4 | off | 6 | 1.040 / 1.040 |
+| p4r4 (old `--pin pcores`) | 4 | P 0–3 | 4 | 1.025 / 1.080 |
+| p8r6 | 8 | P 0–3 | 6 | 1.030 / 1.030 |
+| e4r4 | 4 | E 4–7 | 4 | 1.500 / 1.495 |
+| **p4r6** | **4** | **P 0–3** | **6** | **1.015 / 1.035** |
+| p4r6e (readers on E) | 4 | P 0–3 | 6 | 1.030 / 1.025 |
+
+Finalists, three interleaved reps:
+
+| config | runs | median |
+|---|---|---:|
+| **p4r6** | 1.025 / 1.015 / 1.025 | **1.025** |
+| p4r6e | 1.075 / 1.015 / 1.020 | 1.020 (one outlier) |
+| t4all | 1.040 / 1.050 / 1.035 | 1.040 |
+| p8r6 | 1.080 / 1.045 / 1.045 | 1.045 |
+
+Components explain it. Going from the 8-thread default to p4r6: routed-expert
+matmul 11.1–11.7 → 8.4–8.5 s (−25%), mHC 1.6 → 0.9 s (−44%), shared expert
+1.8 → 1.5 s, attention 7.5–7.8 → 7.4–7.5 s (flat), trunk I/O unchanged. E-cores
+are 2.4x slower at the FP4 kernel and worse at the FP64 mHC dots; FP8 attention
+barely notices losing them. Pinning the readers to the E-cores (p4r6e) buys
+nothing measurable — the drive, not the reader CPU, is the limit.
+
+Isolating the reader pool matters: p4r6 (6 readers) is consistently at or below
+p4r4 (4 readers, the old alias), and the old 1.080 outlier in p4r4 is exactly
+the kind of variance the confound introduced.
+
+**Default is now `--threads 4 --pin p --readers 6`.** The P-core group is
+hardcoded for the Core Ultra 7 258V (`DSV4_P_LO..DSV4_E_HI` in
+`src/core/dsv4_threads.c`, commented); on other CPUs pass `--pin off` or
+`--pin all`. `--threads 4 --pin off` recovers most of the win (1.040) if
+affinity is undesirable.
 
 ## Measurement rules this machine earned
 

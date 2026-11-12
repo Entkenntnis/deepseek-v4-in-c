@@ -93,15 +93,15 @@ $(BIN)/test_indexer: tests/unit/test_indexer.c src/core/dsv4_indexer.c include/d
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_indexer.c src/core/dsv4_indexer.c -o $@ $(LDFLAGS)
 
-DSV4_CORE := src/core/dsv4_ops.c src/core/dsv4_matmul.c src/core/dsv4_hc.c              src/core/dsv4_rope.c src/core/dsv4_attn.c              src/core/dsv4_compress.c src/core/dsv4_indexer.c
+DSV4_CORE := src/core/dsv4_ops.c src/core/dsv4_matmul.c src/core/dsv4_hc.c              src/core/dsv4_rope.c src/core/dsv4_attn.c              src/core/dsv4_compress.c src/core/dsv4_indexer.c              src/core/dsv4_threads.c
 
 $(BIN)/test_layer: tests/unit/test_layer.c src/model/dsv4_layer.c $(DSV4_CORE)                    src/model/dsv4_layer.h include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_layer.c src/model/dsv4_layer.c 	      $(DSV4_CORE) -o $@ $(LDFLAGS)
 
-$(BIN)/test_cache: tests/unit/test_cache.c src/cache/dsv4_cache.c src/io/dsv4_st.c                    src/cache/dsv4_cache.h include/dsv4/dsv4.h
+$(BIN)/test_cache: tests/unit/test_cache.c src/cache/dsv4_cache.c src/io/dsv4_st.c                    src/core/dsv4_threads.c src/cache/dsv4_cache.h include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) -Isrc/cache tests/unit/test_cache.c 	      src/cache/dsv4_cache.c src/io/dsv4_st.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) -Isrc/cache tests/unit/test_cache.c 	      src/cache/dsv4_cache.c src/io/dsv4_st.c src/core/dsv4_threads.c -o $@ $(LDFLAGS)
 
 $(BIN)/test_bindmem: tests/unit/test_bindmem.c src/model/dsv4_bind.c src/io/dsv4_st.c                      src/model/dsv4_bind.h include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
@@ -204,9 +204,9 @@ $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
 
-$(BIN)/cache_bw: bench/cache_bw.c src/cache/dsv4_cache.c src/io/dsv4_st.c
+$(BIN)/cache_bw: bench/cache_bw.c src/cache/dsv4_cache.c src/io/dsv4_st.c src/core/dsv4_threads.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/cache_bw.c src/cache/dsv4_cache.c 	      src/io/dsv4_st.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) bench/cache_bw.c src/cache/dsv4_cache.c 	      src/io/dsv4_st.c src/core/dsv4_threads.c -o $@ $(LDFLAGS)
 
 $(BIN)/fp8_decode: bench/fp8_decode.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)

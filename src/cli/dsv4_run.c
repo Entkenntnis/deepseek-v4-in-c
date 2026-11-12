@@ -30,6 +30,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
 #include "dsv4_tok.h"
+#include "dsv4_threads.h"
 
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
 void dsv4_mmq(float *, const float *, const DSV4QMat *);
@@ -116,7 +117,9 @@ static void usage(const char *me)
 {
     printf("usage: %s <model_dir | --model DIR> --trunk <dir> --tok <file> "
            "[--prompt TEXT] [--gen N] [--budget GB] [--route-log FILE]\n"
-           "       [--chat] [--think] [--system TEXT]\n", me);
+           "       [--chat] [--think] [--system TEXT]\n"
+           "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
+           "       [--reader-pin off|all|p|e]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -128,6 +131,8 @@ int main(int argc, char **argv)
     const char *prompt = "The capital of France is";
     int ngen = 8;
     double budget_gb = 8.0;
+    const char *pin = "p", *reader_pin = "off";
+    int threads = 4, readers = 6;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -142,12 +147,32 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--gen")   && i + 1 < argc) ngen    = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--budget")&& i + 1 < argc) budget_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--route-log") && i + 1 < argc) routelog = argv[++i];
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
+        else if (!strcmp(argv[i], "--readers") && i + 1 < argc) readers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc) reader_pin = argv[++i];
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
         else if (!strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
     }
     if (!model || !trunkdir || !tokfile) { usage(argv[0]); return 2; }
+
+    /* Thread policy first: no OpenMP region has run yet, and the expert cache
+     * creates its reader pthreads later, so both inherit what this sets. */
+    const int pin_id = dsv4_threads_parse_pin(pin);
+    const int rpin_id = dsv4_threads_parse_pin(reader_pin);
+    if (pin_id < 0 || rpin_id < 0) {
+        fprintf(stderr, "invalid --pin/--reader-pin (use off|all|p|e)\n");
+        return 2;
+    }
+    if (readers > 0) {
+        char rb[16];
+        snprintf(rb, sizeof rb, "%d", readers);
+        setenv("DSV4_READERS", rb, 1);
+    }
+    const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
+    dsv4_threads_apply(&topts);
 
     char path[1024];
     DSV4Cfg c;

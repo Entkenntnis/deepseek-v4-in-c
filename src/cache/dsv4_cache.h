@@ -92,7 +92,8 @@ typedef struct {
      * ONE PER THREAD. Expert loads within a layer ARE issued concurrently --
      * see dsv4_cache_get_many -- so a single shared staging buffer would have
      * every reader scribbling over the others. nbounce is fixed at cache
-     * construction from the OpenMP thread count. */
+     * construction at max(compute threads, DSV4_READERS), so a narrow compute
+     * team does not silently narrow the reader pool. */
     unsigned char **bounce;
     int             nbounce;
     int64_t         bounce_cap;

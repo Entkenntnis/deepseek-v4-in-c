@@ -131,6 +131,10 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--prompt TEXT` | prompt |
 | `--gen N` | how many tokens to generate |
 | `--budget GB` | total RAM for trunk + expert cache (default 8) |
+| `--threads N` | OpenMP compute threads (default 4 on this 4P+4E CPU) |
+| `--pin p\|e\|all\|off` | compute affinity (default `p` = P-cores 0–3) |
+| `--readers N` | expert-reader threads, independent of compute (default 6) |
+| `--reader-pin p\|e\|all\|off` | affinity for the reader threads |
 | `--gpu` | put the dense trunk's FP8 matrices in VRAM (opt-in) |
 | `--route-log FILE` | record every expert request, for `tools/sim_cache.py` |
 

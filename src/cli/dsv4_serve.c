@@ -55,6 +55,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
 #include "dsv4_tok.h"
+#include "dsv4_threads.h"
 #include "json.h"
 
 /* Kernel entry points that intentionally live outside a public header. */
@@ -297,6 +298,8 @@ static void emit_ready(const Engine *e, const char *event)
 {
     printf("{\"event\":\"%s\",\"model\":", event);
     json_escape(e->model_dir);
+    printf(",\"threads\":");
+    json_escape(dsv4_threads_desc());
     printf(",\"config\":{\"hidden\":%d,\"layers\":%d,\"vocab\":%d,"
            "\"heads\":%d,\"head_dim\":%d,\"experts\":%d,\"topk\":%d,"
            "\"moe_inter\":%d,\"sliding_window\":%d,\"index_topk\":%d,"
@@ -850,6 +853,8 @@ static void usage(const char *me)
     fprintf(stderr,
             "usage: %s <model_dir> --trunk <dir> --tok <file> "
             "[--budget GB] [--ctx N] [--gen N] [--think] [--no-layers]\n"
+            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
+            "       [--reader-pin off|all|p|e]\n"
             "\n"
             "Speaks JSON lines on stdin/stdout. Start it from the TUI:\n"
             "  python3 tui/dsv4_tui.py\n", me);
@@ -860,6 +865,8 @@ int main(int argc, char **argv)
     const char *model = NULL, *trunkdir = NULL, *tokfile = NULL;
     double budget_gb = 8.0;
     int ctx = 8192, ngen = 128, think = 0, layers = 1;
+    const char *pin = "p", *reader_pin = "off";
+    int threads = 4, readers = 6;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model) { model = argv[i]; continue; }
@@ -869,11 +876,31 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--budget") && i + 1 < argc) budget_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) ngen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
+        else if (!strcmp(argv[i], "--readers") && i + 1 < argc) readers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc) reader_pin = argv[++i];
         else if (!strcmp(argv[i], "--think")) think = 1;
         else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
     }
     if (!model || !trunkdir || !tokfile) { usage(argv[0]); return 2; }
+
+    /* Thread policy before engine_init(): that is where the expert cache
+     * creates its reader pthreads, and they inherit the calling thread's mask. */
+    const int pin_id = dsv4_threads_parse_pin(pin);
+    const int rpin_id = dsv4_threads_parse_pin(reader_pin);
+    if (pin_id < 0 || rpin_id < 0) {
+        fprintf(stderr, "invalid --pin/--reader-pin (use off|all|p|e)\n");
+        return 2;
+    }
+    if (readers > 0) {
+        char rb[16];
+        snprintf(rb, sizeof rb, "%d", readers);
+        setenv("DSV4_READERS", rb, 1);
+    }
+    const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
+    dsv4_threads_apply(&topts);
 
     /* Line buffering is not enough on a pipe: every event must be visible to the
      * TUI the moment it is produced. emit_* already fflush; keep stdout clean of

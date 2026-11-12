@@ -110,8 +110,16 @@ def main():
     ap.add_argument("--budget", type=float, default=16.0)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--pin", choices=["none", "pcores"], default="none",
-                    help="'pcores' runs 4 threads pinned to CPU 0-3, which is "
-                         "the fastest configuration on a 4P+4E hybrid")
+                    help="'pcores' is the legacy alias for --cpu-pin p "
+                         "--threads 4 --readers 4; it used to mean taskset -c 0-3")
+    ap.add_argument("--cpu-pin", choices=["off", "p", "e", "all"], default=None,
+                    help="compute affinity passed to the engine's --pin")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="compute threads passed to the engine; 0 = runtime default")
+    ap.add_argument("--readers", type=int, default=0,
+                    help="expert-reader threads; 0 = engine default")
+    ap.add_argument("--reader-pin", choices=["off", "p", "e", "all"],
+                    default="off", help="affinity for the reader threads")
     ap.add_argument("--json", metavar="FILE", help="write all parsed reps as JSON")
     ap.add_argument("--keep", metavar="DIR", help="keep raw logs in DIR")
     args = ap.parse_args()
@@ -124,9 +132,22 @@ def main():
            "--budget", str(args.budget)]
     env = dict(os.environ)
     prefix = []
-    if args.pin == "pcores":
-        prefix = ["taskset", "-c", "0-3"]
-        env["OMP_NUM_THREADS"] = "4"
+
+    # The engine pins itself now; 'pcores' remains as the old measurement's
+    # name so existing invocations keep meaning the same four P-cores AND the
+    # four-reader pool those runs actually used.
+    legacy = (args.pin == "pcores" and args.cpu_pin is None)
+    nth = args.threads if args.threads > 0 else (4 if legacy else 0)
+    rd  = args.readers if args.readers > 0 else (4 if legacy else 0)
+    # No explicit thread flags means "measure the engine's own default". The
+    # matrix runner passes them when it wants a specific point in the space.
+    if args.cpu_pin:
+        cmd += ["--pin", args.cpu_pin]
+    elif legacy:
+        cmd += ["--pin", "p"]
+    if nth: cmd += ["--threads", str(nth)]
+    if rd:  cmd += ["--readers", str(rd)]
+    if args.reader_pin != "off": cmd += ["--reader-pin", args.reader_pin]
     full = prefix + cmd
 
     if args.keep:

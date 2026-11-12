@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "dsv4_cache.h"
+#include "dsv4_threads.h"
 
 /* Defined with the rest of the reader pool, below load_expert, which they call.
  * Declared here because init and free are above them. */
@@ -126,7 +127,25 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
     int64_t widest_run = 0;
     for (int i = 0; i < 3; i++) widest_run += c->len_w[i];
     c->bounce_cap = widest_run + 2 * 4096;
+    /* One bounce buffer per concurrent reader, but the reader width is a
+     * property of the DRIVE, not of the compute team.
+     *
+     * This used to be omp_get_max_threads() alone, so dropping the compute
+     * team to the 4 P-cores also dropped the reader pool to 4 -- changing two
+     * things at once in every pinning experiment. The pool width is now
+     * max(compute threads, DSV4_READERS default 6), so the thread policy and
+     * the queue depth can be measured independently. */
+    int readers = DSV4_MAX_TOPK;
+    {
+        const char *renv = getenv("DSV4_READERS");
+        if (renv) {
+            const int n = atoi(renv);
+            if (n > 0) readers = n;
+        }
+    }
+    if (readers > DSV4_MAX_TOPK) readers = DSV4_MAX_TOPK;
     c->nbounce = omp_get_max_threads();
+    if (c->nbounce < readers) c->nbounce = readers;
     if (c->nbounce < 1) c->nbounce = 1;
     c->bounce = (unsigned char **)calloc((size_t)c->nbounce, sizeof *c->bounce);
     if (!c->bounce) return -1;
@@ -447,6 +466,11 @@ static void *reader_main(void *arg)
 {
     DSV4Cache *c = (DSV4Cache *)arg;
 
+    /* These threads inherited the COMPUTE affinity mask. Put them where the
+     * thread policy asked for them -- on this machine the E-cores, where they
+     * spend their lives blocked in pread() instead of competing with FP4. */
+    dsv4_threads_pin_current_reader();
+
     pthread_mutex_lock(&c->rmx);
     for (;;) {
         while (!c->rshutdown && (!c->rbatch || c->rnext >= c->rbatch->ntodo))
@@ -712,6 +736,7 @@ void dsv4_cache_report(const DSV4Cache *c, const char *label)
     printf("expert cache %s: %d slots x %.2f MB = %.2f GB\n", label, c->nslot,
            (double)c->expert_bytes / 1048576.0,
            (double)c->nslot * (double)c->expert_bytes / 1073741824.0);
+    printf("  %d reader threads, %d staging buffers\n", c->nrth, c->nbounce);
     printf("  %llu requests, %llu hits (%.1f%%), %llu misses, %llu evictions\n",
            (unsigned long long)n, (unsigned long long)c->hits,
            n ? 100.0 * (double)c->hits / (double)n : 0.0,
