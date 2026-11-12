@@ -15,7 +15,7 @@ LDFLAGS ?= -lm -fopenmp -pthread
 BUILD := build
 BIN   := bin
 
-.PHONY: all test bench cfg-fixtures st-fixtures ref-fixtures tok-fixtures fixtures clean help
+.PHONY: all test bench bench-decode cfg-fixtures st-fixtures ref-fixtures tok-fixtures fixtures clean help
 
 # EVERY binary depends on EVERY engine source and header.
 #
@@ -190,7 +190,7 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/gemm_bw $(BIN)/cache_bw
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/gemm_bw $(BIN)/cache_bw $(BIN)/fp8_decode
 bench: $(BENCHBIN)
 
 $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
@@ -206,6 +206,15 @@ $(BIN)/cache_bw: bench/cache_bw.c src/cache/dsv4_cache.c src/io/dsv4_st.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/cache_bw.c src/cache/dsv4_cache.c 	      src/io/dsv4_st.c -o $@ $(LDFLAGS)
 
+$(BIN)/fp8_decode: bench/fp8_decode.c src/core/dsv4_matmul.c
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) bench/fp8_decode.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
+
+# The decode-rate baseline from BENCHMARK.md. Three runs at ~60 s each is the
+# price of a number this machine can be held to.
+bench-decode: $(BIN)/dsv4
+	python3 bench/bench_decode.py --reps 3
+
 clean:
 	rm -rf $(BUILD) $(BIN)
 
@@ -216,6 +225,7 @@ help:
 	@echo "  make test          the gate ladder (19 gates; the trunk gate"
 	@echo "                     needs DSV4_MODEL and DSV4_TRUNK to make 20)"
 	@echo "  make bench         matmul_bw, gemm_bw, cache_bw"
+	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make clean"
 	@echo ""
 	@echo "fixtures (only needed if you change a kernel or a format):"

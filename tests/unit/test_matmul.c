@@ -315,6 +315,53 @@ int main(void)
     }
 
 
+    printf("\n-- GATE  every E4M3 code through the AVX2 path --\n");
+    {
+        /* The AVX2 FP8 loader now decodes through a 256-entry table. Random
+         * weights will not necessarily touch every entry, so make a matrix
+         * whose value for row r is exactly byte r: W[r][c] is zero except at
+         * c == r, and x is all ones, so y[r] is the decode of r. Then compare
+         * both the scalar definition and the AVX2 path against it, bit for
+         * bit -- including 0x7F/0xFF, whose payload is part of the table. */
+        enum { N = 256 };
+        static uint8_t W[(size_t)N * N], S[4];
+        static float x[N], ys[N], yv[N];
+
+        memset(W, 0, sizeof W);
+        for (int r = 0; r < N; r++) W[(size_t)r * N + r] = (uint8_t)r;
+        for (int i = 0; i < N; i++) x[i] = 1.0f;
+        memset(S, 127, sizeof S);          /* 2^0 for both row and column blocks */
+
+        dsv4_matmul_fp8_scalar(ys, x, W, S, N, N, 128, 128);
+        dsv4_matmul_fp8(yv, x, W, S, N, N, 128, 128);
+
+        int bad = 0;
+        for (int r = 0; r < N; r++) {
+            float want = dsv4_e4m3_to_f32((uint8_t)r);
+            uint32_t a, b, c;
+            memcpy(&a, &ys[r], 4);
+            memcpy(&b, &want, 4);
+            memcpy(&c, &yv[r], 4);
+            if (a != b && (((a | b) & 0x7FFFFFFFu) != 0)) {
+                /* +0.0 and -0.0 are the one accepted difference: the dot
+                 * product starts from +0.0, and (-0.0) + (+0.0) is +0.0 in
+                 * round-to-nearest, so the sign of a zero weight cannot
+                 * survive the sum. The table entry itself is still exact. */
+                printf("  FAIL  scalar y[0x%02X] = 0x%08X, decode = 0x%08X\n",
+                       r, a, b);
+                bad++;
+            }
+            if (a != c) {
+                printf("  FAIL  avx2   y[0x%02X] = 0x%08X, scalar = 0x%08X\n",
+                       r, c, a);
+                bad++;
+            }
+        }
+        fails += bad;
+        if (!bad)
+            printf("  ok    all 256 codes identical in scalar and AVX2 paths\n");
+    }
+
     printf("\n-- GATE  the batched GEMM equals nt separate GEMVs, bit for bit --\n");
     {
         /* This is the property the whole prefill change rests on. dsv4_mmq_n

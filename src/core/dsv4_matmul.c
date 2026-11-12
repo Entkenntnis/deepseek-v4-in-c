@@ -125,18 +125,79 @@ static inline __m256d load4_bf16(const uint16_t *row, int i)
     return _mm256_cvtps_pd(_mm_castsi128_ps(w));
 }
 
-/* FP8 keeps its scalar table lookups: 256 possible values, and a gather would
- * cost more than four L1 hits. _mm_set_ps, NOT a stack array reloaded with
- * _mm_loadu_ps -- four scalar stores followed by a 128-bit load is a
- * store-to-load forwarding stall, and it cost more than the vector arithmetic
- * saved. The first version of this file measured the expert matmuls at 41.8 s
- * against the scalar path's 27.7 s for exactly that reason. */
+/* FP8 IS A 256-SYMBOL ALPHABET, SO DECODE IT WITH A TABLE.
+ *
+ * The scalar definition (dsv4_e4m3_to_f32 in dsv4_quant.h) is ~20 ALU ops per
+ * weight once GCC inlines it: sign mask, exponent shift, bias add, mantissa
+ * shift, a branch for subnormals and one for NaNs. The useful operation next to
+ * it is one quarter of a vfmadd. Measured with bench/fp8_decode.c at Flash's
+ * geometries, replacing the computed decode with four loads from this table is
+ * 6.7-10x faster (45-59 GF/s against 3.5-7 GF/s) and bitwise identical.
+ *
+ * The table is generated from dsv4_e4m3_to_f32 and the matmul gate compares
+ * this AVX2 path against that scalar path over random matrices, so the two
+ * cannot drift. 1 KB, permanently in L1.
+ *
+ * WHY NOT A GATHER. bench/fp8_decode.c also times a vpgatherdd form, one gather
+ * per 8 weights. It is 1.15-1.3x faster than these four loads on the P-cores,
+ * but 2x SLOWER on the E-cores (Skymont's gather is microcoded), and decode now
+ * runs on both because the loops are dynamically scheduled. Four scalar loads
+ * win on the core mix this engine actually uses. The gather prototype is kept
+ * in the bench, not here.
+ *
+ * _mm_set_ps, NOT a stack array reloaded with _mm_loadu_ps: four scalar stores
+ * followed by a 128-bit load is a store-to-load forwarding stall, and it cost
+ * more than the vector arithmetic saved. The first version of this file
+ * measured the expert matmuls at 41.8 s against the scalar path's 27.7 s for
+ * exactly that reason. */
+static const uint32_t dsv4_e4m3_bits[256] = {
+    0x00000000u, 0x3B000000u, 0x3B800000u, 0x3BC00000u, 0x3C000000u, 0x3C200000u, 0x3C400000u, 0x3C600000u,
+    0x3C800000u, 0x3C900000u, 0x3CA00000u, 0x3CB00000u, 0x3CC00000u, 0x3CD00000u, 0x3CE00000u, 0x3CF00000u,
+    0x3D000000u, 0x3D100000u, 0x3D200000u, 0x3D300000u, 0x3D400000u, 0x3D500000u, 0x3D600000u, 0x3D700000u,
+    0x3D800000u, 0x3D900000u, 0x3DA00000u, 0x3DB00000u, 0x3DC00000u, 0x3DD00000u, 0x3DE00000u, 0x3DF00000u,
+    0x3E000000u, 0x3E100000u, 0x3E200000u, 0x3E300000u, 0x3E400000u, 0x3E500000u, 0x3E600000u, 0x3E700000u,
+    0x3E800000u, 0x3E900000u, 0x3EA00000u, 0x3EB00000u, 0x3EC00000u, 0x3ED00000u, 0x3EE00000u, 0x3EF00000u,
+    0x3F000000u, 0x3F100000u, 0x3F200000u, 0x3F300000u, 0x3F400000u, 0x3F500000u, 0x3F600000u, 0x3F700000u,
+    0x3F800000u, 0x3F900000u, 0x3FA00000u, 0x3FB00000u, 0x3FC00000u, 0x3FD00000u, 0x3FE00000u, 0x3FF00000u,
+    0x40000000u, 0x40100000u, 0x40200000u, 0x40300000u, 0x40400000u, 0x40500000u, 0x40600000u, 0x40700000u,
+    0x40800000u, 0x40900000u, 0x40A00000u, 0x40B00000u, 0x40C00000u, 0x40D00000u, 0x40E00000u, 0x40F00000u,
+    0x41000000u, 0x41100000u, 0x41200000u, 0x41300000u, 0x41400000u, 0x41500000u, 0x41600000u, 0x41700000u,
+    0x41800000u, 0x41900000u, 0x41A00000u, 0x41B00000u, 0x41C00000u, 0x41D00000u, 0x41E00000u, 0x41F00000u,
+    0x42000000u, 0x42100000u, 0x42200000u, 0x42300000u, 0x42400000u, 0x42500000u, 0x42600000u, 0x42700000u,
+    0x42800000u, 0x42900000u, 0x42A00000u, 0x42B00000u, 0x42C00000u, 0x42D00000u, 0x42E00000u, 0x42F00000u,
+    0x43000000u, 0x43100000u, 0x43200000u, 0x43300000u, 0x43400000u, 0x43500000u, 0x43600000u, 0x43700000u,
+    0x43800000u, 0x43900000u, 0x43A00000u, 0x43B00000u, 0x43C00000u, 0x43D00000u, 0x43E00000u, 0x7FC00000u,
+    0x80000000u, 0xBB000000u, 0xBB800000u, 0xBBC00000u, 0xBC000000u, 0xBC200000u, 0xBC400000u, 0xBC600000u,
+    0xBC800000u, 0xBC900000u, 0xBCA00000u, 0xBCB00000u, 0xBCC00000u, 0xBCD00000u, 0xBCE00000u, 0xBCF00000u,
+    0xBD000000u, 0xBD100000u, 0xBD200000u, 0xBD300000u, 0xBD400000u, 0xBD500000u, 0xBD600000u, 0xBD700000u,
+    0xBD800000u, 0xBD900000u, 0xBDA00000u, 0xBDB00000u, 0xBDC00000u, 0xBDD00000u, 0xBDE00000u, 0xBDF00000u,
+    0xBE000000u, 0xBE100000u, 0xBE200000u, 0xBE300000u, 0xBE400000u, 0xBE500000u, 0xBE600000u, 0xBE700000u,
+    0xBE800000u, 0xBE900000u, 0xBEA00000u, 0xBEB00000u, 0xBEC00000u, 0xBED00000u, 0xBEE00000u, 0xBEF00000u,
+    0xBF000000u, 0xBF100000u, 0xBF200000u, 0xBF300000u, 0xBF400000u, 0xBF500000u, 0xBF600000u, 0xBF700000u,
+    0xBF800000u, 0xBF900000u, 0xBFA00000u, 0xBFB00000u, 0xBFC00000u, 0xBFD00000u, 0xBFE00000u, 0xBFF00000u,
+    0xC0000000u, 0xC0100000u, 0xC0200000u, 0xC0300000u, 0xC0400000u, 0xC0500000u, 0xC0600000u, 0xC0700000u,
+    0xC0800000u, 0xC0900000u, 0xC0A00000u, 0xC0B00000u, 0xC0C00000u, 0xC0D00000u, 0xC0E00000u, 0xC0F00000u,
+    0xC1000000u, 0xC1100000u, 0xC1200000u, 0xC1300000u, 0xC1400000u, 0xC1500000u, 0xC1600000u, 0xC1700000u,
+    0xC1800000u, 0xC1900000u, 0xC1A00000u, 0xC1B00000u, 0xC1C00000u, 0xC1D00000u, 0xC1E00000u, 0xC1F00000u,
+    0xC2000000u, 0xC2100000u, 0xC2200000u, 0xC2300000u, 0xC2400000u, 0xC2500000u, 0xC2600000u, 0xC2700000u,
+    0xC2800000u, 0xC2900000u, 0xC2A00000u, 0xC2B00000u, 0xC2C00000u, 0xC2D00000u, 0xC2E00000u, 0xC2F00000u,
+    0xC3000000u, 0xC3100000u, 0xC3200000u, 0xC3300000u, 0xC3400000u, 0xC3500000u, 0xC3600000u, 0xC3700000u,
+    0xC3800000u, 0xC3900000u, 0xC3A00000u, 0xC3B00000u, 0xC3C00000u, 0xC3D00000u, 0xC3E00000u, 0xFFC00000u,
+};
+
+static inline float dsv4_bits_f32(uint32_t bits)
+{
+    union { uint32_t u; float f; } v;
+    v.u = bits;
+    return v.f;
+}
+
 static inline __m256d load4_fp8(const uint8_t *wb, int i)
 {
-    return _mm256_cvtps_pd(_mm_set_ps(dsv4_e4m3_to_f32(wb[i + 3]),
-                                      dsv4_e4m3_to_f32(wb[i + 2]),
-                                      dsv4_e4m3_to_f32(wb[i + 1]),
-                                      dsv4_e4m3_to_f32(wb[i + 0])));
+    return _mm256_cvtps_pd(_mm_set_ps(dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 3]]),
+                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 2]]),
+                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 1]]),
+                                      dsv4_bits_f32(dsv4_e4m3_bits[wb[i + 0]])));
 }
 
 static inline __m256d load4_fp4(const uint8_t *row, int64_t base, int i)
@@ -268,7 +329,20 @@ static double *widen_xn(const float *x, int in, int nt)
  * Emitted twice: once always, as `..._scalar`, and once as `..._avx2` where the
  * machine has AVX2+FMA. Two instantiations of ONE body, so they cannot drift
  * apart, and both are callable at runtime so the gate can compare them on real
- * data instead of trusting the argument that they must agree. */
+ * data instead of trusting the argument that they must agree.
+ *
+ * WHY DYNAMIC SCHEDULING. The rows are independent and equal in cost, so static
+ * looks natural. On a hybrid CPU it is not: a 4P+4E laptop hands every thread
+ * the same number of rows, the E-cores take ~2.5x longer per row, and the
+ * P-cores idle at the barrier. Measured on the 258V, the process ran at ~4.7 of
+ * 8 cores and the P-cores at 53% while the E-cores sat at 65%. Dynamic lets a
+ * fast core take the next chunk instead of waiting. Chunk 4 is fine enough to
+ * beat the P/E speed ratio and coarse enough that one fetch is negligible
+ * against a row of 1024-8192 MACs.
+ *
+ * This cannot change a result: a row's dot product depends only on its own
+ * columns, and the reduction inside the row is untouched. Only which thread
+ * computes which row changes, and rows do not interact. */
 #define GEN_MATMULS(SUF, DOT, DOT4)                                            \
                                                                                \
 void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
@@ -276,7 +350,7 @@ void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
 {                                                                              \
     double *xd = widen_x(x, in);                                               \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         const uint16_t *row = W + (size_t)o * in;                              \
         const float  *xb  = x;                                                 \
@@ -296,7 +370,7 @@ void dsv4_matmul_fp8##SUF(float *y, const float *x, const uint8_t *W,          \
     const int sc = (in + blk_c - 1) / blk_c;                                   \
     double *xd = widen_x(x, in);                                               \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         const uint8_t *rw = W + (size_t)o * in;                                \
         double total = 0.0;                                                    \
@@ -323,7 +397,7 @@ void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
     const int sc = (in + blk_c - 1) / blk_c;                                   \
     double *xd = widen_x(x, in);                                               \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         /* Stored row is in/2 bytes wide. Getting this stride wrong reads half  \
          * a row of the wrong values and still produces finite numbers. */     \
@@ -381,7 +455,7 @@ void dsv4_matmul_bf16_n##SUF(float *y, const float *x, const uint16_t *W,      \
 {                                                                              \
     double *xd = widen_xn(x, in, nt);                                          \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         const uint16_t *row = W + (size_t)o * in;                              \
         const int n = in;                                                      \
@@ -403,7 +477,7 @@ void dsv4_matmul_fp8_n##SUF(float *y, const float *x, const uint8_t *W,        \
     const int sc = (in + blk_c - 1) / blk_c;                                   \
     double *xd = widen_xn(x, in, nt);                                          \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         const uint8_t *rw = W + (size_t)o * in;                                \
         double total[DSV4_MAX_BATCH];                                          \
@@ -433,7 +507,7 @@ void dsv4_matmul_fp4_n##SUF(float *y, const float *x, const uint8_t *W,        \
     const int sc = (in + blk_c - 1) / blk_c;                                   \
     double *xd = widen_xn(x, in, nt);                                          \
     if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                 \
+    _Pragma("omp parallel for schedule(dynamic, 4) if (out > 64)")             \
     for (int o = 0; o < out; o++) {                                            \
         const uint8_t *row = W + (size_t)o * ((size_t)in / 2);                 \
         double total[DSV4_MAX_BATCH];                                          \
