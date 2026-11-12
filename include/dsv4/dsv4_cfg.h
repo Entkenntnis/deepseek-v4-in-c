@@ -285,21 +285,37 @@ static inline int dsv4_cfg_load(DSV4Cfg *c, int *cr, int cr_max,
                 whence, c->n_layers, DSV4_MAX_LAYERS);
         return 0;
     }
-    /* Invariant 1: one ratio per decoder layer PLUS one per MTP layer, no more
-     * and no fewer. A short list is the single most likely way to run most
-     * layers down the wrong path; a list read as if it were n_layers long
-     * invents a trailing dense-attention layer, because the MTP entry is 0. */
+    /* Invariant 1: AT LEAST one ratio per decoder layer PLUS one per MTP layer.
+     * A short list is the single most likely way to run most layers down the
+     * wrong path; a list read as if it were n_layers long invents a trailing
+     * dense-attention layer, because the MTP entry is 0.
+     *
+     * A LONGER list is accepted, provided every entry past the decoder + MTP
+     * prefix is 0. The 0731 checkpoint carries three MTP modules (mtp.0,
+     * mtp.1, mtp.2) while num_nextn_predict_layers still says 1, so its list
+     * has n_layers + 3 entries. The engine skips the whole MTP block, so only
+     * the first n_layers entries are ever read; the extras are checked here
+     * and then left unused. */
     if (c->num_nextn_predict < 0) {
         fprintf(stderr, "dsv4_cfg: %s has num_nextn_predict_layers %d\n",
                 whence, c->num_nextn_predict);
         return 0;
     }
-    if (c->n_compress != c->n_layers + c->num_nextn_predict) {
+    const int need = c->n_layers + c->num_nextn_predict;
+    if (c->n_compress < need) {
         fprintf(stderr, "dsv4_cfg: %s has %d compress_ratios for %d decoder "
-                        "layers + %d MTP layer(s); expected %d\n",
-                whence, c->n_compress, c->n_layers, c->num_nextn_predict,
-                c->n_layers + c->num_nextn_predict);
+                        "layers + %d MTP layer(s); need at least %d\n",
+                whence, c->n_compress, c->n_layers, c->num_nextn_predict, need);
         return 0;
+    }
+    for (int i = need; i < c->n_compress; i++) {
+        if (cr[i] != 0) {
+            fprintf(stderr, "dsv4_cfg: %s compress_ratios[%d] = %d lies beyond "
+                            "the %d decoder+MTP entries; extra entries must be 0 "
+                            "(they describe an MTP block this engine skips)\n",
+                    whence, i, cr[i], need);
+            return 0;
+        }
     }
     /* WHAT THE RATIO ACTUALLY SELECTS. This once rejected anything but 0, 4 and
      * 128, on the reasoning that those are the only values the two released
@@ -325,8 +341,9 @@ static inline int dsv4_cfg_load(DSV4Cfg *c, int *cr, int cr_max,
         }
     }
     /* Having validated the whole list, narrow the layer map to the decoder. The
-     * MTP entries stay in `cr` but out of reach of dsv4_compress_ratio(), so no
-     * caller can mistake the MTP block for layer n_layers. */
+     * MTP and any extra trailing entries stay in `cr` but out of reach of
+     * dsv4_compress_ratio(), so no caller can mistake the MTP block for layer
+     * n_layers. */
     c->n_compress = c->n_layers;
 
     if (c->topk > DSV4_MAX_TOPK) {
