@@ -2,11 +2,10 @@
 /* dsv4_attn.c - sparse attention over gathered KV positions, with sinks.
  *
  * Source: kernel.py sparse_attn_kernel. That kernel is FlashAttention-shaped
- * (blocked, online softmax with a running max) because it runs on a GPU. The
- * blocking is a scheduling detail, not semantics: for one query position the
- * result is an ordinary softmax over the gathered positions. This is written in
- * the plain form, which is what a CPU wants and what a reference should look
- * like.
+ * (blocked, online softmax with a running max). The blocking is a scheduling
+ * detail, not semantics: for one query position the result is an ordinary
+ * softmax over the gathered positions. This is written in the plain form, which
+ * is what a CPU wants and what a reference should look like.
  *
  * ONE KV HEAD, MANY QUERY HEADS. num_key_value_heads is 1, so kv is [n][d] and
  * every one of the h query heads attends over the same kv rows. There is no

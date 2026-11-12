@@ -52,9 +52,9 @@
  *
  *   Two routes were tried first and both dead-ended, which is why the citation
  *   above is the evidence rather than a measurement: torch implements NO
- *   element-wise conversion for this dtype on CPU (copy_kernel unimplemented),
- *   and on CUDA sm_120 the generic cast asserts inside fetch_and_cast. FP4 is
- *   reachable only through specific ops such as _scaled_mm, never through .to().
+ *   element-wise conversion for this dtype on CPU (copy_kernel unimplemented).
+ *   FP4 is reachable only through specific ops such as _scaled_mm, never
+ *   through .to().
  */
 #ifndef DSV4_QUANT_H
 #define DSV4_QUANT_H

@@ -490,7 +490,7 @@ static void reader_pool_start(DSV4Cache *c)
      * FP4 kernel. So a narrower pool should buy back matmul time for free.
      *
      * It does not. Five interleaved rounds on the real checkpoint,
-     * --gen 15 --budget 16 --gpu, varying DSV4_READERS:
+     * --gen 15 --budget 16, varying DSV4_READERS:
      *
      *   readers            1      2      3      4      6
      *   exposed I/O ms   667.9  488.5  418.3  375.4  351.3

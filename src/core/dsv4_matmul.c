@@ -34,7 +34,7 @@
  *   element instead of per block.
  *
  *   Activations arrive already in f32 here, so there is no act scale: this is a
- *   dequantised-weight GEMV, not the FP8xFP4 GEMM the GPU path will want.
+ *   dequantised-weight GEMV.
  */
 #include <math.h>
 #include <stdio.h>
@@ -43,7 +43,6 @@
 
 #include "dsv4.h"
 #include "dsv4_quant.h"
-#include "dsv4_cuda.h"
 
 /* One block's dot product, in the same 16-accumulator tree K3 uses. `n` is the
  * block width, always a multiple of 16 for the real geometries (32 and 128), so
@@ -515,15 +514,6 @@ void dsv4_matmul_fp4_n(float *y, const float *x, const uint8_t *W,
  * caller has to remember whether this one is 128x128 or 1x32. */
 void dsv4_mmq(float *y, const float *x, const DSV4QMat *m)
 {
-    /* If this matrix is resident on the device, it runs there. The check is a
-     * pointer lookup over a few hundred entries, against a matmul that moves
-     * tens of MB -- and in a build without CUDA it is a call that returns 0.
-     *
-     * Note what is NOT here: any attempt to keep the GPU bit-identical. The
-     * device is opt-in and gated separately, on relative error and argmax
-     * identity; see dsv4_cuda.h. */
-    if (dsv4_cuda_has(m)) { dsv4_cuda_mmq(y, x, m); return; }
-
     switch (m->wdt) {
     case DSV4_WBF16:
         dsv4_matmul_bf16(y, x, (const uint16_t *)m->w, m->cols, m->rows);
@@ -553,12 +543,8 @@ void dsv4_mmq(float *y, const float *x, const DSV4QMat *m)
  * accidentally start running through a different code path than the one the
  * whole-model oracle gates.
  *
- * THE GPU BRANCH IS HERE NOW. It used to be absent deliberately, on the grounds
- * that a batched device path was separate work -- but the consequence was that
- * turning on --batch silently moved every resident FP8 matmul off the device
- * and back onto the CPU, so the two flags the engine ships with fought each
- * other. k_mmq_fp8_n makes one pass over the weights serve the whole batch,
- * which is the same reuse this function exists to get on the CPU. */
+ * The batched kernels make one pass over the weights serve the whole batch,
+ * which is the same reuse this function exists to get. */
 void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
 {
     if (nt <= 1) { dsv4_mmq(y, x, m); return; }
@@ -567,9 +553,6 @@ void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
                 nt, DSV4_MAX_BATCH);
         abort();
     }
-    /* Same contract as dsv4_mmq: residency decides, and only FP8 is ever
-     * resident. Everything else falls through to the CPU kernels below. */
-    if (dsv4_cuda_has(m)) { dsv4_cuda_mmq_n(y, x, m, nt); return; }
 
     switch (m->wdt) {
     case DSV4_WBF16:

@@ -29,9 +29,6 @@
 #include "dsv4_trunk.h"
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
-#include <omp.h>
-
-#include "dsv4_cuda.h"
 #include "dsv4_tok.h"
 
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
@@ -119,14 +116,14 @@ static void usage(const char *me)
 {
     printf("usage: %s <model_dir | --model DIR> --trunk <dir> --tok <file> "
            "[--prompt TEXT] [--gen N] [--budget GB] [--batch N] [--route-log FILE]\n"
-           "       [--gpu] [--chat] [--think] [--system TEXT]\n", me);
+           "       [--chat] [--think] [--system TEXT]\n", me);
 }
 
 int main(int argc, char **argv)
 {
     const char *model = NULL, *trunkdir = NULL, *tokfile = NULL;
     const char *routelog = NULL;
-    int use_gpu = 0, chat = 0, think = 0;
+    int chat = 0, think = 0;
     const char *sysprompt = NULL;
     const char *prompt = "The capital of France is";
     /* Prompt tokens processed together. 32 because bench/gemm_bw.c has every
@@ -151,7 +148,6 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--budget")&& i + 1 < argc) budget_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--route-log") && i + 1 < argc) routelog = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) nbatch = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--gpu")) use_gpu = 1;
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -222,75 +218,6 @@ int main(int argc, char **argv)
     if (dsv4_bind_model(&st, &c, 1, &mb) != 0) return 1;
 
     /* Two tables: see the note at the top. */
-    /* ---- optional GPU residency for the dense trunk ------------------
-     *
-     * ONLY PINNED LAYERS, and that restriction is load-bearing rather than
-     * conservative. Device matrices are keyed by their HOST weight pointer,
-     * which is sound only while that pointer means one thing. A pinned layer
-     * owns its allocation for the life of the run. A ring-slot layer does not:
-     * the same address is reused for a different layer when the slot turns
-     * over, so an upload keyed on it would go on serving the layer it was
-     * first filled from -- silently, with plausible numbers. At --budget 16
-     * all 43 layers pin and the question does not arise; at a smaller budget
-     * the tail of the model simply stays on the CPU, which is correct and
-     * slower rather than fast and wrong. */
-    int gpu_mats = 0;
-    if (use_gpu) {
-        if (!dsv4_cuda_available()) {
-            fprintf(stderr, "--gpu: no CUDA device (or built without CUDA); "
-                            "running on the CPU\n");
-        } else if (dsv4_cuda_init() != 0) {
-            fprintf(stderr, "--gpu: device init failed; running on the CPU\n");
-        } else {
-            /* LEAVE ONE CORE FOR THE DEVICE THREAD.
-             *
-             * This single line was worth 2.9x. CUDA's default synchronisation
-             * spins, and a spinning thread on a pool that already has one
-             * OpenMP worker per core does not merely add load -- it competes
-             * with the very threads it waits behind. Measured with
-             * bench/gpu_contention.c: CPU-side FP4 matmul fell from 114 GF/s to
-             * 5 GF/s while the device was busy, a 21.7x collapse, and it went
-             * to 0.99x -- no contention whatever -- as soon as one core was
-             * held back. On the real model that was 142.4 s against 49.3 s.
-             *
-             * It cost a wrong conclusion first: the collapse was blamed on PCIe
-             * latency and on a laptop power envelope, and neither was it.
-             *
-             * An explicit OMP_NUM_THREADS is left alone -- if someone has
-             * chosen a thread count, that is not ours to override. */
-            if (!getenv("OMP_NUM_THREADS")) {
-                const int n = omp_get_max_threads();
-                if (n > 1) {
-                    omp_set_num_threads(n - 1);
-                    printf("gpu: reserving 1 of %d cores for the device "
-                           "thread\n", n);
-                }
-            }
-            const size_t before = dsv4_cuda_free_vram();
-            for (int L = 0; L < tr.npin; L++) {
-                DSV4LayerBind lb;
-                if (dsv4_trunk_bind(&tr, &c, L, &lb) != 0) break;
-                const DSV4QMat *m[9] = {
-                    &lb.w.attn.wq_a, &lb.w.attn.wq_b, &lb.w.attn.wkv,
-                    &lb.w.attn.wo_a, &lb.w.attn.wo_b,
-                    &lb.w.moe.shared.w1, &lb.w.moe.shared.w2,
-                    &lb.w.moe.shared.w3,
-                    lb.w.attn.has_idx ? &lb.w.attn.idx.wq_b : NULL,
-                };
-                for (int k = 0; k < 9; k++)
-                    if (m[k] && m[k]->wdt == DSV4_WFP8
-                        && dsv4_cuda_upload(m[k]) == 0) gpu_mats++;
-            }
-            const size_t after = dsv4_cuda_free_vram();
-            printf("gpu: %d FP8 matrices resident over %d pinned layer(s), "
-                   "%.2f GB of VRAM used, %.2f GB free\n",
-                   gpu_mats, tr.npin,
-                   (double)(before - after) / 1073741824.0,
-                   (double)after / 1073741824.0);
-            if (gpu_mats == 0)
-                fprintf(stderr, "--gpu: nothing fitted; running on the CPU\n");
-        }
-    }
 
     const int maxpos = c.sliding_window + 4096;
     float *cs_d = malloc((size_t)maxpos * (c.qk_rope / 2) * sizeof(float));
@@ -500,7 +427,6 @@ generated:
     free(cs_d); free(sn_d); free(cs_c); free(sn_c);
     dsv4_scratch_free(&scratch);
     dsv4_bind_model_free(&mb);
-    if (gpu_mats) dsv4_cuda_shutdown();
     dsv4_cache_free(&cache);
     dsv4_trunk_close(&tr);
     dsv4_tok_free(&tok);
