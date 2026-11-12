@@ -194,6 +194,11 @@ share of the same thermal budget, not because the FP4 path changed.
 Peak RSS and cache counters are unchanged: 17.84 GB, 767 slots, 53.0% hits,
 33.8 GB read from disk.
 
+**Repeatability.** The same binary (sha256 `fb70dd6…`) was run again
+immediately afterwards: 1.220 / 1.235 / 1.240, median **1.235** (spread 1.6%).
+The two medians differ by 2.1%, with identical ids and counters, so quote
+**~1.22** as the consensus and treat differences under ~3% as machine state.
+
 **Verified:** `bin/test_matmul` passes, including AVX2-vs-scalar bitwise
 equality, the 1-vs-8-thread gate, and batched-GEMM equality.
 
