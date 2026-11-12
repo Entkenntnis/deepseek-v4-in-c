@@ -291,7 +291,9 @@ int main(int argc, char **argv)
 
         for (int L = 0; L < c.n_layers; L++) {
             DSV4LayerBind lb;
+            const double tb = now_s();
             if (dsv4_trunk_bind(&tr, &c, L, &lb) != 0) return 1;
+            dsv4_prof.bind += now_s() - tb;
             const int comp = dsv4_compress_ratio(&c, L) != 0;
             dsv4_layer_forward(h, &lb.w, &c, &scratch, &src, &lst[L],
                                comp ? cs_c : cs_d, comp ? sn_c : sn_d,
@@ -302,10 +304,15 @@ int main(int argc, char **argv)
             /* The last prompt token has cleared every layer and the head has
              * not run yet. */
             if (ttft == 0.0 && pos + 1 == nprompt) ttft = now_s() - t0;
+            /* The output head. Timed separately from the layers because it is
+             * a vocab-wide BF16 GEMV (1.06 GB of weights on Flash) that lives
+             * outside dsv4_layer_forward and used to land in "unaccounted". */
+            const double th = now_s();
             hc_head(xh, h, &mb.w.hc_head, hc, d, c.rms_eps, c.hc_eps);
             dsv4_rmsnorm(xh, xh, mb.w.norm, d, c.rms_eps);
             DSV4QMat head = { mb.w.head, NULL, DSV4_WBF16, c.vocab, d, 0, 0 };
             dsv4_mmq(logits, xh, &head);
+            dsv4_prof.head += now_s() - th;
 
             int best = 0;
             for (int v = 1; v < c.vocab; v++) if (logits[v] > logits[best]) best = v;

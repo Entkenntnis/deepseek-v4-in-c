@@ -348,7 +348,7 @@ void dsv4_prof_report(double wall, int passes)
 {
     const DSV4Prof *p = &dsv4_prof;
     const double acc = p->hc + p->attn + p->gate + p->expert_io
-                     + p->expert_mm + p->shared;
+                     + p->expert_mm + p->shared + p->head + p->bind;
     printf("where the time went: %.1f s of %.1f s wall (%.0f%% accounted)\n",
            acc, wall, 100.0 * acc / wall);
     const struct { const char *n; double v; const char *note; } row[] = {
@@ -357,6 +357,8 @@ void dsv4_prof_report(double wall, int passes)
         { "attention",               p->attn,      "CSA/HCA/RoPE"       },
         { "mHC + norms",             p->hc,        "Sinkhorn"           },
         { "shared expert",           p->shared,    "FP8"                },
+        { "lm head + final norm",    p->head,      "BF16, per token"    },
+        { "trunk bind / widen",      p->bind,      "per layer, per token"},
         { "router",                  p->gate,      ""                   },
     };
     for (unsigned i = 0; i < sizeof row / sizeof row[0]; i++)

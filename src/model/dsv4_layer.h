@@ -130,6 +130,17 @@ typedef struct {
     double expert_io;   /* waiting for the expert cache               */
     double expert_mm;   /* routed-expert FP4 matmuls                  */
     double shared;      /* the shared expert                          */
+    /* The output head: hc_head, the final RMSNorm and the vocab-wide BF16
+     * GEMV. It lives in the CLI rather than in dsv4_layer_forward, so it had
+     * no timer and was part of the unaccounted remainder. On Flash that GEMV
+     * reads 129280 x 4096 BF16 = 1.06 GB per token, which is not small. */
+    double head;
+
+    /* dsv4_trunk_bind: resolving a layer's ~40 tensor names and widening the
+     * small vectors. Also in the CLI, also previously unaccounted. It runs once
+     * per layer per token even when the layer is pinned and cannot have moved,
+     * so this number decides whether a per-layer bind cache is worth it. */
+    double bind;
 } DSV4Prof;
 extern DSV4Prof dsv4_prof;
 void dsv4_prof_report(double wall, int passes);

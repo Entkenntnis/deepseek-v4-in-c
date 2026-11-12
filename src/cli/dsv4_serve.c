@@ -284,10 +284,13 @@ static void write_prof(const Engine *e)
     const double io  = p->expert_io - e->prof_base.expert_io;
     const double mm  = p->expert_mm - e->prof_base.expert_mm;
     const double sh  = p->shared    - e->prof_base.shared;
+    const double hd  = p->head      - e->prof_base.head;
+    const double bd  = p->bind      - e->prof_base.bind;
     printf("\"prof\":{\"hc\":%.4f,\"attn\":%.4f,\"gate\":%.4f,"
            "\"expert_io\":%.4f,\"expert_mm\":%.4f,\"shared\":%.4f,"
-           "\"accounted\":%.4f}",
-           hc, at, ga, io, mm, sh, hc + at + ga + io + mm + sh);
+           "\"head\":%.4f,\"bind\":%.4f,\"accounted\":%.4f}",
+           hc, at, ga, io, mm, sh, hd, bd,
+           hc + at + ga + io + mm + sh + hd + bd);
 }
 
 static void emit_ready(const Engine *e, const char *event)
@@ -650,10 +653,12 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
 
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerBind lb;
+        const double tb = now_s();
         if (dsv4_trunk_bind(&e->tr, &e->c, L, &lb) != 0) {
             emit_error("trunk bind failed on layer %d at position %d", L, pos);
             return -1;
         }
+        dsv4_prof.bind += now_s() - tb;
         const int comp = dsv4_compress_ratio(&e->c, L) != 0;
         dsv4_layer_forward(e->h, &lb.w, &e->c, &e->scratch, &src,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,
@@ -663,10 +668,12 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
 
     if (!want_logits) return 0;
 
+    const double th = now_s();
     hc_head(e->xh, e->h, &e->mb.w.hc_head, hc, d, e->c.rms_eps, e->c.hc_eps);
     dsv4_rmsnorm(e->xh, e->xh, e->mb.w.norm, d, e->c.rms_eps);
     DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0 };
     dsv4_mmq(e->logits, e->xh, &head);
+    dsv4_prof.head += now_s() - th;
     sample_top(e, top);
     return 0;
 }

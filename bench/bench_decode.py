@@ -37,6 +37,8 @@ PROFILES = [
     "attention",
     "mHC + norms",
     "shared expert",
+    "lm head + final norm",
+    "trunk bind / widen",
     "router",
 ]
 
