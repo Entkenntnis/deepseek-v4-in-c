@@ -182,8 +182,8 @@ is kept for the simplification and because the reason dynamic existed is gone.
 `src/core/dsv4_matmul.c` now decodes E4M3 through a
 1 KB table of exact f32 bit patterns instead of inlining the branchy
 `dsv4_e4m3_to_f32()` bit-twiddle. The table was generated from that function;
-the scalar path still uses the bit-twiddle, so `test_matmul`'s AVX2-vs-scalar
-gate proves the table cannot drift.
+the scalar path still uses the bit-twiddle, so `test_matmul`'s bitwise
+AVX2-vs-scalar FP8 gate proves the table cannot drift.
 
 **Why not a gather.** `bench/fp8_decode.c` also prototypes an 8-wide
 `vpgatherdd` form. It wins on the P-cores (1.15–1.3× over the four loads) but is
@@ -232,8 +232,8 @@ immediately afterwards: 1.220 / 1.235 / 1.240, median **1.235** (spread 1.6%).
 The two medians differ by 2.1%, with identical ids and counters, so quote
 **~1.22** as the consensus and treat differences under ~3% as machine state.
 
-**Verified:** `bin/test_matmul` passes, including AVX2-vs-scalar bitwise
-equality and the 1-vs-8-thread gate.
+**Verified:** `bin/test_matmul` passes, including bf16/FP8 bitwise equality,
+the FP4 L2 bound, and the 1-vs-8-thread gate.
 
 ## Thread policy: 4 P-cores beat all 8 — 2026-11-12
 
@@ -318,6 +318,64 @@ the thread-policy change. A final default 3-rep run measured 0.945 / 0.965 /
 
 Gather8 is now the only FP8 decoder; the four-load path and its environment
 override have been removed.
+
+## FP32 inner accumulation is now the FP4 default — 2026-11-12
+
+`bench/fp4_f32.c` asks the two questions separately: what the CPU's raw FMA
+ceiling is, and how much of the FP4 expert kernel is actually FMA rather than
+dequant. `dsv4_matmul_fp4_avx2` is now the shipped kernel: one 32-weight scale
+block accumulates with 8-lane float FMAs, then the block dot is widened and
+folded in double. The scalar double kernel remains as the reference and as the
+non-AVX2 path. The AVX2 kernel is deliberately **not** bitwise-equal to that
+reference; `test_matmul` bounds the difference in L2 norm (1e-6).
+
+**Raw FMA ceiling**, eight independent chains, register-only, `bin/fp4_f32`:
+
+| threads | FP32 | FP64 | ratio |
+|---|---:|---:|---:|
+| 1, pinned CPU 0 | 146.9 GF/s | 73.6 GF/s | **2.00x** |
+| 4, pinned CPU 0–3 | 501.2 GF/s | 214.6 GF/s | **2.34x** |
+| 8 | 796.4 GF/s | 396.4 GF/s | **2.01x** |
+
+The one-thread ratio is exactly the vector width (8 floats vs 4 doubles), so
+FP64 FMA instruction throughput is not reduced on Lion Cove — FP32 simply does
+twice the FLOPs per FMA.
+
+**Kernel result**, real FP4 expert shapes, best of 15:
+
+| shape | double | float inner | speedup |
+|---|---:|---:|---:|
+| w1 2048x4096 | 44.9 GF/s | 61.3 GF/s | **1.36x** |
+| w2 4096x2048 | 44.9 GF/s | 60.6 GF/s | **1.35x** |
+
+Accuracy against the double reference: L2 relative error `7.1–7.4e-8`; max
+absolute `7.6e-5–9.2e-5`; the worst per-element relative error is `4e-3`, but
+only on outputs near zero. That is the expected float-block/double-fold shape.
+
+**Full decode**, two binaries interleaved, 3 reps each, `--budget 16 --gen 20`:
+
+| arm | runs (s/token) | median |
+|---|---|---:|
+| double | 0.960 / 0.980 / 0.970 | 0.970 |
+| **float inner** | 0.995 / 0.915 / 0.910 | **0.915** |
+
+That is **−5.7%**, with identical generated ids across both arms. The component
+that moved is the routed-expert matmul: `417.5 → 322.1 ms/pass`. Exposed disk
+rose `279.2 → 317.4 ms/pass`, because faster compute exposes more of the I/O;
+attention and the shared expert were flat.
+
+A reversed-order round on the same binaries repeated the result on a warmer
+machine: double `1.080 / 1.080 / 1.105` (median 1.080) against float
+`0.925 / 1.010 / 1.025` (median 1.010), **−6.5%**, identical ids. The routed
+matmul again fell about 23% (`478.5 → 366.8 ms/pass`), so the direction and size
+survive the thermal swing even when the absolute numbers do not.
+
+**Adopted.** `dsv4_matmul_fp4` now always uses this kernel on AVX2+FMA; there
+is no switch or environment override. `test_matmul` keeps bf16 and FP8 bitwise
+and bounds FP4 at 1e-6 L2 relative error, about an order of magnitude above the
+measured 7e-8. The first float rep above (0.995) is the reason to judge the
+change by the interleaved medians, not a single run. `make bin/fp4_f32`
+reproduces the kernel numbers and the error bound.
 
 ## Measurement rules this machine earned
 

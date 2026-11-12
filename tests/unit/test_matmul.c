@@ -2,15 +2,22 @@
 /* test_matmul.c - the packed matmuls, against exactly-representable references.
  *
  * HOW THE EXPECTATIONS ARE BUILT
- *   Every fixture here is chosen so the true dot product is EXACTLY
+ *   Every small fixture here is chosen so the true dot product is EXACTLY
  *   representable in f32: the weights come from the e2m1/e4m3 tables, the scales
- *   are powers of two, and the activations are small integers or halves. That
- *   lets the check be bit equality rather than a tolerance.
+ *   are powers of two, and the activations are small integers or halves. Those
+ *   structural gates still use bit equality.
  *
- *   A tolerance would be the wrong instrument. The failures this file is looking
- *   for -- a wrong block stride, a scale applied per element instead of per
- *   block, a packed row read at full width -- all produce answers that are
- *   plausibly close. Only exactness separates them.
+ *   The one deliberate exception is the AVX2 FP4 kernel: it accumulates each
+ *   32-wide block in float and folds blocks in double, so it cannot be bitwise
+ *   equal to the scalar double reference. Its random-data gate uses an L2
+ *   relative-error bound (1e-6) instead. The small FP4 fixtures below are still
+ *   exactly representable, so they check bit equality and catch the structural
+ *   mistakes.
+ *
+ *   A loose tolerance would be the wrong instrument. The failures this file is
+ *   looking for -- a wrong block stride, a scale applied per element instead of
+ *   per block, a packed row read at full width -- all produce answers that are
+ *   plausibly close. Only exactness, or a bound this tight, separates them.
  *
  * WHAT IS DELIBERATELY NOT ASSERTED
  *   Agreement with PyTorch. That needs torch and the real checkpoint, and it is
@@ -246,12 +253,16 @@ int main(void)
     }
 
     printf("\n");
-    printf("\n-- GATE  the AVX2 path is BITWISE the scalar path --\n");
+    printf("\n-- GATE  the AVX2 path matches the scalar reference --\n");
     {
-        /* The whole file is arranged around one property: a faster kernel must
-         * not be a different kernel. So this compares exact bit patterns, not
-         * a tolerance. A tolerance here would defeat the purpose -- "close" is
-         * precisely the failure mode -ffp-contract=off exists to prevent.
+        /* bf16 and FP8 must still be bitwise: -ffp-contract=off exists so that
+         * a faster kernel cannot quietly become a different kernel.
+         *
+         * FP4 is the deliberate exception. Its AVX2 path accumulates one
+         * 32-wide block in float and folds blocks in double, so exact bits are
+         * not the contract any more. The gate instead bounds the L2 relative
+         * error at 1e-6, which is far below any structural bug but far above
+         * the measured 7e-8.
          *
          * Sizes are deliberately not multiples of the vector width in the
          * output dimension, and the FP8 block width 128 and FP4 block width 32
@@ -306,11 +317,19 @@ int main(void)
 
         dsv4_matmul_fp4_scalar(ys, x, W4, S4, IN, OUT, 1, 32);
         dsv4_matmul_fp4(yv, x, W4, S4, IN, OUT, 1, 32);
-        CHECK(memcmp(ys, yv, sizeof ys) == 0, "fp4 differs between paths");
+        double err2 = 0.0, ref2 = 0.0;
+        for (int i = 0; i < OUT; i++) {
+            const double d = (double)yv[i] - (double)ys[i];
+            err2 += d * d;
+            ref2 += (double)ys[i] * (double)ys[i];
+        }
+        const double fp4_rel = sqrt(err2 / (ref2 > 0.0 ? ref2 : 1.0));
+        CHECK(fp4_rel <= 1e-6,
+              "fp4 L2 relative error %.3e exceeds 1e-6", fp4_rel);
 
         if (!fails)
-            printf("  ok    bf16, fp8 and fp4 identical to the last bit over "
-                   "%d x %d\n", OUT, IN);
+            printf("  ok    bf16 and fp8 bitwise; fp4 L2 rel %.1e over "
+                   "%d x %d\n", fp4_rel, OUT, IN);
     }
 
 

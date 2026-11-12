@@ -84,7 +84,7 @@ stays the reference.
 ```sh
 make            # CPU only
 make test       # the gate ladder
-make bench      # matmul_bw, gpu_contention, cache_bw
+make bench      # matmul_bw, fp8_decode, fp4_f32, cache_bw
 ```
 
 `make test` runs 20 gates. The 21st, the trunk gate, needs a real checkpoint and
@@ -453,15 +453,23 @@ up to 3x across states — which is why kernel changes are resolved with
 
 ## Kernel throughput
 
-`bench/matmul_bw.c`, best of 15, at Flash's real matrix shapes. "bitwise equal"
-is the scalar path against the AVX2 path — not a tolerance:
+`bench/matmul_bw.c`, best of 15, on the default four P-cores
+(`OMP_NUM_THREADS=4`), at Flash's real matrix shapes. "agreement" is the scalar
+reference against the AVX2 path: bitwise for bf16/FP8, and an L2 bound for the
+FP4 float-inner kernel:
 
-| kernel | scalar | AVX2 | speedup | bitwise equal |
+| kernel | scalar | AVX2 | speedup | agreement |
 |---|---|---|---|---|
-| fp4 expert w1 2048x4096 | 45.0 GF/s | **108.8 GF/s** | 2.42x | yes |
-| fp4 expert w2 4096x2048 | 52.2 GF/s | **115.4 GF/s** | 2.21x | yes |
-| fp8 attn wo_b 4096x8192 | 14.9 GF/s | 19.7 GF/s | 1.32x | yes |
-| fp8 attn wq_b 32768x1024 | 15.1 GF/s | 19.1 GF/s | 1.26x | yes |
+| fp4 expert w1 2048x4096 | 10.6 GF/s | **59.4 GF/s** | 5.60x | L2 7.3e-8 |
+| fp4 expert w2 4096x2048 | 10.6 GF/s | **59.5 GF/s** | 5.62x | L2 7.5e-8 |
+| fp8 attn wo_b 4096x8192 | 3.4 GF/s | 40.9 GF/s | 12.13x | bitwise |
+| fp8 attn wq_b 32768x1024 | 3.3 GF/s | 41.7 GF/s | 12.47x | bitwise |
+
+The FP4 AVX2 kernel accumulates each 32-weight block in float and folds blocks
+in double; it is **not** bitwise-equal to the scalar double reference. The L2
+relative error is about `7e-8`, and the matmul gate enforces `1e-6`. That trade
+cut full decode from `0.970` to `0.915 s/token` in the interleaved A/B (see
+[BENCHMARK.md](BENCHMARK.md#fp32-inner-accumulation-is-now-the-fp4-default--2026-11-12)).
 
 On the P-core-only compute path the FP8 decoder is the 8-wide gather from
 the same 256-entry table: **1.20–1.29x** over the old four-load form in
@@ -470,10 +478,12 @@ the same 256-entry table: **1.20–1.29x** over the old four-load form in
 Gather is the only FP8 decoder; the four-load path and its environment override
 have been removed.
 
-FP8 barely moving is the informative part: those matrices are 33.5 MB and are
-re-read from RAM every layer, so they are bandwidth-bound rather than
-conversion-bound. That is the measurement that argues for putting the trunk in
-VRAM instead of optimising it further on the CPU.
+FP8's large advantage over the branchy scalar decode does not mean it is
+compute-bound. The absolute rate stays near the memory stream: those matrices
+are 33.5 MB and are re-read from RAM every layer, so the kernel is
+bandwidth-limited rather than conversion-limited. That is the measurement that
+argues for putting the trunk in VRAM instead of optimising it further on the
+CPU.
 
 ### The per-call cost, and a claim that did not survive being measured
 
@@ -753,8 +763,9 @@ number this README would like to carry. Send it.
 ## Benchmarks and diagnostics
 
 ```sh
-make bench                 # builds all four
-./bin/matmul_bw 15         # scalar vs AVX2 vs GPU, at real geometries
+make bench                 # builds the CPU benches
+./bin/matmul_bw 15         # scalar vs AVX2, at real geometries
+./bin/fp4_f32 15           # FP32 vs FP64 FMA ceiling and the FP4 f32 kernel
 ./bin/gpu_contention spin  # CPU throughput while the device is busy
 ./bin/gpu_contention block # the same with blocking sync, for comparison
 ./bin/gpu_call 200         # per-call GPU cost against matrix size
@@ -815,9 +826,10 @@ Recorded so they are not rebuilt from the same wrong premise.
 
 - **Frequency-pinning the expert cache.** Beats LRU by ~4 points at best and
   loses at small sizes. Plain LRU is right; the bug was the budget split.
-- **8-wide SIMD FP4 dequant.** 81.5 GF/s against 80.9 for plain table lookups.
-  FP4 was never dequant-bound — the win was hoisting the activation widening out
-  of the row loop (2.8×).
+- **8-wide SIMD FP4 dequant (the sign/magnitude variant).** 81.5 GF/s against
+  80.9 for plain table lookups. The dequant itself was not the limit then — the
+  win was hoisting the activation widening out of the row loop (2.8×). The later
+  FP32 inner-block change attacks the FMA width and conversion cost instead.
 - **Layer-major prefill.** Bit-exact, and 73.6 s against a 66–70 s baseline. The
   trunk is fully pinned so there is no disk read to save, and 165 MB per layer
   dwarfs the ~24 MB L3, so there is no cache reuse either. (Both figures are

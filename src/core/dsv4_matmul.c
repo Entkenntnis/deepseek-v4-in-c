@@ -199,14 +199,6 @@ static inline __m256 load8_fp8(const uint8_t *wb, int i)
     return _mm256_castsi256_ps(bits);
 }
 
-static inline __m256d load4_fp4(const uint8_t *row, int64_t base, int i)
-{
-    return _mm256_cvtps_pd(_mm_set_ps(dsv4_fp4_at(row, base + i + 3),
-                                      dsv4_fp4_at(row, base + i + 2),
-                                      dsv4_fp4_at(row, base + i + 1),
-                                      dsv4_fp4_at(row, base + i + 0)));
-}
-
 /* EIGHT FP4 VALUES AT ONCE, without eight table lookups.
  *
  * e2m1 decomposes exactly: code & 7 selects a magnitude from
@@ -250,11 +242,11 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
 #define PD_LO(f) _mm256_cvtps_pd(_mm256_castps256_ps128(f))
 #define PD_HI(f) _mm256_cvtps_pd(_mm256_extractf128_ps((f), 1))
 
-/* ONE EIGHT-WIDE DEQUANT BODY FOR FP4 AND FP8.
+/* ONE EIGHT-WIDE DEQUANT BODY FOR FP8.
  *
- * Both loaders hand back eight f32 weights per call; only the dequant itself
- * differs. The double tree, its grouping and its order are untouched, which is
- * what keeps both paths bit-identical to the scalar definition. */
+ * The loader hands back eight f32 weights per call; the double tree, its
+ * grouping and its order are untouched, which is what keeps the path
+ * bit-identical to the scalar definition. */
 #define BLOCK_DOT_V_8(LOAD1, LOAD8)                                            \
     do {                                                                       \
         __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();            \
@@ -275,18 +267,13 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
         for (; i < n; i++) acc = fma(LOAD1(i), (double)xb[i], acc);            \
     } while (0)
 
-#define LOAD8_FP4(i) fp4_8(row, (int64_t)c0 + (i))
 #define LOAD8_FP8(i) load8_fp8(wb, (i))
-#define BLOCK_DOT_V_FP4(LOAD1, LOAD4) BLOCK_DOT_V_8(LOAD1, LOAD8_FP4)
-#define BLOCK_DOT_FP8(LOAD1)          BLOCK_DOT_V_8(LOAD1, LOAD8_FP8)
+#define BLOCK_DOT_FP8(LOAD1) BLOCK_DOT_V_8(LOAD1, LOAD8_FP8)
 
 #define LOAD4_BF16(k) load4_bf16(row, (k))
-#define LOAD4_FP4(k)  load4_fp4(row, (int64_t)c0, (k))
 #else
 /* Never expanded without AVX2, but they must still parse. */
 #define LOAD4_BF16(k) 0
-#define LOAD4_FP4(k)  0
-#define BLOCK_DOT_V_FP4(LOAD1, LOAD4) BLOCK_DOT_S(LOAD1)
 #endif
 
 /* ONE f32 -> f64 PASS OVER THE ACTIVATIONS, reused by every output row.
@@ -315,10 +302,12 @@ static double *widen_x(const float *x, int in)
 #define BLOCK_DOT_S2(LOAD1, ...) BLOCK_DOT_S(LOAD1)
 
 /* ---------------------------------------------------------------- kernels ---
- * Emitted twice: once always, as `..._scalar`, and once as `..._avx2` where the
- * machine has AVX2+FMA. Two instantiations of ONE body, so they cannot drift
- * apart, and both are callable at runtime so the gate can compare them on real
- * data instead of trusting the argument that they must agree.
+ * bf16 and FP8 are emitted twice: once always, as `..._scalar`, and once as
+ * `..._avx2` where the machine has AVX2+FMA. Two instantiations of ONE body, so
+ * they cannot drift apart, and both are callable at runtime so the gate can
+ * compare them on real data instead of trusting the argument that they must
+ * agree. FP4 is the deliberate exception: its AVX2 kernel is the float-inner
+ * path below, and the scalar double body remains the reference.
  *
  * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
  * default compute team is four threads pinned to the four identical P-cores, so
@@ -333,8 +322,8 @@ static double *widen_x(const float *x, int in)
  * columns, and the reduction inside the row is untouched. Only which thread
  * computes which row changes, and rows do not interact. */
 /* One FP8 GEMV body, emitted for the scalar and AVX2 variants. Kept apart from
- * GEN_MATMULS so the kernel is the SAME body with a different loader, not a
- * second implementation that could drift. */
+ * the bf16/FP4 generators so the kernel is the SAME body with a different
+ * loader, not a second implementation that could drift. */
 #define GEN_FP8_BODY(NAME, DOT)                                                \
 void NAME(float *y, const float *x, const uint8_t *W,                          \
                           const uint8_t *S, int in, int out,                   \
@@ -363,8 +352,7 @@ void NAME(float *y, const float *x, const uint8_t *W,                          \
     free(xd);                                                                  \
 }
 
-#define GEN_MATMULS(SUF, DOT, DOT4)                                            \
-                                                                               \
+#define GEN_BF16(SUF, DOT)                                                     \
 void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
                            int in, int out)                                    \
 {                                                                              \
@@ -381,8 +369,11 @@ void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
         y[o] = (float)acc;                                                     \
     }                                                                          \
     free(xd);                                                                  \
-}                                                                              \
-                                                                               \
+}
+
+/* The scalar FP4 body stays as the double reference. The AVX2 FP4 kernel is
+ * the float-inner path below, not a second copy of this one. */
+#define GEN_FP4_SCALAR(SUF)                                                    \
 void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
                           const uint8_t *S, int in, int out,                   \
                           int blk_r, int blk_c)                                \
@@ -401,7 +392,7 @@ void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
             const float  *xb  = x + c0;                                        \
             const double *xdb = xd + c0; (void)xdb;                            \
             double acc;                                                        \
-            DOT4(LOAD1_FP4, LOAD4_FP4);                                        \
+            BLOCK_DOT_S2(LOAD1_FP4);                                           \
             total += acc * (double)dsv4_e8m0_to_f32(                           \
                         S[(o / blk_r) * (size_t)sc + (c0 / blk_c)]);           \
         }                                                                      \
@@ -411,12 +402,16 @@ void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
 }
 
 
-GEN_MATMULS(_scalar, BLOCK_DOT_S2, BLOCK_DOT_S2)
+GEN_BF16(_scalar, BLOCK_DOT_S2)
+GEN_FP4_SCALAR(_scalar)
 GEN_FP8_BODY(dsv4_matmul_fp8_scalar, BLOCK_DOT_S2)
 
 #if defined(__AVX2__) && defined(__FMA__)
-GEN_MATMULS(_avx2, BLOCK_DOT_V, BLOCK_DOT_V_FP4)
+GEN_BF16(_avx2, BLOCK_DOT_V)
 GEN_FP8_BODY(dsv4_matmul_fp8_avx2, BLOCK_DOT_FP8)
+void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
+                          const uint8_t *S, int in, int out,
+                          int blk_r, int blk_c);
 #define PICK(name) name##_avx2
 int dsv4_matmul_has_avx2(void) { return 1; }
 #else
@@ -442,6 +437,71 @@ void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
 {
     PICK(dsv4_matmul_fp4)(y, x, W, S, in, out, blk_r, blk_c);
 }
+
+#if defined(__AVX2__) && defined(__FMA__)
+/* FP4 with a float inner block and a double fold.
+ *
+ * This is the CPU analogue of the GPU path's "float inner, double fold": the
+ * products inside one 32-wide scale block are accumulated with 8-lane float
+ * FMAs, then that block's dot product is widened to double and the block scale
+ * and cross-block sum stay in double. It is intentionally not bitwise-equal to
+ * the scalar double kernel; the matmul gate bounds the difference in L2 norm
+ * instead.
+ *
+ * Four independent float accumulators cover the 32 weights of one block, so
+ * the FMAs have no serial dependency inside the block. x is already f32, so
+ * this path also skips widen_x entirely. */
+static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
+                                       const float *xb, int n)
+{
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 31 < n; i += 32) {
+        a0 = _mm256_fmadd_ps(fp4_8(row, base + i),
+                             _mm256_loadu_ps(xb + i), a0);
+        a1 = _mm256_fmadd_ps(fp4_8(row, base + i + 8),
+                             _mm256_loadu_ps(xb + i + 8), a1);
+        a2 = _mm256_fmadd_ps(fp4_8(row, base + i + 16),
+                             _mm256_loadu_ps(xb + i + 16), a2);
+        a3 = _mm256_fmadd_ps(fp4_8(row, base + i + 24),
+                             _mm256_loadu_ps(xb + i + 24), a3);
+    }
+
+    __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                             _mm256_add_ps(a2, a3));
+    __m128 lo = _mm256_castps256_ps128(s);
+    __m128 hi = _mm256_extractf128_ps(s, 1);
+    __m128 t = _mm_add_ps(lo, hi);
+    t = _mm_hadd_ps(t, t);
+    t = _mm_hadd_ps(t, t);
+    double acc = (double)_mm_cvtss_f32(t);
+
+    /* Only hand-built fixtures reach this tail; the real FP4 block is 32. */
+    for (; i < n; i++)
+        acc += (double)dsv4_fp4_at(row, base + i) * (double)xb[i];
+    return acc;
+}
+
+void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
+                          const uint8_t *S, int in, int out,
+                          int blk_r, int blk_c)
+{
+    const int sc = (in + blk_c - 1) / blk_c;
+    _Pragma("omp parallel for schedule(static) if (out > 64)")
+    for (int o = 0; o < out; o++) {
+        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+        double total = 0.0;
+        for (int c0 = 0; c0 < in; c0 += blk_c) {
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;
+            const double acc = fp4_block_dot_f32(row, (int64_t)c0, x + c0, n);
+            total += acc * (double)dsv4_e8m0_to_f32(
+                        S[(o / blk_r) * (size_t)sc + (c0 / blk_c)]);
+        }
+        y[o] = (float)total;
+    }
+}
+#endif
 
 
 /* ---------------------------------------------------------------- dispatch --

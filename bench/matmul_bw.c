@@ -42,7 +42,7 @@ int main(int argc, char **argv)
     printf("matmul throughput, Flash geometries, AVX2 %s\n",
            dsv4_matmul_has_avx2() ? "COMPILED IN" : "not available");
     printf("%-22s %10s %10s %8s  %s\n",
-           "kernel", "scalar", "avx2", "speedup", "bitwise equal");
+           "kernel", "scalar", "avx2", "speedup", "agreement");
 
     struct { const char *name; int in, out, blk_r, blk_c, fp4; } job[] = {
         { "fp4 expert w1 2048x4096", 4096, 2048, 1, 32,  1 },
@@ -96,11 +96,24 @@ int main(int argc, char **argv)
             if (t2 - t1 < tv) tv = t2 - t1;
         }
 
-        const int same = memcmp(ya, yb, (size_t)out * sizeof *ya) == 0;
         const double flop = 2.0 * (double)in * (double)out;
-        printf("%-22s %7.1f GF %7.1f GF %7.2fx  %s\n",
-               job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
-               same ? "yes" : "NO -- THE PATHS DISAGREE");
+        if (job[j].fp4) {
+            double err2 = 0.0, ref2 = 0.0;
+            for (int i = 0; i < out; i++) {
+                const double d = (double)yb[i] - (double)ya[i];
+                err2 += d * d;
+                ref2 += (double)ya[i] * (double)ya[i];
+            }
+            const double rel = sqrt(err2 / (ref2 > 0.0 ? ref2 : 1.0));
+            printf("%-22s %7.1f GF %7.1f GF %7.2fx  f32 L2 %.1e\n",
+                   job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
+                   rel);
+        } else {
+            const int same = memcmp(ya, yb, (size_t)out * sizeof *ya) == 0;
+            printf("%-22s %7.1f GF %7.1f GF %7.2fx  %s\n",
+                   job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
+                   same ? "bitwise" : "NO -- THE PATHS DISAGREE");
+        }
 
         free(x); free(ya); free(yb); free(W); free(S);
     }
