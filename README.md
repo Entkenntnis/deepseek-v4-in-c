@@ -84,7 +84,7 @@ stays the reference.
 ```sh
 make            # CPU only
 make test       # the gate ladder
-make bench      # matmul_bw, fp8_decode, fp4_f32, cache_bw
+make bench      # matmul_bw, fp8_decode, fp4_f32, matmul_variants, cache_bw
 ```
 
 `make test` runs 20 gates. The 21st, the trunk gate, needs a real checkpoint and
@@ -460,10 +460,10 @@ FP4 float-inner kernel:
 
 | kernel | scalar | AVX2 | speedup | agreement |
 |---|---|---|---|---|
-| fp4 expert w1 2048x4096 | 10.6 GF/s | **59.4 GF/s** | 5.60x | L2 7.3e-8 |
-| fp4 expert w2 4096x2048 | 10.6 GF/s | **59.5 GF/s** | 5.62x | L2 7.5e-8 |
-| fp8 attn wo_b 4096x8192 | 3.4 GF/s | 40.9 GF/s | 12.13x | bitwise |
-| fp8 attn wq_b 32768x1024 | 3.3 GF/s | 41.7 GF/s | 12.47x | bitwise |
+| fp4 expert w1 2048x4096 | 10.8 GF/s | **63.9 GF/s** | 5.92x | L2 7.3e-8 |
+| fp4 expert w2 4096x2048 | 10.8 GF/s | **63.8 GF/s** | 5.89x | L2 7.5e-8 |
+| fp8 attn wo_b 4096x8192 | 3.4 GF/s | 41.1 GF/s | 12.21x | bitwise |
+| fp8 attn wq_b 32768x1024 | 3.4 GF/s | 43.6 GF/s | 12.98x | bitwise |
 
 The FP4 AVX2 kernel accumulates each 32-weight block in float and folds blocks
 in double; it is **not** bitwise-equal to the scalar double reference. The L2
@@ -766,6 +766,7 @@ number this README would like to carry. Send it.
 make bench                 # builds the CPU benches
 ./bin/matmul_bw 15         # scalar vs AVX2, at real geometries
 ./bin/fp4_f32 15           # FP32 vs FP64 FMA ceiling and the FP4 f32 kernel
+./bin/matmul_variants 10   # loop-variant A/B, one progress line per rep
 ./bin/gpu_contention spin  # CPU throughput while the device is busy
 ./bin/gpu_contention block # the same with blocking sync, for comparison
 ./bin/gpu_call 200         # per-call GPU cost against matrix size

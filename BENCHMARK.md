@@ -348,6 +348,9 @@ twice the FLOPs per FMA.
 | w1 2048x4096 | 44.9 GF/s | 61.3 GF/s | **1.36x** |
 | w2 4096x2048 | 44.9 GF/s | 60.6 GF/s | **1.35x** |
 
+The later 32-wide block specialization lifts the shipped kernel to 63.9/63.8
+GF/s; see [Loop-variant experiments](#loop-variant-experiments-after-fp32--2026-11-12).
+
 Accuracy against the double reference: L2 relative error `7.1–7.4e-8`; max
 absolute `7.6e-5–9.2e-5`; the worst per-element relative error is `4e-3`, but
 only on outputs near zero. That is the expected float-block/double-fold shape.
@@ -376,6 +379,60 @@ and bounds FP4 at 1e-6 L2 relative error, about an order of magnitude above the
 measured 7e-8. The first float rep above (0.995) is the reason to judge the
 change by the interleaved medians, not a single run. `make bin/fp4_f32`
 reproduces the kernel numbers and the error bound.
+
+## Loop-variant experiments after FP32 — 2026-11-12
+
+`bench/matmul_variants.c` compares experimental loop bodies against the
+shipped kernel. It is built with `-DDSV4_MATMUL_EXPERIMENTS`, so the variants
+exist only in `bin/matmul_variants`, never in the engine. It prints one progress
+line per repetition with every variant's running best, and it checks every
+variant against the shipped kernel with `memcmp` before timing.
+
+Pinned to CPU 0–3, `OMP_NUM_THREADS=4`, 10 reps, best of run:
+
+| variant | FP4 w1 | FP4 w2 | verdict |
+|---|---:|---:|---|
+| original f32 baseline | 60.2 GF/s | 60.1 GF/s | — |
+| block-index counter | 62.5 GF/s | 61.9 GF/s | **+3–4%** |
+| 32-wide block specialization | **65.3 GF/s** | **64.7 GF/s** | **+8–9%** |
+| 32-wide + row-block loop | 65.1 GF/s | 64.3 GF/s | neutral |
+| + FP4 LUT gather | 43.3 GF/s | 43.2 GF/s | **−28%** |
+
+The per-block `c0 / blk_c` integer division was real but smaller than expected.
+The bigger FP4 win is removing the generic block loop and tail entirely for the
+real 32-wide block. The 16-entry LUT gather is a clear loss on this core: the
+sign/magnitude ALU decode is cheaper than eight gathers.
+
+For FP8:
+
+| variant | wo_b | wq_b | verdict |
+|---|---:|---:|---|
+| baseline | 42.7 GF/s | 44.1 GF/s | — |
+| block-index counter | 43.1 GF/s | 44.2 GF/s | **+1%** |
+| unroll 4 | 40.2 GF/s | 40.2 GF/s | **−6–12%** |
+| double-table gather | 37.8 GF/s | 39.1 GF/s | **−12–15%** |
+
+FP8 is already close to the memory stream, so only the counter change is kept.
+The double table removes the `vcvtps2pd` instructions but doubles the gather
+count and loses more than it saves.
+
+**Hard-coded now:** FP4 uses the 32-wide specialized kernel (with the generic
+counter path as a non-32 fallback); FP8 uses the counter-based scale indexing.
+All variants are bitwise-equal to the kernel they replaced.
+
+Full-model A/B, old f32 kernel versus the new one, interleaved 3 reps each:
+
+| round | old f32 median | new f32 median | delta |
+|---|---:|---:|---:|
+| old first | 0.885 | 0.880 | **−0.6%** |
+| new first | 0.885 | 0.870 | **−1.7%** |
+| combined 6+6 runs | 0.885 | 0.875 | **−1.1%** |
+
+All runs produced identical ids. The routed-expert matmul fell
+`315.5–317.8 → 300.2–300.5 ms/pass`; exposed disk and attention were flat, so
+most of the kernel gain was absorbed by the other components. The change is
+kept because it is strictly faster and bitwise-neutral, not because it moves
+the full model much.
 
 ## Measurement rules this machine earned
 

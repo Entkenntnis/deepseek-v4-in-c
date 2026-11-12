@@ -197,12 +197,16 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants
 bench: $(BENCHBIN)
 
 $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
+
+$(BIN)/matmul_variants: bench/matmul_variants.c src/core/dsv4_matmul.c
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) -DDSV4_MATMUL_EXPERIMENTS bench/matmul_variants.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
 $(BIN)/fp4_f32: bench/fp4_f32.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)

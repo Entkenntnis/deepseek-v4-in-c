@@ -182,6 +182,8 @@ static void run_shape(const char *name, int in, int out, int reps)
     }
     const double nrm_rel = nrm2_ref > 0.0 ? sqrt(nrm2_err / nrm2_ref) : 0.0;
 
+    printf("  timing %s (%d reps)...\n", name, reps);
+    fflush(stdout);
     double tf = 1e30;
     for (int r = 0; r < reps; r++) {
         const double t0 = now();
@@ -204,6 +206,8 @@ int main(int argc, char **argv)
     const int reps = argc > 1 ? atoi(argv[1]) : 10;
     const long iters = 20000000L;
 
+    printf("measuring raw FP32/FP64 FMA ceilings...\n");
+    fflush(stdout);
     double p32 = 0.0, p64 = 0.0;
     for (int r = 0; r < 3; r++) {
         const double a = peak_f32(iters), b = peak_f64(iters);

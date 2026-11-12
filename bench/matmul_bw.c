@@ -77,6 +77,8 @@ int main(int argc, char **argv)
         }
         memset(S, 127, sbytes);          /* scale 2^0 */
 
+        printf("  timing %s (%d reps)...\n", job[j].name, reps);
+        fflush(stdout);
         double ts = 1e30, tv = 1e30;
         for (int r = 0; r < reps; r++) {
             double t0 = now();
