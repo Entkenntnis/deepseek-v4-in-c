@@ -710,11 +710,16 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerBind lb;
         const double tb = now_s();
+        const double io0 = e->tr.load_seconds;
         if (dsv4_trunk_bind(&e->tr, &e->c, L, &lb) != 0) {
             emit_error("trunk bind failed on layer %d at position %d", L, pos);
             return -1;
         }
-        dsv4_prof.bind += now_s() - tb;
+        /* read_run() reports its own wall time; the rest is actual binding. */
+        const double io = e->tr.load_seconds - io0;
+        const double call = now_s() - tb;
+        dsv4_prof.trunk_io += io;
+        dsv4_prof.bind += call > io ? call - io : 0.0;
         const int comp = dsv4_compress_ratio(&e->c, L) != 0;
         dsv4_layer_forward(e->h, &lb.w, &e->c, &e->scratch, &src,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,

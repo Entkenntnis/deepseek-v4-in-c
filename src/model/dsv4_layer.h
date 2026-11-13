@@ -135,6 +135,11 @@ void dsv4_state_free(DSV4LayerState *st);
 typedef struct {
     double hc;          /* mHC pre/post, Sinkhorn, the two RMSNorms   */
     double attn;        /* CSA + HCA + RoPE + the output projection   */
+    /* Subset of `attn`: the CSA indexer's score pass and top-k selection.
+     * Kept separate so a context-scaling change can be judged directly instead
+     * of hidden inside the whole attention block. Not added to `acc` below --
+     * it is already counted in attn and must not be double-counted. */
+    double idxer;
     double gate;        /* router matmul and top-k selection          */
     double expert_io;   /* waiting for the expert cache               */
     double expert_mm;   /* routed-expert FP4 matmuls                  */
@@ -145,10 +150,15 @@ typedef struct {
      * reads 129280 x 4096 BF16 = 1.06 GB per token, which is not small. */
     double head;
 
-    /* dsv4_trunk_bind: resolving a layer's ~40 tensor names and widening the
-     * small vectors. Also in the CLI, also previously unaccounted. It runs once
-     * per layer per token even when the layer is pinned and cannot have moved,
-     * so this number decides whether a per-layer bind cache is worth it. */
+    /* dsv4_trunk_bind, split into its two very different halves. The call used
+     * to land in one `bind` bucket, which made a 2 s first-token trunk read
+     * look like per-token binding overhead. `trunk_io` is the time spent inside
+     * read_run() (already accumulated by DSV4Trunk.load_seconds), and `bind` is
+     * the remainder: name resolution, widening and pointer rebinding.
+     *
+     * Both are in the CLI because dsv4_trunk_bind is called there; they were
+     * previously part of the unaccounted remainder. */
+    double trunk_io;
     double bind;
 } DSV4Prof;
 extern DSV4Prof dsv4_prof;

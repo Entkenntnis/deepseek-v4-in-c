@@ -62,6 +62,76 @@ static int dsv4_run_get_experts(void *ctx, int layer, const int *e, int n,
  * would put a cache type in dsv4_layer.h for no gain. */
 static DSV4CacheBatch g_batch;
 
+/* ------------------------------------------------ synthetic expert source ---
+ * Benchmark-only. One fixed FP4 expert, built in RAM, returned for every
+ * (layer, expert) request. The layer stack, router, attention and shared expert
+ * all still run; only the 140 GB routed-expert disk traffic is removed. Used as
+ * the no-I/O control for an A/B whose subject is attention/indexer arithmetic.
+ * The output is meaningless, but it is identical for every arm. */
+static DSV4ExpertW g_synth_expert;
+static void *g_synth_bufs[6];
+
+static int synth_expert_init(const DSV4Cfg *c)
+{
+    const size_t inter = (size_t)c->moe_inter, hid = (size_t)c->hidden;
+    const size_t wb[3] = { inter * (hid / 2), hid * (inter / 2), inter * (hid / 2) };
+    const size_t sb[3] = { inter * (hid / 32), hid * (inter / 32), inter * (hid / 32) };
+    unsigned st = 0x1234567u;
+
+    for (int i = 0; i < 3; i++) {
+        g_synth_bufs[i] = malloc(wb[i]);
+        g_synth_bufs[3 + i] = malloc(sb[i]);
+        if (!g_synth_bufs[i] || !g_synth_bufs[3 + i]) return -1;
+        uint8_t *w = (uint8_t *)g_synth_bufs[i];
+        for (size_t k = 0; k < wb[i]; k++) {
+            st = st * 1103515245u + 12345u;
+            w[k] = (uint8_t)(st >> 16);
+        }
+        /* 124 = 2^-3. Random F8_E8M0 bytes would cover 2^-127..2^128 and
+         * overflow the expert output; a fixed small scale keeps it finite. */
+        memset(g_synth_bufs[3 + i], 124, sb[i]);
+    }
+
+    g_synth_expert.w1 = (DSV4QMat){ g_synth_bufs[0], g_synth_bufs[3],
+                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32 };
+    g_synth_expert.w3 = (DSV4QMat){ g_synth_bufs[2], g_synth_bufs[5],
+                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32 };
+    g_synth_expert.w2 = (DSV4QMat){ g_synth_bufs[1], g_synth_bufs[4],
+                                    DSV4_WFP4, c->hidden, c->moe_inter, 1, 32 };
+    return 0;
+}
+
+static void synth_expert_free(void)
+{
+    for (int i = 0; i < 6; i++) { free(g_synth_bufs[i]); g_synth_bufs[i] = NULL; }
+}
+
+static const DSV4ExpertW *synth_get(void *ctx, int layer, int e)
+{
+    (void)ctx; (void)layer; (void)e;
+    return &g_synth_expert;
+}
+
+static int synth_get_many(void *ctx, int layer, const int *e, int n,
+                          const DSV4ExpertW **out)
+{
+    (void)ctx; (void)layer; (void)e;
+    for (int k = 0; k < n; k++) out[k] = &g_synth_expert;
+    return 0;
+}
+
+static int synth_begin(void *ctx, int layer, const int *e, int n,
+                       const DSV4ExpertW **out)
+{
+    return synth_get_many(ctx, layer, e, n, out);
+}
+
+static int synth_end(void *ctx, const DSV4ExpertW **out)
+{
+    (void)ctx; (void)out;
+    return 0;
+}
+
 static int dsv4_run_begin_experts(void *ctx, int layer, const int *e, int n,
                                   const DSV4ExpertW **out)
 {
@@ -114,13 +184,54 @@ static void hc_head(float *y, const float *x, const DSV4HcW *w,
     }
 }
 
+/* ---------------------------------------------------- synthetic KV bench ---
+ * Fill every layer's persistent KV state as if `start_pos` tokens had already
+ * been processed, without running them. The values are deterministic random
+ * numbers, not model output: the generated text is meaningless, but both arms
+ * of an A/B see exactly the same state. Used to put the indexer and sparse
+ * attention at a real 2k-context workload without paying the ~1 s/token
+ * prefill. The compressor's open window starts at -INFINITY score (its
+ * state_init default), so only slots written by generated tokens participate
+ * in the first window close. */
+static void fill_synthetic_kv(DSV4LayerState *lst, const DSV4Cfg *c,
+                              int start_pos)
+{
+    unsigned st = 0x9e3779b9u;
+    for (int L = 0; L < c->n_layers; L++) {
+        int ratio = dsv4_compress_ratio(c, L);
+        if (ratio < 0) ratio = 0;
+        const int ncomp = ratio ? start_pos / ratio : 0;
+        lst[L].n_compressed = ncomp;
+
+        const size_t rows = (size_t)c->sliding_window + (size_t)ncomp;
+        float *kv = lst[L].kv_cache;
+        for (size_t i = 0; i < rows * (size_t)c->head_dim; i++) {
+            st = st * 1103515245u + 12345u;
+            kv[i] = (float)((int)((st >> 16) & 0xffff) - 32768) * (1.0f / 8192.0f);
+        }
+
+        if (ratio) {
+            const int coff = (ratio == 4) ? 2 : 1;
+            const size_t cn = (size_t)coff * (size_t)ratio
+                            * (size_t)coff * (size_t)c->head_dim;
+            for (size_t i = 0; i < cn; i++) {
+                st = st * 1103515245u + 12345u;
+                lst[L].comp_kv[i] =
+                    (float)((int)((st >> 16) & 0xffff) - 32768) * (1.0f / 8192.0f);
+            }
+            /* comp_score stays at its state_init value (-INFINITY). */
+        }
+    }
+}
+
 static void usage(const char *me)
 {
     printf("usage: %s <model_dir | --model DIR> --trunk <dir> --tok <file> "
            "[--prompt TEXT] [--gen N] [--budget GB|auto] [--route-log FILE]\n"
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
-           "       [--reader-pin off|all|p|e]\n", me);
+           "       [--reader-pin off|all|p|e] [--synthetic-kv START_POS]\n"
+           "       [--synthetic-experts]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -135,6 +246,8 @@ int main(int argc, char **argv)
     int budget_auto = 0;
     const char *pin = "p", *reader_pin = "off";
     int threads = 4, readers = 6;
+    int synthetic_kv = 0;       /* >0: prefill the KV state, start at this pos */
+    int synthetic_experts = 0;  /* benchmark: one fixed FP4 expert in RAM */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -157,6 +270,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
         else if (!strcmp(argv[i], "--readers") && i + 1 < argc) readers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc) reader_pin = argv[++i];
+        else if (!strcmp(argv[i], "--synthetic-kv") && i + 1 < argc)
+            synthetic_kv = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--synthetic-experts")) synthetic_experts = 1;
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -309,9 +425,33 @@ int main(int argc, char **argv)
     for (int L = 0; L < c.n_layers; L++)
         if (dsv4_state_init(&lst[L], &c, L, maxpos) != 0) return 1;
 
-    DSV4ExpertSrc src = { dsv4_run_get_expert, dsv4_run_get_experts,
-                          dsv4_run_begin_experts, dsv4_run_end_experts,
-                          &cache };
+    if (synthetic_kv > 0) {
+        if (synthetic_kv + ngen + 1 >= maxpos) {
+            fprintf(stderr, "--synthetic-kv %d with --gen %d needs maxpos > %d, "
+                            "but the CLI allocates %d\n",
+                    synthetic_kv, ngen, synthetic_kv + ngen + 1, maxpos);
+            return 1;
+        }
+        fill_synthetic_kv(lst, &c, synthetic_kv);
+        fprintf(stderr, "synthetic KV: start_pos=%d, kv rows per layer filled\n",
+                synthetic_kv);
+    }
+
+    DSV4ExpertSrc src;
+    if (synthetic_experts) {
+        if (synth_expert_init(&c) != 0) {
+            fprintf(stderr, "could not allocate the synthetic expert\n");
+            return 1;
+        }
+        src = (DSV4ExpertSrc){ synth_get, synth_get_many,
+                               synth_begin, synth_end, NULL };
+        fprintf(stderr, "synthetic experts: one fixed FP4 expert in RAM; "
+                        "routed-expert disk traffic is disabled\n");
+    } else {
+        src = (DSV4ExpertSrc){ dsv4_run_get_expert, dsv4_run_get_experts,
+                               dsv4_run_begin_experts, dsv4_run_end_experts,
+                               &cache };
+    }
 
     /* ---- chat encoding, per the checkpoint's own encoding/README.md ----
      *
@@ -358,9 +498,18 @@ int main(int argc, char **argv)
 
     /* Prompt tokens and generated tokens use the SAME forward path. That keeps
      * prefill and decode timings comparable: there is no separate GEMM path
-     * whose cost would have to be reasoned about separately. */
-    for (int pos = 0; pos < nprompt + ngen; pos++) {
-        const int32_t tid = ids[pos];
+     * whose cost would have to be reasoned about separately.
+     *
+     * With --synthetic-kv the prefill is skipped: step 0 is the seed token at
+     * start_pos and every later step is a decode step against the filled KV.
+     * The extra step exists so exactly `ngen` decode forwards are timed. */
+    const int start_pos = synthetic_kv > 0 ? synthetic_kv : 0;
+    const int nsteps = synthetic_kv > 0 ? 1 + ngen : nprompt + ngen;
+    double syn_ttft = 0.0;
+
+    for (int step = 0; step < nsteps; step++) {
+        const int pos = start_pos + step;
+        const int32_t tid = ids[step];
 
         /* embed, then expand to hc_mult identical copies (model.py Transformer:
          * h.unsqueeze(2).repeat(1,1,hc_mult,1)) */
@@ -370,18 +519,28 @@ int main(int argc, char **argv)
         for (int L = 0; L < c.n_layers; L++) {
             DSV4LayerBind lb;
             const double tb = now_s();
+            const double io0 = tr.load_seconds;
             if (dsv4_trunk_bind(&tr, &c, L, &lb) != 0) return 1;
-            dsv4_prof.bind += now_s() - tb;
+            /* Split the call: read_run() already reports its own wall time in
+             * tr.load_seconds, so the remainder is the actual binding work. */
+            const double io = tr.load_seconds - io0;
+            const double call = now_s() - tb;
+            dsv4_prof.trunk_io += io;
+            dsv4_prof.bind += call > io ? call - io : 0.0;
             const int comp = dsv4_compress_ratio(&c, L) != 0;
             dsv4_layer_forward(h, &lb.w, &c, &scratch, &src, &lst[L],
                                comp ? cs_c : cs_d, comp ? sn_c : sn_d,
                                pos, tid);
         }
 
-        if (pos + 1 >= nprompt) {
+        if (synthetic_kv > 0 || step + 1 >= nprompt) {
             /* The last prompt token has cleared every layer and the head has
              * not run yet. */
-            if (ttft == 0.0 && pos + 1 == nprompt) ttft = now_s() - t0;
+            if (synthetic_kv > 0) {
+                if (step == 0) syn_ttft = now_s() - t0;
+            } else if (ttft == 0.0 && step + 1 == nprompt) {
+                ttft = now_s() - t0;
+            }
             /* The output head. Timed separately from the layers because it is
              * a vocab-wide BF16 GEMV (1.06 GB of weights on Flash) that lives
              * outside dsv4_layer_forward and used to land in "unaccounted". */
@@ -394,24 +553,36 @@ int main(int argc, char **argv)
 
             int best = 0;
             for (int v = 1; v < c.vocab; v++) if (logits[v] > logits[best]) best = v;
-            if (pos + 1 < nprompt + ngen) ids[pos + 1] = best;
+            if (step + 1 < nsteps) ids[step + 1] = best;
             printf(" %d", best);
             fflush(stdout);
             ntok++;
             /* STOP AT THE END OF THE TURN. Without this the model runs past its
              * own answer and keeps inventing conversation, which reads as a
-             * broken engine rather than a missing stop condition. */
-            if (eos_id >= 0 && best == eos_id) { printf("  <eos>"); break; }
+             * broken engine rather than a missing stop condition. In the
+             * synthetic benchmark the number of tokens is the measurement, so
+             * EOS is intentionally ignored there. */
+            if (synthetic_kv == 0 && eos_id >= 0 && best == eos_id) {
+                printf("  <eos>");
+                break;
+            }
         }
     }
 
     const double dt = now_s() - t0;
 
-    printf("\n\n%d tokens in %.1f s, %.2f s/token\n", ntok, dt,
-           ntok ? dt / ntok : 0.0);
-    printf("time to first token: %.1f s over %d prompt tokens "
-           "(%.2f s/prompt token)\n",
-           ttft, nprompt, ttft / nprompt);
+    if (synthetic_kv > 0) {
+        const double dec = ngen > 0 ? (dt - syn_ttft) / (double)ngen : 0.0;
+        printf("\n\nsynthetic KV: start=%d gen=%d  TTFT=%.3f s  "
+               "decode=%.4f s/token  (%.2f tok/s)\n",
+               start_pos, ngen, syn_ttft, dec, dec > 0.0 ? 1.0 / dec : 0.0);
+    } else {
+        printf("\n\n%d tokens in %.1f s, %.2f s/token\n", ntok, dt,
+               ntok ? dt / ntok : 0.0);
+        printf("time to first token: %.1f s over %d prompt tokens "
+               "(%.2f s/prompt token)\n",
+               ttft, nprompt, ttft / nprompt);
+    }
     dsv4_trunk_report(&tr, "run");
     dsv4_cache_report(&cache, "run");
     dsv4_prof_report(dt, ntok);
@@ -422,6 +593,7 @@ int main(int argc, char **argv)
     free(cs_d); free(sn_d); free(cs_c); free(sn_c);
     dsv4_scratch_free(&scratch);
     dsv4_bind_model_free(&mb);
+    if (synthetic_experts) synth_expert_free();
     dsv4_cache_free(&cache);
     dsv4_trunk_close(&tr);
     dsv4_tok_free(&tok);

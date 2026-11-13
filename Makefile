@@ -197,8 +197,17 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants $(BIN)/ctx_kernels
 bench: $(BENCHBIN)
+
+# Context-scaling kernels: top-k, indexer, sparse attention and mHC, old vs new,
+# on a synthetic KV cache. No checkpoint and no disk, so it can run while the
+# machine is busy with I/O.
+$(BIN)/ctx_kernels: bench/ctx_kernels.c src/core/dsv4_indexer.c \
+                    src/core/dsv4_attn.c src/core/dsv4_hc.c src/core/dsv4_dot.h
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) bench/ctx_kernels.c src/core/dsv4_indexer.c \
+	      src/core/dsv4_attn.c src/core/dsv4_hc.c -o $@ $(LDFLAGS)
 
 $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
@@ -238,7 +247,7 @@ help:
 	@echo "  make               build everything"
 	@echo "  make test          the gate ladder (19 gates; the trunk gate"
 	@echo "                     needs DSV4_MODEL and DSV4_TRUNK to make 20)"
-	@echo "  make bench         matmul_bw, cache_bw"
+	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make tui           build the streaming backend and launch the Python TUI"
 	@echo "  make clean"

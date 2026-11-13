@@ -206,6 +206,9 @@ static void expert_forward(float *out, const float *x, const DSV4ExpertW *e,
     dsv4_mmq(out, s->expert_out, &e->w2);
 }
 
+/* Defined with the profiler below; attention() needs it for the indexer timer. */
+static double pnow(void);
+
 /* Attention for one token at absolute position `pos`.
  *
  * kv_cache is the layer's ring: `window` rows of head_dim, followed by the
@@ -279,6 +282,7 @@ static void attention(float *out, const float *x, const DSV4LayerW *w,
         int take = avail;
         if (avail > 0) {
             if (w->has_idx) {
+                const double ti = pnow();
                 dsv4_mmq(s->idx_q, s->qr, &w->attn.idx.wq_b);
                 for (int h = 0; h < c->index_n_heads; h++)
                     dsv4_rope_apply(s->idx_q + (size_t)h * c->index_head_dim,
@@ -290,6 +294,7 @@ static void attention(float *out, const float *x, const DSV4LayerW *w,
                                    c->index_head_dim, avail);
                 take = avail < c->index_topk ? avail : c->index_topk;
                 dsv4_topk(s->idxs + n_idx, s->idx_scores, avail, take);
+                dsv4_prof.idxer += pnow() - ti;
             } else {
                 for (int i = 0; i < take; i++) s->idxs[n_idx + i] = i;
             }
@@ -350,17 +355,20 @@ void dsv4_prof_report(double wall, int passes)
 {
     const DSV4Prof *p = &dsv4_prof;
     const double acc = p->hc + p->attn + p->gate + p->expert_io
-                     + p->expert_mm + p->shared + p->head + p->bind;
+                     + p->expert_mm + p->shared + p->head
+                     + p->trunk_io + p->bind;
     printf("where the time went: %.1f s of %.1f s wall (%.0f%% accounted)\n",
            acc, wall, 100.0 * acc / wall);
     const struct { const char *n; double v; const char *note; } row[] = {
         { "routed experts (matmul)", p->expert_mm, "FP4, CPU-bound"     },
         { "routed experts (disk)",   p->expert_io, "NVMe, cannot move"  },
         { "attention",               p->attn,      "CSA/HCA/RoPE"       },
+        { "  of which indexer",      p->idxer,     "score+top-k (subset)"},
         { "mHC + norms",             p->hc,        "Sinkhorn"           },
         { "shared expert",           p->shared,    "FP8"                },
         { "lm head + final norm",    p->head,      "BF16, per token"    },
-        { "trunk bind / widen",      p->bind,      "per layer, per token"},
+        { "trunk I/O (read)",        p->trunk_io,  "NVMe, on layer miss" },
+        { "trunk bind / widen",      p->bind,      "name resolve + widen"},
         { "router",                  p->gate,      ""                   },
     };
     for (unsigned i = 0; i < sizeof row / sizeof row[0]; i++)

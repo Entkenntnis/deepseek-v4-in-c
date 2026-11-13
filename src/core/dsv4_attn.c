@@ -39,6 +39,7 @@
 #include <string.h>
 
 #include "dsv4.h"
+#include "dsv4_dot.h"
 
 /* o and q are [h][d]; kv is [n][d] and is addressed through idxs.
  * idxs holds `topk` entries, each an index into kv or -1 for "masked".
@@ -73,9 +74,10 @@ void dsv4_sparse_attn(float *o, const float *q, const float *kv,
             const int idx = idxs[j];
             if (idx < 0) { s[j] = -INFINITY; continue; }
             const float *kvj = kv + (size_t)idx * d;
-            double acc = 0.0;
-            for (int c = 0; c < d; c++)
-                acc = fma((double)qi[c], (double)kvj[c], acc);
+            /* One dependent scalar FMA chain here was the last large
+             * single-thread bottleneck in this kernel; the shared helper
+             * gives four independent 4-lane double chains instead. */
+            const double acc = dsv4_dot_f32d(qi, kvj, d);
             s[j] = (float)acc * scale;
             if (s[j] > mx) mx = s[j];
         }

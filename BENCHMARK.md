@@ -65,6 +65,8 @@ Useful options:
 | `--reader-pin X` | affinity for the reader threads |
 | `--keep DIR` | keep raw logs |
 | `--json FILE` | write every parsed repetition |
+| `--synthetic-kv N` | benchmark-only: fill the KV state for an N-token context, start at position N, skip prefill |
+| `--synthetic-experts` | benchmark-only: use one fixed FP4 expert in RAM, no routed-expert disk traffic |
 
 ## Machine
 
@@ -116,6 +118,70 @@ The "attention" row is mostly the FP8 GEMVs (`wq_a`, `wq_b`, `wo_a`, `wo_b`,
 `dsv4_matmul_fp8_avx2` and <2% to everything that is not a matmul.
 
 ## Change history
+
+### 2026-11-13 — context 2k A/B: indexer, top-k and the serial dot kernels
+
+**Why a synthetic KV cache.** A real 2k prefill costs ~1 s per prompt token on
+this machine (~34 minutes) and reads the routed experts 2,048 times. The
+context-dependent kernels can be put at the same workload without any prefill:
+every layer's `kv_cache` is filled with deterministic random values, the
+compressor's open window keeps its `-INFINITY` scores, and `n_compressed` is set
+to `start_pos / ratio`. The forward loop then starts at `position = 2048` and
+generates normally. Output is meaningless but deterministic; correctness is
+checked by comparing the generated ids between arms.
+
+This is benchmark-only (`--synthetic-kv START_POS`, plus
+`--synthetic-experts` for the I/O-free control); the production path is
+unchanged when the flag is absent.
+
+**Arms.** A = `HEAD` + harness; B = A + the heap top-k and parallel/AVX2
+indexer (`dsv4_indexer.c` + `dsv4_dot.h`); C = B + the vectorised attention
+score dot and mHC. Each arm was run twice, interleaved `A B C C B A`, 30
+tokens, 2k context. Generated ids were **identical across all six runs** in
+both the real-expert and synthetic-expert experiments.
+
+**Direct kernel timers** (medians, ms/pass; `indexer` is a subset of
+`attention`):
+
+| arm | indexer | attention | mHC |
+|---|---:|---:|---:|
+| A old | 164.0 | 635.3 | 38.8 |
+| B indexer-only | 17.7 | 482.3 | 38.9 |
+| C full | 18.4 | 363.2 | 7.3 |
+
+The indexer block — projections, score pass and top-k — falls from **164 ms to
+~18 ms per pass** at 2k. Attention falls by the same 148 ms in B; C removes
+another ~116 ms through the vectorised score dot. mHC falls 38.8 → 7.3 ms.
+
+**Clean decode rate, I/O-free control.** The machine was under external I/O
+load, so the real-expert wall clock was dominated by exposed disk (the same
+7,998 requests / 828 hits / 7,170 misses in every arm, but 684–1,729 ms/pass
+of exposed read time). A second matrix replaced the routed experts with one
+fixed FP4 expert in RAM, leaving attention, indexer, router, shared expert and
+the full layer stack real. This is CPU-bound and reproducible:
+
+| arm | s/token | tok/s | vs A |
+|---|---:|---:|---:|
+| A old | 0.965 | 1.04 | — |
+| B indexer-only | 0.815 | 1.23 | **+18.5 %** |
+| C full | 0.671 | 1.49 | **+43.9 %** |
+
+The indexer-only gain is ~15 % less wall time; the rest of the context package
+adds the attention score dot and mHC. The real-expert run confirms the same
+kernel deltas, but its wall clock is not a clean instrument while the disk is
+shared with other work.
+
+Commands:
+
+```sh
+# real experts, true end-to-end
+./bin/dsv4 ... --prompt "The" --synthetic-kv 2048 --gen 30 \
+  --budget 16 --cpu-pin p --threads 4 --readers 6
+
+# I/O-free control: same model, one fixed FP4 expert in RAM
+./bin/dsv4 ... --prompt "The" --synthetic-kv 2048 --synthetic-experts \
+  --gen 30 --budget 8 --cpu-pin p --threads 4 --readers 6
+```
 
 ### 2026-11-12 — dynamic scheduling in the matmul loops
 

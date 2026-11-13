@@ -16,6 +16,23 @@ static int fails = 0;
                    fails++; }                                                  \
 } while (0)
 
+/* The selection the heap replaced, kept here as the definition it must match. */
+static int topk_ref(int *idxs, const float *scores, int n, int k)
+{
+    if (k > n) k = n;
+    for (int i = 0; i < k; i++) {
+        int best = -1;
+        for (int c = 0; c < n; c++) {
+            int taken = 0;
+            for (int j = 0; j < i; j++) if (idxs[j] == c) { taken = 1; break; }
+            if (taken) continue;
+            if (best < 0 || scores[c] > scores[best]) best = c;
+        }
+        idxs[i] = best;
+    }
+    return k;
+}
+
 int main(void)
 {
     printf("DeepSeek-V4 CSA indexer gate\n");
@@ -161,6 +178,47 @@ int main(void)
               (double)a[0], (double)b[0]);
         printf("  ok    score %.5f unchanged by the Hadamard on both sides\n",
                (double)a[0]);
+    }
+
+    printf("\n-- GATE 8  heap top-k matches the reference scan, ties included --\n");
+    {
+        enum { NMAX = 1000 };
+        static float s[NMAX];
+        static int a[NMAX], b[NMAX];
+        static const int ns[] = { 1, 2, 5, 16, 64, 257, 1000 };
+        unsigned st = 99u;
+        int cases = 0, bad = 0;
+
+        for (unsigned ci = 0; ci < sizeof ns / sizeof ns[0]; ci++) {
+            const int n = ns[ci];
+            for (int i = 0; i < n; i++) {
+                st = st * 1103515245u + 12345u;
+                s[i] = (float)((int)((st >> 16) & 0xFF) - 128) * 0.01f;
+                /* Force ties at the selection boundary, which is where the
+                 * tie rule actually decides membership. */
+                if (i % 7 == 0) s[i] = 0.5f;
+            }
+            const int ks[] = { 0, 1, 3, n / 2, n, n + 5 };
+            for (unsigned kj = 0; kj < sizeof ks / sizeof ks[0]; kj++) {
+                const int want = ks[kj] > n ? n : ks[kj];
+                memset(a, 0xA5, sizeof a);
+                memset(b, 0xA5, sizeof b);
+                const int ra = dsv4_topk(a, s, n, ks[kj]);
+                const int rb = topk_ref(b, s, n, ks[kj]);
+                cases++;
+                if (ra != rb || (want > 0 && memcmp(a, b,
+                                  (size_t)want * sizeof *a) != 0)) {
+                    if (!bad)
+                        printf("  FAIL  n=%d k=%d: heap and scan disagree\n",
+                               n, ks[kj]);
+                    bad++;
+                }
+            }
+        }
+        CHECK(bad == 0, "%d of %d heap/scan cases disagree", bad, cases);
+        if (!bad)
+            printf("  ok    %d random cases, n up to %d, ties and k>n included\n",
+                   cases, NMAX);
     }
 
     printf("\n");

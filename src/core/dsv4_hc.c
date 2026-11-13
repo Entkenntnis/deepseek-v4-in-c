@@ -36,6 +36,11 @@
 #include <string.h>
 
 #include "dsv4.h"
+#include "dsv4_dot.h"
+
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#endif
 
 static inline float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
 
@@ -117,14 +122,12 @@ void dsv4_hc_pre(float *y, float *post, float *comb, float *mixes,
 
     /* RMS over the WHOLE flattened vector, with norm_eps -- not hc_eps, and not
      * per copy. */
-    double sq = 0.0;
-    for (int i = 0; i < hcdim; i++) sq += (double)x[i] * (double)x[i];
+    const double sq = dsv4_dot_f32d(x, x, hcdim);
     const float rsqrt = (float)(1.0 / sqrt(sq / (double)hcdim + (double)norm_eps));
 
     for (int m = 0; m < mix_hc; m++) {
         const float *row = w->fn + (size_t)m * hcdim;
-        double acc = 0.0;
-        for (int i = 0; i < hcdim; i++) acc = fma((double)row[i], (double)x[i], acc);
+        const double acc = dsv4_dot_f32d(row, x, hcdim);
         mixes[m] = (float)acc * rsqrt;
     }
 
@@ -132,12 +135,32 @@ void dsv4_hc_pre(float *y, float *post, float *comb, float *mixes,
     dsv4_hc_split_sinkhorn(pre, post, comb, mixes, w->scale, w->base,
                            hc, iters, hc_eps);
 
+#if defined(__AVX2__) && defined(__FMA__)
+    __m256d pv[DSV4_MAX_HC_MULT];
+    for (int j = 0; j < hc; j++) pv[j] = _mm256_set1_pd((double)pre[j]);
+    int d = 0;
+    for (; d + 3 < hidden; d += 4) {
+        __m256d acc = _mm256_setzero_pd();
+        for (int j = 0; j < hc; j++)
+            acc = _mm256_fmadd_pd(pv[j],
+                                  _mm256_cvtps_pd(_mm_loadu_ps(x + (size_t)j * hidden + d)),
+                                  acc);
+        _mm_storeu_ps(y + d, _mm256_cvtpd_ps(acc));
+    }
+    for (; d < hidden; d++) {
+        double acc = 0.0;
+        for (int j = 0; j < hc; j++)
+            acc += (double)pre[j] * (double)x[(size_t)j * hidden + d];
+        y[d] = (float)acc;
+    }
+#else
     for (int d = 0; d < hidden; d++) {
         double acc = 0.0;
         for (int j = 0; j < hc; j++)
             acc += (double)pre[j] * (double)x[(size_t)j * hidden + d];
         y[d] = (float)acc;
     }
+#endif
 }
 
 /* Expand one stream back to hc.
@@ -151,6 +174,29 @@ void dsv4_hc_post(float *y, const float *x, const float *residual,
 {
     for (int k = 0; k < hc; k++) {
         float *out = y + (size_t)k * hidden;
+#if defined(__AVX2__) && defined(__FMA__)
+        const __m256d pk = _mm256_set1_pd((double)post[k]);
+        __m256d cv[DSV4_MAX_HC_MULT];
+        for (int j = 0; j < hc; j++)
+            cv[j] = _mm256_set1_pd((double)comb[j * hc + k]);
+        int d = 0;
+        for (; d + 3 < hidden; d += 4) {
+            __m256d acc = _mm256_mul_pd(pk, _mm256_cvtps_pd(_mm_loadu_ps(x + d)));
+            for (int j = 0; j < hc; j++)
+                acc = _mm256_fmadd_pd(
+                    cv[j],
+                    _mm256_cvtps_pd(_mm_loadu_ps(residual + (size_t)j * hidden + d)),
+                    acc);
+            _mm_storeu_ps(out + d, _mm256_cvtpd_ps(acc));
+        }
+        for (; d < hidden; d++) {
+            double acc = (double)post[k] * (double)x[d];
+            for (int j = 0; j < hc; j++)
+                acc += (double)comb[j * hc + k]
+                     * (double)residual[(size_t)j * hidden + d];
+            out[d] = (float)acc;
+        }
+#else
         for (int d = 0; d < hidden; d++) {
             double acc = (double)post[k] * (double)x[d];
             for (int j = 0; j < hc; j++)
@@ -158,5 +204,6 @@ void dsv4_hc_post(float *y, const float *x, const float *residual,
                      * (double)residual[(size_t)j * hidden + d];
             out[d] = (float)acc;
         }
+#endif
     }
 }

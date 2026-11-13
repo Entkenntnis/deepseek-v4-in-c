@@ -784,6 +784,7 @@ make bench                 # builds the CPU benches
 ./bin/matmul_bw 15         # scalar vs AVX2, at real geometries
 ./bin/fp4_f32 15           # FP32 vs FP64 FMA ceiling and the FP4 f32 kernel
 ./bin/matmul_variants 10   # loop-variant A/B, one progress line per rep
+./bin/ctx_kernels 15       # top-k/indexer/attention/mHC, 0k-6k synthetic KV cache
 ./bin/gpu_contention spin  # CPU throughput while the device is busy
 ./bin/gpu_contention block # the same with blocking sync, for comparison
 ./bin/gpu_call 200         # per-call GPU cost against matrix size
