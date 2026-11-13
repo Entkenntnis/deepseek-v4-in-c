@@ -207,6 +207,53 @@ int main(void)
                (double)fabsf(y[0]));
     }
 
+    printf("\n-- GATE 5b  FP4, four-block batches plus the single-block tail --\n");
+    {
+        /* IN = 160 is five 32-wide blocks: one four-block batch (c0 = 0) and
+         * one tail block (c0 = 128). The batched path pre-decodes the whole
+         * scale row and indexes it by block; a wrong bi would make the tail
+         * read the first scale again. All values are exactly representable,
+         * so the expected result does not depend on the summation order. */
+        enum { IN = 160, OUT = 3 };
+        static uint8_t W[OUT * (IN / 2)];
+        static uint8_t S[OUT * (IN / 32)];
+        static float x[IN], y[OUT];
+
+        memset(W, 0x22, sizeof W);              /* every weight +1.0 */
+        for (int i = 0; i < IN; i++) x[i] = 1.0f;
+        for (int o = 0; o < OUT; o++)
+            for (int b = 0; b < IN / 32; b++)
+                S[o * (IN / 32) + b] = (uint8_t)(127 + ((b + o) % 5));
+
+        dsv4_matmul_fp4(y, x, W, S, IN, OUT, 1, 32);
+        for (int o = 0; o < OUT; o++) {
+            double want = 0.0;
+            for (int b = 0; b < IN / 32; b++)
+                want += 32.0 * ldexp(1.0, (b + o) % 5);
+            eqf("fp4 batched+tail", y[o], (float)want);
+        }
+        printf("  ok    one batch plus one tail, scales indexed per block\n");
+    }
+
+    printf("\n-- GATE 5c  FP4, the over-512-block fallback --\n");
+    {
+        /* 513 blocks is one more than the batched path's fixed scale array.
+         * This must take the old single-block loop and still be exact; all
+         * weights are +1.0 and every scale is 2^0, so the answer is IN. */
+        enum { IN = 16416, OUT = 1 };
+        static uint8_t W[IN / 2];
+        static uint8_t S[IN / 32];
+        static float x[IN], y[OUT];
+
+        memset(W, 0x22, sizeof W);
+        memset(S, 127, sizeof S);
+        for (int i = 0; i < IN; i++) x[i] = 1.0f;
+
+        dsv4_matmul_fp4(y, x, W, S, IN, OUT, 1, 32);
+        eqf("fp4 wide fallback", y[0], (float)IN);
+        printf("  ok    513 blocks fall back and sum to %d\n", IN);
+    }
+
     printf("\n-- GATE 6  bf16, and dispatch through dsv4_mmq --\n");
     {
         enum { IN = 32, OUT = 2 };

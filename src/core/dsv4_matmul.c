@@ -206,18 +206,31 @@ static inline __m256 load8_fp8(const uint8_t *wb, int i)
  * test reads bit 3, which the 0x0F mask left untouched. Dropping them removes
  * two vector ops per eight weights and leaves every output bitwise identical.
  * `sh` still selects the low or high nibble; an even lane's shifted value
- * contains the rest of the byte, but no instruction ever reads those bits. */
+ * contains the rest of the byte, but no instruction ever reads those bits.
+ *
+ * ONE BROADCAST INSTEAD OF TWO SHUFFLES. The four packed bytes used to be
+ * expanded to eight byte lanes with `vpshufb` and then widened to eight dwords
+ * with `vpmovzxbd`. Both are Port-5 uops, and Port 5 is also where `vpermps`
+ * runs, so the decode spent three shuffle-port uops per eight weights. A
+ * broadcast of the same dword followed by a variable shift produces the exact
+ * same lane contents with one Port-5 uop:
+ *
+ *     lane k = (four >> (4*k))
+ *
+ * `vpermps` only reads the low three bits (the magnitude) and the sign test
+ * only reads bit 3, so all the higher bits the shift leaves behind are
+ * irrelevant. The nibble order is unchanged: lane 0 is the low nibble of the
+ * first byte, lane 1 its high nibble, lane 2 the low nibble of the second
+ * byte, and so on. That makes this a bit-for-bit replacement, not merely an
+ * equivalent decode; test_matmul's FP4 gate checks the result. */
 static inline __m256 fp4_8(const uint8_t *row, int64_t base)
 {
     uint32_t four;
     memcpy(&four, row + (base >> 1), 4);
-    __m128i b = _mm_cvtsi32_si128((int)four);
-    b = _mm_shuffle_epi8(b, _mm_setr_epi8(0, 0, 1, 1, 2, 2, 3, 3,
-                                          -1, -1, -1, -1, -1, -1, -1, -1));
-    __m256i idx = _mm256_cvtepu8_epi32(b);
-    /* val0 (the first, even element) is the low nibble. */
-    const __m256i sh = _mm256_setr_epi32(0, 4, 0, 4, 0, 4, 0, 4);
-    idx = _mm256_srlv_epi32(idx, sh);
+    __m256i idx = _mm256_broadcastd_epi32(_mm_cvtsi32_si128((int)four));
+    /* lane k gets nibble k: element 0 is the LOW nibble of byte 0. */
+    idx = _mm256_srlv_epi32(idx, _mm256_setr_epi32(0, 4, 8, 12,
+                                                   16, 20, 24, 28));
     const __m256 mag = _mm256_permutevar8x32_ps(
         _mm256_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f), idx);
     const __m256i sgn = _mm256_slli_epi32(
@@ -665,9 +678,11 @@ static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
 }
 
 /* The real FP4 block is exactly 32 wide. This removes the generic block
- * loop, the tail check, and the loop setup from that case. */
-static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
-                                          const float *xb)
+ * loop, the tail check, and the loop setup from that case. It returns the
+ * eight lane sums BEFORE the horizontal reduction, so the batched path below
+ * can reduce four blocks at once. */
+static inline __m256 fp4_block_sum32(const uint8_t *row, int64_t base,
+                                     const float *xb)
 {
     const __m256 a0 = _mm256_fmadd_ps(fp4_8(row, base),
                                       _mm256_loadu_ps(xb),
@@ -681,8 +696,12 @@ static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
     const __m256 a3 = _mm256_fmadd_ps(fp4_8(row, base + 24),
                                       _mm256_loadu_ps(xb + 24),
                                       _mm256_setzero_ps());
-    __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1),
-                             _mm256_add_ps(a2, a3));
+    return _mm256_add_ps(_mm256_add_ps(a0, a1),
+                         _mm256_add_ps(a2, a3));
+}
+
+static inline double fp4_hsum256(__m256 s)
+{
     __m128 lo = _mm256_castps256_ps128(s);
     __m128 hi = _mm256_extractf128_ps(s, 1);
     __m128 t = _mm_add_ps(lo, hi);
@@ -691,11 +710,91 @@ static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
     return (double)_mm_cvtss_f32(t);
 }
 
+static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
+                                          const float *xb)
+{
+    return fp4_hsum256(fp4_block_sum32(row, base, xb));
+}
+
+/* Four 32-wide blocks at a time, so the horizontal reduction and the double
+ * fold happen once per 128 weights instead of once per 32, and the scale row
+ * is decoded once per output row rather than once per block.
+ *
+ * Why this is not just a micro-optimisation: the old loop ended every block
+ * with `total += dot * scale`, a scalar double dependency chain of one
+ * multiply and one add per 32 weights. At the real geometry that is 128
+ * serial steps per output row. The four-lane double accumulator below keeps
+ * four independent partial sums alive and only reduces them once at the end.
+ *
+ * The within-block arithmetic is unchanged (same four FMA accumulators, same
+ * pair tree), but the horizontal reduction now sums the lanes in a different
+ * order and the cross-block sum is grouped by block index modulo four. Both
+ * are float-level rounding changes inside the FP4 kernel's existing L2-bound
+ * contract, not a different dot product. The gate bounds it at 1e-6 and the
+ * full-model ids must still agree.
+ *
+ * `sdec` is fixed rather than a VLA because -Wvla is on. 512 doubles covers
+ * every released geometry (Pro's widest reduce dimension, 16384, is 512
+ * blocks); anything wider takes the old single-block loop instead of
+ * pretending the maximum is universal. */
+#define FP4_SC_MAX 512
+
 void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
                           const uint8_t *S, int in, int out,
                           int blk_r, int blk_c)
 {
     const int sc = (in + blk_c - 1) / blk_c;
+
+    if (blk_c == 32 && (in & 31) == 0 && sc <= FP4_SC_MAX) {
+        _Pragma("omp parallel for schedule(static) if (out > 64)")
+        for (int o = 0; o < out; o++) {
+            const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+            double sdec[FP4_SC_MAX];
+            for (int i = 0; i < sc; i++)
+                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
+
+            double total = 0.0;
+            __m256d acc4 = _mm256_setzero_pd();
+            int bi = 0;
+            int c0 = 0;
+            for (; c0 + 127 < in; c0 += 128, bi += 4) {
+                const __m256 s0 = fp4_block_sum32(row, c0, x + c0);
+                const __m256 s1 = fp4_block_sum32(row, c0 + 32, x + c0 + 32);
+                const __m256 s2 = fp4_block_sum32(row, c0 + 64, x + c0 + 64);
+                const __m256 s3 = fp4_block_sum32(row, c0 + 96, x + c0 + 96);
+
+                /* Four 8-lane sums -> four scalars in one xmm. The old path
+                 * did this with two vhaddps per block, eight Port-5 uops
+                 * here; this tree needs three vhaddps plus one extract/add. */
+                const __m256 h01 = _mm256_hadd_ps(s0, s1);
+                const __m256 h23 = _mm256_hadd_ps(s2, s3);
+                const __m256 h   = _mm256_hadd_ps(h01, h23);
+                const __m128 lo  = _mm256_castps256_ps128(h);
+                const __m128 hi  = _mm256_extractf128_ps(h, 1);
+                const __m128 b4  = _mm_add_ps(lo, hi);
+
+                /* No _mm256_fmadd_pd: the engine builds with
+                 * -ffp-contract=off, and the scalar fold this replaces was a
+                 * separate multiply and add. Keep the same rounding. */
+                acc4 = _mm256_add_pd(
+                    acc4,
+                    _mm256_mul_pd(_mm256_cvtps_pd(b4),
+                                  _mm256_loadu_pd(sdec + bi)));
+            }
+            for (; c0 < in; c0 += 32, bi++)
+                total += fp4_block_dot_f32_32(row, (int64_t)c0, x + c0) *
+                         sdec[bi];
+
+            const __m128d dlo = _mm256_castpd256_pd128(acc4);
+            const __m128d dhi = _mm256_extractf128_pd(acc4, 1);
+            const __m128d d2  = _mm_add_pd(dlo, dhi);
+            const __m128d d1  = _mm_unpackhi_pd(d2, d2);
+            total += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
+            y[o] = (float)total;
+        }
+        return;
+    }
 
     if (blk_c == 32 && (in & 31) == 0) {
         _Pragma("omp parallel for schedule(static) if (out > 64)")

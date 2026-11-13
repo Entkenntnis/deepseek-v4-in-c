@@ -496,6 +496,13 @@ identical ids; a 50-token follow-up kept all 51 ids identical and measured
 `0.744 -> 0.692`. See
 [BENCHMARK.md](BENCHMARK.md#fp8-float-inner-block--2026-11-13).
 
+Since this table was recorded, the FP4 kernel gained a broadcast decode and a
+four-block reduction/fold. `bench/matmul_bw` now measures **89.7 GF/s** (w1)
+and **84.9 GF/s** (w2) at the same L2 error. The CPU-bound control fell
+`0.4308 -> 0.3823 s/token` (−11.3%) and the real expert-cache A/B measured
+`0.6300 -> 0.6100 s/token` (−3.2%), with identical ids in both. See
+[BENCHMARK.md](BENCHMARK.md#2026-11-13--fp4-four-block-fold-and-a-broadcast-decode).
+
 The table above is the historical `bench/matmul_bw` harness, which fills weights
 with **uniform random bytes**. That is no longer representative of the
 production FP8 path: uniform bytes are 6.25% subnormal, while the checkpoint's

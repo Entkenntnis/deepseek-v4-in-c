@@ -129,6 +129,86 @@ The "attention" row is mostly the FP8 GEMVs (`wq_a`, `wq_b`, `wo_a`, `wo_b`,
 
 ## Change history
 
+### 2026-11-13 — FP4: four-block fold and a broadcast decode
+
+**Question.** After the FP8 float-inner and hybrid changes, `perf` put the
+routed-expert FP4 GEMV back on top at **48.2% of decode cycles**. `perf
+annotate` said the 32-weight block spent three Port-5 uops per eight weights
+(`vpshufb`, `vpmovzxbd`, `vpermps`) and ended every block with a scalar
+`total += dot * scale` dependency chain. Two source-level changes were tried,
+separately and together.
+
+**Change 1 — broadcast decode.** The four packed bytes used to be expanded to
+eight byte lanes with `vpshufb`, widened with `vpmovzxbd`, and shifted with a
+`0,4,0,4,...` pattern. A broadcast of the same dword followed by
+`vpsrlvd 0,4,8,...,28` produces the identical lane contents in one fewer
+instruction and one fewer Port-5 uop. `vpermps` reads only the low three bits
+and the sign test only bit 3, so the decode is bit-for-bit unchanged.
+
+**Change 2 — four-block fold.** Four 32-wide blocks are now reduced together:
+three `vhaddps` + one extract/add turn the four 8-lane sums into four floats,
+which are widened once to double, multiplied by four pre-decoded scales, and
+added to a four-lane double accumulator. The row is reduced once at the end.
+The scale row (`S`, one E8M0 byte per 32 weights because `blk_r == 1`) is
+decoded once per output row into a 512-double stack array instead of once per
+block. That removes the per-block `vmulsd`/`vaddsd` chain and reduces the
+`vhaddps` count from eight to three per 128 weights.
+
+Both changes stay inside the FP4 kernel's existing L2-bound contract; the
+within-block FMA tree is unchanged. The gate measures `7.7e-8` (was `7.2e-8`).
+
+**Kernel**, `bench/matmul_bw`, 4 P-cores, best of 20, three interleaved rounds:
+
+| arm | w1 2048x4096 | w2 4096x2048 | vs old (w1 / w2) |
+|---|---:|---:|---:|
+| old | 67.3 GF/s | 67.1 GF/s | — |
+| four-block fold only | 73.8 | 71.8 | +9.7% / +7.0% |
+| broadcast decode only | 82.1 | 81.9 | +22.0% / +22.0% |
+| **both** | **89.7** | **84.9** | **+33.3% / +26.5%** |
+
+The order matters: the broadcast is the larger single win, and the batched
+fold adds another ~10% on top rather than the other way round.
+
+**Full decode**, `--gen 30 --budget 8 --synthetic-kv 1024
+--synthetic-experts --pin p --threads 4 --readers 6`, three interleaved pairs:
+
+| arm | runs (s/token) | median |
+|---|---|---:|
+| old | 0.4241 / 0.4308 / 0.4343 | 0.4308 |
+| **both changes** | 0.3823 / 0.3819 / 0.3918 | **0.3823** |
+
+That is **−11.3%** on the median (−9.9%, −11.4%, −9.8% in the three pairs).
+Generated ids were identical in all six runs.
+
+With the real expert cache (`bench/ab.py --reps 5 --gen 20 --budget 16
+--pin p --threads 4 --readers 6`, five interleaved rounds):
+
+| arm | median s/token | min/max | spread | vs ref | ids |
+|---|---|---:|---:|---:|---|
+| old | 0.6300 | 0.6250 / 0.6300 | 0.8% | — | — |
+| **both changes** | **0.6100** | 0.6050 / 0.6100 | 0.8% | **−3.17%** | same |
+
+The real-cache gain is smaller because exposed expert disk is a larger share
+now; the faster matmul exposes more I/O rather than shortening the token by the
+full compute delta. This is the same trade the shared-expert overlap measured.
+
+Components (medians, ms/pass): routed-expert FP4 **207.8 → 161.1** (−22.5%),
+attention 164.9 → 165.2 (flat), shared expert 30.3 → 29.8 (flat), BF16 head
+21.1 → 21.5 (flat), mHC 7.5 → 7.3. The FP4 kernel gained ~25%; the full model
+only sees ~11% because it is 42% of a decode that still contains FP8 and I/O.
+
+The post-change profile attributes **42.3%** to FP4, **39.5%** to FP8,
+9.5% to BF16, 4.3% to sparse attention and 2.6% to the gather fallback. FP8 is
+now the co-largest target, not FP4.
+
+**Verified:** `make test` — every gate passes, including the FP4 L2 bound and
+the 1/8-thread determinism gate; `bench/matmul_bw` reports the same L2 error
+for both arms.
+
+**Decision:** adopted. The next FP4 candidate is a 256-entry double table for
+the E8M0 scale decode (the pre-decode loop is still 128 scalar branches per
+row); the next overall target is FP8.
+
 ### 2026-11-13 — compiler matrix: `-O3` is the ceiling
 
 **Question.** Is there anything left in the compiler flags? The hot loops are
@@ -908,26 +988,31 @@ A/B ids are the same for the right reason, not by luck.
 
 ### Where the next change should look
 
-The new profiles, not guesses:
+The profile after the FP4 changes (same synthetic workload), not guesses:
 
-- **FP8 is still 50% backend-bound** (`TopdownL2`: 46.4% retiring, 3.2%
-  memory-bound). `perf annotate` now attributes ~16.5% to the two `vhaddps`
-  and ~12% to the dependent `vcvtss2sd`. The `hsum_fast` experiment shows that
-  replacing the instructions alone is worth little, so the next lever is
-  **interleaving two output rows per block pass**: it would halve the activation
-  loads and give the scheduler a second independent reduction chain. It has not
-  been built, so no number is claimed for it.
-- **FP4 is ALU-bound, not load-bound** (55.9% retiring, 42.6% backend, 1.3%
-  memory). Its decode is already eight ops per eight weights. Further gains
-  need fewer ops or a different representation; more readers or row blocking
-  will not help a kernel with 0.28 load uops per weight.
-- **Remove the per-block special scan** with a bitmap computed at bind time
-  (one bit per 128-byte block, 256 bytes for `wo_b`). The scan itself is ~2.2%
-  of the FP8 kernel now. It needs a field in `DSV4QMat` and one pass over the
-  matrix when it is bound; not built.
-- **BF16 head**: 6.5% of decode cycles, and `widen_x()` still mallocs per call.
-  A thread-local widen buffer is a small, unmeasured candidate; the head is not
-  hot enough to justify changing it without an A/B.
+- **FP8 is now co-largest at 39.5%.** It is still backend-bound, and the
+  per-block special scan is **~20% of the FP8 kernel's samples** in this
+  profile: four 32-byte loads plus `vpcmpeqb`/`vpand`/`vpor`/`vptest` for a
+  block that is special-free 98.2% of the time. The first candidate is a
+  **bind-time `all_normal` flag or one-bit-per-128-byte-block bitmap** in
+  `DSV4QMat`. It is bit-exact and removes the scan from the hot loop. The
+  second is the **16-lane E4M3→FP16 decode**: for normal bytes
+  `bits = ((b & 0x7F) << 7) + 0x2000 | sign`, sixteen weights per iteration,
+  then two `vcvtph2ps`. Also bit-exact for normal blocks. Interleaving two
+  output rows is still unbuilt and should be judged after those two.
+- **FP4 is 42.3% and now 89.7/84.9 GF/s** (was 67.3/67.1). The decode is
+  seven ops per eight weights after the broadcast change. Further gains need
+  fewer ops or a different representation, not more readers or row blocking
+  (0.28 load uops per weight). The cheap remaining candidate is a **256-entry
+  double E8M0 table**, because the batched path still decodes 128 scale bytes
+  per output row with two branches each.
+- **BF16 head is bandwidth-bound, not conversion-bound**: 1.06 GB/token at
+  ~49 GB/s against a measured 57 GB/s 4-thread ceiling. `widen_x()` is not the
+  problem and a float-inner kernel would not move it. Fewer bytes is the only
+  lever: an FP8 copy of the head is the candidate, with the ids as the gate.
+- **Sparse attention** is 4.3%; its hot line is a read-modify-write
+  `vaddps (%rbx,...)`. A float 8-lane accumulator with a final double fold is a
+  local, low-risk improvement worth ~1% overall.
 
 ## Measurement rules this machine earned
 
@@ -955,10 +1040,10 @@ The new profiles, not guesses:
 ## What to watch when changing code
 
 - Decode s/token (the number above) is the primary metric.
-- After the FP8 float-inner change, the **routed-expert FP4 matmul is still the
-  largest single compute component**; attention and the shared expert both fell
-  ~16% in the A/B. Exposed expert disk is next. That is where the next change
-  should be aimed.
+- After the FP4 broadcast/fold change, **FP8 attention and the routed-expert
+  FP4 matmul are now roughly tied** (42.3% and 39.5% of compute cycles on the
+  CPU-bound control). Exposed expert disk is the next movable component in a
+  real-budget run, but the kernel target is FP8.
 - The routed-expert disk and matmul rows overlap, so a change that serialises
   them shows up as disk time rather than matmul time.
 - The generated ids must stay identical. If they change, the build is a
