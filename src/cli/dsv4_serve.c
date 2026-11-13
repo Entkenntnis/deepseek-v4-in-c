@@ -19,6 +19,9 @@
  *     {"cmd":"system","text":"..."}
  *     {"cmd":"stats"}
  *     {"cmd":"quit"}
+ *   SIGUSR1:
+ *     cancel the running turn at the next token boundary; the engine emits
+ *     done with "stop":"cancel" and keeps the context usable for the next turn.
  *   stdout events:
  *     ready, start, layer, token, done, reset, stats, error
  *
@@ -40,6 +43,7 @@
  */
 #include <errno.h>
 #include <math.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -63,6 +67,17 @@
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
 void dsv4_mmq(float *, const float *, const DSV4QMat *);
 void dsv4_rope_table(float *, float *, int, int, int, double, double, double, double);
+
+/* The TUI sends SIGUSR1 while a turn is running. Generation is one long
+ * synchronous call, so a command on stdin cannot be read until it returns;
+ * a signal flag lets the decode loop stop at the next token boundary instead. */
+static volatile sig_atomic_t cancel_requested;
+
+static void handle_cancel(int sig)
+{
+    (void)sig;
+    cancel_requested = 1;
+}
 
 /* Tokenizer entry points. dsv4_tok.h documents decode() but, like dsv4_run.c,
  * leaves the rest to each CLI so the header stays about the algorithm. */
@@ -723,6 +738,7 @@ static void engine_generate(Engine *e, const char *prompt, int ngen,
                             int think, int emit_layers)
 {
     const double t0 = now_s();
+    cancel_requested = 0;
     e->prof_base = dsv4_prof;
 
     if (ngen < 0) ngen = 0;
@@ -802,6 +818,12 @@ static void engine_generate(Engine *e, const char *prompt, int ngen,
     int best = top.n > 0 ? top.id[0] : 0;
 
     while (generated < ngen) {
+        if (cancel_requested) {
+            /* Everything emitted so far is already in the KV state. Closing
+             * this partial turn at the next call is the same path as an EOS. */
+            stop = "cancel";
+            break;
+        }
         if (e->n_ids >= e->cap_ids) {
             emit_error("context full (%d tokens) while generating", e->cap_ids);
             stop = "context";
@@ -928,6 +950,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
     }
     if (!model || !trunkdir || !tokfile) { usage(argv[0]); return 2; }
+
+    struct sigaction cancel_sa;
+    memset(&cancel_sa, 0, sizeof cancel_sa);
+    cancel_sa.sa_handler = handle_cancel;
+    sigemptyset(&cancel_sa.sa_mask);
+    cancel_sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &cancel_sa, NULL) != 0)
+        fprintf(stderr, "warning: cannot install cancel handler: %s\n",
+                strerror(errno));
 
     /* Thread policy before engine_init(): that is where the expert cache
      * creates its reader pthreads, and they inherit the calling thread's mask. */

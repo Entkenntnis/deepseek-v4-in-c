@@ -3,10 +3,11 @@
 """dsv4_tui.py - a live terminal front end for deepseek-v4-in-c.
 
 The engine is 1.6-2.2 s/token on the reference machine, so the interesting part
-of a chat turn is not only the text: it is the layer counter, the expert-cache
-hit rate, the disk rate, RSS, and where the milliseconds went. This script keeps
-bin/dsv4-serve resident, streams its JSON events, and paints both the
-conversation and those numbers while the model runs.
+of a chat turn is not only the text: it is how fast prefill hands over to
+decode. This script keeps bin/dsv4-serve resident, streams its JSON events, and
+paints the conversation next to a unified tok/s timeline and the live memory,
+expert-cache and disk rates while the model runs. The panel is still being
+reworked: the engine's profiler split and top-k counters are not drawn yet.
 
 Two backends, deliberately:
   * default: spawn bin/dsv4-serve and talk the real protocol.
@@ -31,10 +32,12 @@ import codecs
 import curses
 import json
 import locale
+import math
 import os
 import queue
 import random
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -91,8 +94,35 @@ def fmt_bytes_gb(gb: float) -> str:
     return f"{gb * 1024:.0f} MB"
 
 
+def fmt_gbps(value: float) -> str:
+    if value >= 100.0:
+        return f"{value:.0f} GB/s"
+    if value >= 10.0:
+        return f"{value:.1f} GB/s"
+    return f"{value:.2f} GB/s"
+
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
+
+def nice_step(value: float, target: int = 5) -> float:
+    """A round axis interval, so labels are 0, 0.25, 0.5, ... not max/2."""
+    if value <= 0 or target < 1:
+        return 1.0
+    raw = value / target
+    base = 10.0 ** math.floor(math.log10(raw))
+    for mult in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if raw <= mult * base:
+            return mult * base
+    return 10.0 * base
+
+
+def axis_label(value: float, step: float) -> str:
+    """Keep a decimal on whole ticks when the interval itself is fractional."""
+    if step < 1.0 and abs(value - round(value)) < 1e-9:
+        return "0" if abs(value) < 1e-9 else f"{value:.1f}"
+    return f"{value:g}"
 
 
 # xterm's first 16 colours. Rich downgrades named/true colours to an xterm-256
@@ -216,6 +246,16 @@ class RealBackend:
         except (BrokenPipeError, OSError):
             return False
 
+    def cancel(self) -> bool:
+        """Ask the engine to stop at the next token (SIGUSR1 in dsv4_serve)."""
+        if not self.proc or self.proc.poll() is not None:
+            return False
+        try:
+            self.proc.send_signal(signal.SIGUSR1)
+            return True
+        except OSError:
+            return False
+
     def close(self) -> None:
         if not self.proc:
             return
@@ -246,6 +286,7 @@ class DemoBackend:
         self.sink = sink
         self.commands: "queue.Queue[dict]" = queue.Queue()
         self.stop = threading.Event()
+        self.cancel_requested = False
         self.rng = random.Random(4)
         self.cache_hits = 0
         self.cache_miss = 0
@@ -261,6 +302,10 @@ class DemoBackend:
 
     def send(self, obj: dict) -> bool:
         self.commands.put(obj)
+        return True
+
+    def cancel(self) -> bool:
+        self.cancel_requested = True
         return True
 
     def close(self) -> None:
@@ -416,9 +461,12 @@ class DemoBackend:
         think = bool(cmd.get("think"))
         layers = bool(cmd.get("layers", True))
         mode = "thinking" if think else "chat"
+        prompt_tokens = 9
+        self.cancel_requested = False
+        stop = "max"
 
         self.sink.event({
-            "event": "start", "pos": 0, "prompt_tokens": 9,
+            "event": "start", "pos": 0, "prompt_tokens": prompt_tokens,
             "gen_max": ngen, "mode": mode, "context_cap": 4096,
             **self._base(),
         })
@@ -427,16 +475,12 @@ class DemoBackend:
         # Split into plausible token-sized chunks, keeping whitespace attached.
         chunks = re.findall(r"\s+|[^\s]+", text)
         t0 = time.monotonic()
-        last_t = 0.0
         ttft = 0.0
         produced = 0
-        context = 9
+        context = prompt_tokens
 
-        for i, chunk in enumerate(chunks[:ngen]):
-            if self.stop.is_set():
-                return
-            # A token takes ~2.1 s on the reference machine. The demo runs at
-            # 1/12 speed so a conversation is watchable.
+        def forward(pos: int, phase: str, t_start: float) -> None:
+            """Simulate one forward pass, including its per-layer events."""
             time.sleep(0.012)
             for L in range(43):
                 if L % 8 == 0:
@@ -450,13 +494,31 @@ class DemoBackend:
                 self.trunk_hit += 1
                 self.read_gb += 0.00018
                 if layers:
-                    t = time.monotonic() - t0
-                    self._event("layer", t, pos=context, phase="gen",
-                                layer=L, layers=43)
+                    # The engine stamps every layer of a forward with the time
+                    # the forward *started*, so the TUI can difference prompt
+                    # positions into a prefill timeline.
+                    self._event("layer", t_start, pos=pos, phase=phase,
+                                layer=L, layers=43, t=t_start)
+
+        # Prefill: one forward per prompt token, then the first token event.
+        for p in range(prompt_tokens):
+            if self.stop.is_set():
+                return
+            forward(p, "prompt", time.monotonic() - t0)
+        ttft = time.monotonic() - t0
+
+        for i, chunk in enumerate(chunks[:ngen]):
+            if self.stop.is_set():
+                return
+            # A token takes ~2.1 s on the reference machine. The demo runs at
+            # 1/12 speed so a conversation is watchable.
+            if i > 0:
+                forward(context - 1, "gen", time.monotonic() - t0)
+            if self.cancel_requested:
+                stop = "cancel"
+                break
 
             elapsed = time.monotonic() - t0
-            if i == 0:
-                ttft = elapsed
             self.read_gb += 0.00055
             p = max(0.02, 0.97 - i * 0.004)
             top = [
@@ -473,15 +535,14 @@ class DemoBackend:
             })
             context += 1
             produced += 1
-            last_t = elapsed
 
         elapsed = time.monotonic() - t0
         self.sink.event({
-            "event": "done", "prompt_tokens": 9, "generated": produced,
-            "seconds": elapsed,
+            "event": "done", "prompt_tokens": prompt_tokens,
+            "generated": produced, "seconds": elapsed,
             "tps": produced / elapsed if elapsed else 0.0,
             "s_per_token": elapsed / produced if produced else 0.0,
-            "ttft": ttft, "stop": "max", "context_used": context,
+            "ttft": ttft, "stop": stop, "context_used": context,
             **self._base(elapsed),
         })
 
@@ -515,18 +576,28 @@ class App:
         self.prev_snap_t = 0.0
         self.last_stats_ingest = 0.0
         self.stats_interval = 1.0
-        self.stats_cache: list[tuple[str, str]] = []
+        self.stats_cache: list[list[tuple[str, str]]] = []
         self.stats_cache_ts = 0.0
         self.stats_cache_width = -1
+        self.stats_cache_height = -1
         self.stats_force = True
         self.io_rate = 0.0
         self.cache_rate = 0.0
         self.trunk_rate = 0.0
+        self.mem_available_gb = 0.0
         self.cpu_pct = 0.0
+        self.cpu_prev: Optional[dict[int, tuple[int, int]]] = None
+        self.cpu_prev_t = 0.0
+        self.core_pct: list[Optional[float]] = [None, None, None, None]
+        self.cpu_temp_c: Optional[float] = None
+        self.cpu_temp_path: Optional[str] = None
+        self.cpu_temp_checked = False
 
         self.status = "starting"
         self.status_detail = ""
         self.generating = False
+        self.cancel_pending = False
+        self.cancel_rect: Optional[tuple[int, int, int]] = None
         self.backend_alive = True
         self.generation = 0
         self.gen_max = args.gen
@@ -536,7 +607,15 @@ class App:
         self.turn_start = 0.0
         self.gen_t = 0.0
         self.last_token_t = 0.0
-        self.token_deltas: deque[float] = deque(maxlen=16)
+        # One duration per token, in turns. Prefill samples are measured from
+        # the prompt layer events; decode samples from token event deltas.
+        self.prefill_spt: deque[float] = deque(maxlen=4096)
+        self.decode_spt: deque[float] = deque(maxlen=4096)
+        self.prefill_pos: Optional[int] = None
+        self.prefill_prev_t = 0.0
+        self.prefill_done = False
+        self.prefill_total_s = 0.0
+        self.prefill_tokens = 0
         self.ttft = 0.0
         self.current_layer = 0
         self.phase = ""
@@ -661,6 +740,135 @@ class App:
         self.prev_snap_t = now
         self.last = ev
 
+    @staticmethod
+    def _read_text(path: str) -> str:
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return ""
+
+    def _read_mem_available(self) -> float:
+        for line in self._read_text("/proc/meminfo").splitlines():
+            if line.startswith("MemAvailable:"):
+                try:
+                    return int(line.split()[1]) / 1048576.0  # kB -> GiB
+                except (IndexError, ValueError):
+                    return 0.0
+        return 0.0
+
+    def _discover_cpu_temp(self) -> None:
+        """Find the most likely CPU package sensor in sysfs, once."""
+        self.cpu_temp_checked = True
+        best_score = 0
+        best_path: Optional[str] = None
+
+        for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
+            name = self._read_text(str(hwmon / "name")).lower()
+            for sensor in sorted(hwmon.glob("temp*_input")):
+                label_path = sensor.with_name(
+                    sensor.name.replace("_input", "_label"))
+                label = self._read_text(str(label_path)).lower()
+                text = f"{name} {label}"
+                if "package" in text:
+                    score = 100
+                elif "tctl" in text or "tdie" in text:
+                    score = 90
+                elif "x86_pkg_temp" in text or "pkg" in text:
+                    score = 80
+                elif name in ("coretemp", "k10temp", "zenpower"):
+                    score = 70
+                elif "core" in label or "cpu" in text or "tcpu" in text:
+                    score = 60
+                elif "acpitz" in text:
+                    score = 10
+                else:
+                    score = 0
+                if score > best_score:
+                    best_score = score
+                    best_path = str(sensor)
+
+        for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+            ztype = self._read_text(str(zone / "type")).lower()
+            if "x86_pkg_temp" in ztype or "pkg" in ztype:
+                score = 80
+            elif "tcpu" in ztype:
+                score = 75
+            elif "cpu" in ztype:
+                score = 70
+            elif "acpitz" in ztype:
+                score = 10
+            else:
+                score = 0
+            if score > best_score:
+                best_score = score
+                best_path = str(zone / "temp")
+
+        self.cpu_temp_path = best_path
+
+    def _read_cpu_temp(self) -> Optional[float]:
+        if not self.cpu_temp_checked:
+            self._discover_cpu_temp()
+        if not self.cpu_temp_path:
+            return None
+        text = self._read_text(self.cpu_temp_path)
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = int(float(text))
+            except ValueError:
+                self.cpu_temp_path = None
+                return None
+        if value <= 0:
+            return None
+        # hwmon and thermal_zone temperatures are millidegrees Celsius.
+        return value / 1000.0 if value > 1000 else float(value)
+
+    @staticmethod
+    def _read_cpu_times() -> dict[int, tuple[int, int]]:
+        """Busy/total jiffies for cores 0-3 from /proc/stat."""
+        out: dict[int, tuple[int, int]] = {}
+        try:
+            lines = Path("/proc/stat").read_text().splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 5 or not parts[0].startswith("cpu"):
+                continue
+            if parts[0] == "cpu":
+                continue
+            try:
+                core = int(parts[0][3:])
+                values = [int(x) for x in parts[1:]]
+            except ValueError:
+                continue
+            if core > 3 or len(values) < 4:
+                continue
+            idle = values[3] + (values[4] if len(values) > 4 else 0)
+            out[core] = (sum(values) - idle, sum(values))
+        return out
+
+    def update_cpu(self) -> None:
+        """Sample per-core utilization and the package temperature."""
+        now = time.monotonic()
+        current = self._read_cpu_times()
+        if self.cpu_prev is not None and now - self.cpu_prev_t >= 0.2:
+            for core in range(4):
+                before = self.cpu_prev.get(core)
+                after = current.get(core)
+                if not before or not after:
+                    self.core_pct[core] = None
+                    continue
+                busy = after[0] - before[0]
+                total = after[1] - before[1]
+                self.core_pct[core] = (
+                    clamp(busy / total * 100.0, 0.0, 100.0)
+                    if total > 0 else self.core_pct[core])
+        self.cpu_prev = current
+        self.cpu_prev_t = now
+        self.cpu_temp_c = self._read_cpu_temp()
+
     def handle_event(self, ev: dict) -> None:
         name = ev.get("event")
         # Layer events arrive ~27/s on a 1.6 s/token run. The panel is sampled
@@ -716,7 +924,13 @@ class App:
             self.turn_start = time.monotonic()
             self.gen_t = 0.0
             self.last_token_t = 0.0
-            self.token_deltas.clear()
+            self.prefill_spt.clear()
+            self.decode_spt.clear()
+            self.prefill_pos = None
+            self.prefill_prev_t = 0.0
+            self.prefill_done = False
+            self.prefill_total_s = 0.0
+            self.prefill_tokens = self.prompt_tokens
             self.ttft = 0.0
             self.current_layer = 0
             self.phase = "prompt"
@@ -727,12 +941,26 @@ class App:
                 self.current_msg = Message("assistant", "", think=self.think)
                 self.messages.append(self.current_msg)
             self.current_msg.think = self.mode == "thinking"
+            self.cancel_pending = False
+            self.stats_force = True
             self.dirty = True
 
         elif name == "layer":
             self.current_layer = int(ev.get("layer") or 0) + 1
             self.phase = ev.get("phase", "")
             self.gen_t = float(ev.get("t") or 0.0)
+            # A prompt position's first layer carries the forward's start time.
+            # When the next position starts, the difference is that prompt
+            # token's latency, which is what the prefill graph plots.
+            if self.phase == "prompt":
+                pos = int(ev.get("pos") or 0)
+                if pos != self.prefill_pos:
+                    if self.prefill_pos is not None:
+                        dt = self.gen_t - self.prefill_prev_t
+                        if dt > 1e-6:
+                            self.prefill_spt.append(dt)
+                    self.prefill_pos = pos
+                    self.prefill_prev_t = self.gen_t
             self.dirty = True
 
         elif name == "token":
@@ -740,18 +968,32 @@ class App:
             text = strip_special_tokens(self.decoder.decode(raw, final=False))
             if text and self.current_msg:
                 self.current_msg.text += text
-            self.generation = int(ev.get("index") or 0) + 1
+            index = int(ev.get("index") or 0)
+            self.generation = index + 1
             self.context_used += 1
             t = float(ev.get("t") or 0.0)
-            if self.last_token_t > 0:
-                self.token_deltas.append(max(0.0, t - self.last_token_t))
+            ttft = float(ev.get("ttft") or self.ttft)
+            if index == 0:
+                # The last prompt token completes at ttft; the previous
+                # positions were closed when the next position started.
+                if (self.prefill_pos is not None and not self.prefill_done
+                        and ttft > self.prefill_prev_t):
+                    self.prefill_spt.append(ttft - self.prefill_prev_t)
+                self.prefill_done = True
+                self.prefill_total_s = ttft
+            elif self.last_token_t > 0:
+                dt = t - self.last_token_t
+                if dt > 1e-6:
+                    self.decode_spt.append(dt)
             self.last_token_t = t
-            self.ttft = float(ev.get("ttft") or self.ttft)
+            self.ttft = ttft
             self.top = ev.get("top") or []
+            self.stats_force = True
             self.dirty = True
 
         elif name == "done":
             self.generating = False
+            self.cancel_pending = False
             self.status = "ready" if ev.get("stop") != "error" else "failed"
             self.last_done = ev
             self.context_used = int(ev.get("context_used") or self.context_used)
@@ -770,9 +1012,15 @@ class App:
 
         elif name == "reset":
             self.generating = False
+            self.cancel_pending = False
             self.status = "ready"
             self.context_used = 0
             self.current_msg = None
+            self.prefill_spt.clear()
+            self.decode_spt.clear()
+            self.prefill_done = False
+            self.prefill_total_s = 0.0
+            self.stats_force = True
             self.dirty = True
 
         elif name == "system":
@@ -789,6 +1037,7 @@ class App:
                     pass
             self.current_msg = None
             self.generating = False
+            self.cancel_pending = False
             if self.status not in ("starting",):
                 self.status = "ready" if self.backend_alive else "failed"
             self.messages.append(Message("error", msg))
@@ -840,6 +1089,17 @@ class App:
             self.add_system("could not write to the engine")
         self.dirty = True
 
+    def cancel(self) -> None:
+        """Stop at the next token; the turn stays in the model context."""
+        if self.status != "generating" or self.cancel_pending:
+            return
+        if self.backend and self.backend.cancel():
+            self.cancel_pending = True
+            self.status_detail = "cancelling"
+        else:
+            self.add_system("could not request cancellation")
+        self.dirty = True
+
     def command(self, text: str) -> None:
         parts = text.split(None, 1)
         cmd = parts[0].lower()
@@ -871,6 +1131,11 @@ class App:
             self.generating = False
             self.status = "ready"
             self.context_used = 0
+            self.prefill_spt.clear()
+            self.decode_spt.clear()
+            self.prefill_done = False
+            self.prefill_total_s = 0.0
+            self.stats_force = True
             self.add_system("context reset; expert cache stays warm")
         elif cmd == "/clear":
             self.messages.clear()
@@ -965,6 +1230,20 @@ class App:
             self.input_cursor += 1
         self.dirty = True
 
+    def handle_mouse(self) -> None:
+        try:
+            _, mx, my, _, bstate = curses.getmouse()
+        except curses.error:
+            return
+        buttons = (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
+                   | curses.BUTTON1_RELEASED)
+        if not (bstate & buttons):
+            return
+        rect = self.cancel_rect
+        if rect and my == rect[0] and rect[1] <= mx < rect[1] + rect[2]:
+            self.cancel()
+            self.dirty = True
+
     def key_code(self, code: int) -> None:
         if code in (curses.KEY_ENTER, 10, 13):
             self.submit()
@@ -1005,8 +1284,9 @@ class App:
         trunk = self.last.get("trunk") or self.ready.get("trunk") or {}
         prof = self.last.get("prof") or {}
 
-        if self.token_deltas:
-            spt = sum(self.token_deltas) / len(self.token_deltas)
+        if self.decode_spt:
+            recent = list(self.decode_spt)[-16:]
+            spt = sum(recent) / len(recent)
         elif self.last_done.get("s_per_token"):
             spt = float(self.last_done["s_per_token"])
         else:
@@ -1051,36 +1331,35 @@ class App:
 
     def _draw_header(self, scr: "curses.window", w: int) -> None:
         model = Path(self.args.model).name if not self.demo else "demo"
-        title = f" DSV4  {model}"
+        brand = f" DSV4  {model}"
         status = self.status
         if self.demo:
-            title += "  [demo]"
-        right = f"{status} "
-        self._add(scr, 0, 0, title, w - 1, self.attr("title"))
-        self._add(scr, 0, max(0, w - len(right) - 1), right, len(right),
-                  self.attr("title"))
-
-    def _draw_status(self, scr: "curses.window", w: int, row: int) -> None:
-        v = self.values()
-        n_layers = int((self.ready.get("config") or {}).get("layers") or 0) or 43
-        if self.generating:
-            spin = "|/-\\"[self.spinner]
+            brand += "  [demo]"
+        progress = ""
+        if status == "generating":
+            n_layers = int((self.ready.get("config") or {}).get("layers") or 0) or 43
             if self.phase == "prompt":
                 phase = f"prefill {self.current_layer}/{n_layers}"
             elif self.phase == "resume":
                 phase = "closing previous turn"
             else:
                 phase = f"layer {self.current_layer}/{n_layers}"
-            parts = [
-                f"{spin} generating",
-                f"{self.generation}/{self.gen_max} tok",
-                f"{v['spt']:.2f} s/tok",
-                f"{v['tps']:.3f} tok/s",
-                phase,
-                f"ctx {self.context_used}/{self.context_cap}",
-            ]
-            text = "  ".join(parts)
-            color = "active"
+            progress = (f"  generating {self.generation}/{self.gen_max} tok"
+                        f"  {phase}"
+                        f"  ctx {self.context_used}/{self.context_cap}")
+        self._add(scr, 0, 0, brand, w - 1, self.attr("title"))
+        if progress:
+            self._add(scr, 0, len(brand), progress, max(1, w - len(brand) - 1),
+                      self.attr("muted"))
+        right = "" if status in ("generating", "ready") else f"{status} "
+        if right:
+            self._add(scr, 0, max(0, w - len(right) - 1), right, len(right),
+                      self.attr("value"))
+
+    def _draw_status(self, scr: "curses.window", w: int, row: int) -> None:
+        if self.status == "generating":
+            # Progress and context live in the title bar while a turn runs.
+            return
         elif self.status == "waiting":
             text = f"... waiting for engine  (prompt {self.prompt_tokens} tokens)"
             color = "active"
@@ -1095,7 +1374,7 @@ class App:
             text = "engine failed; see the error in the transcript"
             color = "error"
         else:
-            text = (f"ready  context {self.context_used}/{self.context_cap}  "
+            text = (f"context {self.context_used}/{self.context_cap}  "
                     f"gen limit {self.gen_limit}  "
                     f"thinking {'on' if self.think else 'off'}  "
                     f"layers {'on' if self.show_layers else 'off'}")
@@ -1219,91 +1498,186 @@ class App:
         for r in range(top, bottom + 1):
             self._add(scr, r, col, "|", 1, self.attr("dim"))
 
-    def _stat(self, label: str, value: str) -> str:
-        return f"{label:<11}{value}"
+    @staticmethod
+    def _short(value: float) -> str:
+        """A compact number for the header readout."""
+        if value >= 100.0:
+            return f"{value:.0f}"
+        if value >= 10.0:
+            return f"{value:.1f}"
+        if value >= 1.0:
+            return f"{value:.2f}"
+        return f"{value:.3f}"
 
-    def _bar(self, frac: float, width: int = 10) -> str:
-        frac = clamp(frac, 0.0, 1.0)
-        n = int(round(frac * width))
-        return "[" + "#" * n + "." * (width - n) + "]"
+    @staticmethod
+    def _short_spt(value: float) -> str:
+        """Seconds per token: two decimals is enough beside tok/s."""
+        if value >= 100.0:
+            return f"{value:.0f}"
+        if value >= 10.0:
+            return f"{value:.1f}"
+        if value >= 0.01:
+            return f"{value:.2f}"
+        return f"{value:.3f}"
 
-    def stats_lines(self, width: int) -> list[tuple[str, str]]:
-        v = self.values()
-        cfg, sysd, cache, trunk, prof = (
-            v["cfg"], v["sys"], v["cache"], v["trunk"], v["prof"])
-        out: list[tuple[str, str]] = []
+    def stats_lines(self, width: int,
+                    height: int) -> list[list[tuple[str, str]]]:
+        """One unified tok/s graph for prefill and decode.
 
-        def head(s: str) -> None:
-            out.append((s, "section"))
+        The graph is a right-aligned sliding window: new samples appear at the
+        right edge and older ones move out to the left. The header carries the
+        current tok/s and s/tok; the axis uses round, linear tick labels. A
+        compact MEMORY block below it shows RSS, the expert cache, disk reads
+        and the approximate byte inflow to the CPU.
+        """
+        out: list[list[tuple[str, str]]] = []
 
-        def kv(label: str, value: str, color: str = "value") -> None:
-            out.append((self._stat(label, value), color))
+        def emit(*segments: tuple[str, str]) -> None:
+            out.append(list(segments))
 
-        head("MODEL")
-        kv("layers", f"{cfg.get('layers', '?')} · {cfg.get('hidden', '?')}d"
-                     f" · {cfg.get('heads', '?')} heads")
-        kv("experts", f"{cfg.get('experts', '?')} top{cfg.get('topk', '?')}")
-        kv("context", f"{self.context_used}/{self.context_cap}")
+        prefill = [("prefill", 1.0 / dt) for dt in self.prefill_spt if dt > 1e-9]
+        decode = [("decode", 1.0 / dt) for dt in self.decode_spt if dt > 1e-9]
+        samples = prefill + decode
 
-        head("PROCESS")
-        kv("RSS", f"{sysd.get('rss_mb', 0) / 1024:.2f} GB")
-        kv("peak", f"{sysd.get('peak_mb', 0) / 1024:.2f} GB")
-        kv("disk", f"{sysd.get('io_read_gb', 0):.2f} GB @ {self.io_rate:.2f} GB/s")
-        kv("CPU", f"{self.cpu_pct:.0f}%  ({sysd.get('cpu_s', 0):.0f}s cpu)")
+        cur_spt = 0.0
+        if samples:
+            cur_spt = 1.0 / samples[-1][1]
+        elif (self.prefill_done and self.prefill_tokens > 0
+                and self.prefill_total_s > 0):
+            # With --no-layers there is no timeline, but the aggregate prefill
+            # time is still available.
+            cur_spt = self.prefill_total_s / self.prefill_tokens
+        elif not self.generating:
+            cur_spt = float(self.last_done.get("s_per_token") or 0.0)
+        cur_rate = 1.0 / cur_spt if cur_spt > 0 else 0.0
+        rate_txt = self._short(cur_rate) if cur_rate else "-"
+        spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
 
-        head("EXPERT CACHE")
-        kv("slots", f"{cache.get('slots', 0)} · "
-                   f"{cache.get('resident_gb', 0):.2f} GB")
-        hit_rate = float(cache.get("hit_rate") or 0.0)
-        kv("hit rate", f"{self._bar(hit_rate, 8)} {hit_rate * 100:5.1f}%")
-        req = int(cache.get("hit", 0)) + int(cache.get("miss", 0))
-        kv("requests", f"{req:,}  evict {int(cache.get('evict', 0)):,}")
-        kv("read", f"{cache.get('read_gb', 0):.2f} GB @ {self.cache_rate:.2f} GB/s")
+        emit((" THROUGHPUT", "section"),
+             (f" {rate_txt} tok/s", "dim"),
+             (f" ({spt_txt} s/tok)", "dim"))
 
-        head("TRUNK")
-        kv("pinned", f"{trunk.get('pinned', 0)}/{trunk.get('layers', 0)}"
-                     f" + {trunk.get('slots', 0)} ring")
-        th = float(trunk.get("hit_rate") or 0.0)
-        kv("hit rate", f"{self._bar(th, 8)} {th * 100:5.1f}%")
-        kv("read", f"{trunk.get('read_gb', 0):.2f} GB @ {self.trunk_rate:.2f} GB/s")
-
-        head("THIS TURN")
-        kv("tokens", f"{self.generation}/{self.gen_max}")
-        kv("speed", f"{v['spt']:.2f} s/tok · {v['tps']:.3f} tok/s")
-        kv("TTFT", f"{self.ttft:.2f} s" if self.ttft else "-")
-        kv("elapsed", fmt_duration(v["elapsed"]))
-        if self.top:
-            tid, prob, _logit = self.top[0]
-            kv("next", f"id {tid}  {prob * 100:.1f}%")
-
-        head("PROFILE / TURN")
-        total = float(prof.get("accounted") or 0.0)
-        if total <= 0:
-            out.append(("  (no turn yet)", "dim"))
+        if self.decode_spt:
+            avg_spt = sum(self.decode_spt) / len(self.decode_spt)
+            avg_rate = 1.0 / avg_spt if avg_spt > 0 else 0.0
+            emit((" decode-avg ", "dim"),
+                 (f"{self._short(avg_rate)} tok/s", "active"),
+                 (f" ({self._short_spt(avg_spt)} s/tok)", "value"))
         else:
-            rows = [
-                ("experts io", "expert_io"),
-                ("experts mm", "expert_mm"),
-                ("attention", "attn"),
-                ("mHC+norms", "hc"),
-                ("shared exp", "shared"),
-                ("router", "gate"),
-            ]
-            for label, key in rows:
-                val = float(prof.get(key) or 0.0)
-                frac = val / total if total else 0.0
-                out.append((f"{label:<11}{self._bar(frac, 8)} {frac * 100:4.0f}%",
-                            "value" if frac > 0.01 else "dim"))
-            out.append((self._stat("accounted", f"{total:.1f}s"), "dim"))
+            emit((" decode-avg ", "dim"), ("-", "value"))
 
-        head("NEXT-TOKEN TOP-3")
-        if not self.top:
-            out.append(("  (waiting for a token)", "dim"))
-        else:
-            for tid, prob, logit in self.top[:3]:
-                out.append((self._stat(f"id {tid}", f"{prob * 100:6.2f}%  "
-                                                     f"logit {logit:7.2f}"),
-                            "value"))
+        def emit_memory() -> None:
+            sysd = self.last.get("sys") or self.ready.get("sys") or {}
+            cache = self.last.get("cache") or self.ready.get("cache") or {}
+            trunk = self.last.get("trunk") or self.ready.get("trunk") or {}
+            cfg = self.ready.get("config") or {}
+            rss = float(sysd.get("rss_mb") or 0.0) / 1024.0
+            hit = float(cache.get("hit_rate") or 0.0) * 100.0
+            avail = (f"{self.mem_available_gb:.2f} GB"
+                     if self.mem_available_gb > 0 else "n/a")
+
+            # Per token the CPU reads every dense trunk weight plus the routed
+            # experts from RAM. That is a fixed byte count for a given model,
+            # so multiplying by the current token rate estimates the flow.
+            layers = int(cfg.get("layers") or 0)
+            topk = int(cfg.get("topk") or 0)
+            slot_mb = float(cache.get("slot_mb") or 0.0)
+            expert_gb = layers * topk * slot_mb / 1024.0
+            trunk_gb = float(trunk.get("resident_gb") or 0.0)
+            inflow = (expert_gb + trunk_gb) * cur_rate
+
+            emit((" MEMORY", "section"))
+            emit((" RSS  ", "dim"), (f"{rss:.2f} GB", "value"),
+                 ("  avail ", "dim"), (avail, "value"))
+            emit((" cache-hit ", "dim"), (f"{hit:5.1f}%", "value"))
+            emit((" disk ", "dim"), (fmt_gbps(self.io_rate), "value"),
+                 ("  inflow ", "dim"), (f"~{fmt_gbps(inflow)}", "value"))
+
+        def emit_cpu() -> None:
+            def percent(core: int) -> str:
+                value = self.core_pct[core]
+                return f"{value:3.0f}%" if value is not None else "  - "
+
+            emit((" CPU", "section"))
+            segments: list[tuple[str, str]] = []
+            for core in range(4):
+                label = f" c{core} " if core == 0 else f"  c{core} "
+                segments.append((label, "dim"))
+                segments.append((percent(core), "value"))
+            emit(*segments)
+            temp = (f"{self.cpu_temp_c:.0f}°C"
+                    if self.cpu_temp_c is not None else "n/a")
+            emit((" temp ", "dim"), (temp, "value"))
+
+        def emit_bottom() -> None:
+            legend = [(" tok/s ", "dim"),
+                      ("● prefill", "prefill"), ("  ", "dim"),
+                      ("● decode", "decode")]
+            legend_len = sum(len(text) for text, _ in legend)
+            emit((" " * max(0, width - legend_len), "dim"), *legend)
+            emit()
+            emit_memory()
+            emit()
+            emit_cpu()
+
+        if not samples:
+            if self.generating and self.phase == "prompt":
+                emit(("  prefill in progress...", "dim"))
+            else:
+                emit(("  waiting for a turn...", "dim"))
+            emit_bottom()
+            return out
+
+        graph_w = max(6, width - 8)
+        visible = samples[-graph_w:]
+        cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
+
+        graph_h = max(3, min(10, height - 13))
+        target = 5 if graph_h >= 6 else 2
+        peak = max(rate for _, rate in visible)
+        step = nice_step(peak, target)
+        axis_max = math.ceil(peak / step - 1e-9) * step
+
+        row_labels: dict[int, str] = {}
+        for i in range(int(round(axis_max / step)) + 1):
+            value = i * step
+            row = graph_h - 1 - int(round((value / axis_max) * (graph_h - 1)))
+            row = int(clamp(row, 0, graph_h - 1))
+            row_labels.setdefault(row, axis_label(value, step))
+
+        blocks = " ▁▂▃▄▅▆▇█"
+        sub = 8
+
+        for r in range(graph_h):
+            label = f"{row_labels.get(r, ''):>7}"
+            segments: list[tuple[str, str]] = []
+            cur_color: Optional[str] = None
+            cur_text = ""
+            for phase, rate in cols:
+                frac = clamp(rate / axis_max, 0.0, 1.0) if axis_max > 0 else 0.0
+                filled = (max(1, int(round(frac * graph_h * sub)))
+                          if rate > 1e-9 else 0)
+                n = filled - (graph_h - 1 - r) * sub
+                if n >= sub:
+                    ch = "█"
+                elif n > 0:
+                    ch = blocks[n]
+                else:
+                    ch = " "
+                color = ("prefill" if phase == "prefill" else "decode") \
+                    if ch != " " else "dim"
+                if color != cur_color:
+                    if cur_text:
+                        segments.append((cur_text, cur_color or "dim"))
+                    cur_text = ""
+                    cur_color = color
+                cur_text += ch
+            if cur_text:
+                segments.append((cur_text, cur_color or "dim"))
+            emit((label + "┤", "dim"), *segments)
+
+        emit((" " * 7 + "└", "dim"), ("─" * graph_w, "dim"))
+        emit_bottom()
         return out
 
     def _draw_stats(self, scr: "curses.window", top: int, bottom: int,
@@ -1311,28 +1685,47 @@ class App:
         if width <= 4:
             return
         # The panel is a 1 Hz instrument. The status line above it stays live
-        # for layer/token progress; repainting the accounting numbers 27 times a
-        # second only makes them flicker.
+        # for layer/token progress; repainting a graph on every layer only makes
+        # it jitter faster than the values move.
+        height = bottom - top + 1
         now = time.monotonic()
         if (self.stats_force or not self.stats_cache
                 or width != self.stats_cache_width
+                or height != self.stats_cache_height
                 or now - self.stats_cache_ts >= self.stats_interval):
-            self.stats_cache = self.stats_lines(width)
+            self.update_cpu()
+            self.mem_available_gb = self._read_mem_available()
+            self.stats_cache = self.stats_lines(width, height)
             self.stats_cache_ts = now
             self.stats_cache_width = width
+            self.stats_cache_height = height
             self.stats_force = False
-        for i, (text, color) in enumerate(self.stats_cache):
+        for i, segments in enumerate(self.stats_cache):
             row = top + i
             if row > bottom:
                 break
-            self._add(scr, row, col, text, width, self.attr(color))
+            x = 0
+            for text, color in segments:
+                if x >= width:
+                    break
+                text = text[:width - x]
+                if text:
+                    self._add(scr, row, col + x, text, width - x,
+                              self.attr(color))
+                    x += len(text)
 
     def _draw_footer(self, scr: "curses.window", h: int, w: int) -> None:
+        self.cancel_rect = None
         if self.generating:
-            hint = "PgUp/PgDn scroll  ·  Ctrl-C quit  ·  generation in progress"
+            hint = "PgUp/PgDn scroll  ·  Ctrl-C quit  ·  "
+            label = "[cancelling]" if self.cancel_pending else "[cancel]"
+            self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
+            self._add(scr, h - 2, len(hint), label, w - len(hint) - 1,
+                      self.attr("cancel"))
+            self.cancel_rect = (h - 2, len(hint), len(label))
         else:
             hint = "Enter send  ·  /help commands  ·  PgUp/PgDn scroll  ·  Ctrl-C quit"
-        self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
+            self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
 
     def _draw_input(self, scr: "curses.window", h: int, w: int) -> None:
         prompt = "› "
@@ -1440,7 +1833,8 @@ class App:
             "title": curses.A_BOLD, "status": 0, "active": curses.A_BOLD,
             "user": 0, "assistant": 0, "system": 0, "error": curses.A_BOLD,
             "section": curses.A_BOLD, "reasoning": curses.A_DIM,
-            "input": 0,
+            "input": 0, "prefill": 0, "decode": 0,
+            "muted": curses.A_DIM, "cancel": curses.A_BOLD,
         }
         if not curses.has_colors():
             return
@@ -1458,7 +1852,13 @@ class App:
                 "title": (curses.COLOR_WHITE, curses.COLOR_BLUE),
                 "value": (-1, -1),
                 "input": (curses.COLOR_WHITE, -1),
+                "prefill": (curses.COLOR_CYAN, -1),
+                "decode": (curses.COLOR_GREEN, -1),
+                "cancel": (curses.COLOR_RED, -1),
             }
+            if curses.COLORS >= 256:
+                specs["muted"] = (240, -1)   # dark grey, quieter than A_DIM
+                specs["cancel"] = (88, -1)   # dark red
             for i, (name, (fg, bg)) in enumerate(specs.items(), start=1):
                 curses.init_pair(i, fg, bg)
                 extra = 0
@@ -1477,6 +1877,11 @@ class App:
             pass
         stdscr.keypad(True)
         stdscr.timeout(35)
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mouseinterval(0)
+        except curses.error:
+            pass
         self.init_colors()
         self.dirty = True
         self.render(stdscr)
@@ -1499,6 +1904,9 @@ class App:
             if ch == curses.KEY_RESIZE:
                 stdscr.erase()
                 self.dirty = True
+                continue
+            if ch == curses.KEY_MOUSE:
+                self.handle_mouse()
                 continue
             self.key(ch)
             if self.running:

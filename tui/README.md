@@ -1,10 +1,12 @@
 # dsv4 TUI
 
 A dependency-free Python TUI for `deepseek-v4-in-c`. It keeps the engine
-resident and shows the conversation next to the numbers that decide whether the
-run is behaving: per-layer progress, expert-cache hit rate, trunk residency,
-RSS/peak RSS, live disk throughput, CPU, per-token latency and the engine's own
-time breakdown.
+resident and shows the conversation next to a live throughput timeline. The
+panel is currently being reworked: it keeps one unified prefill/decode tok/s
+graph with tok/s and seconds-per-token numbers in its header, plus live RSS,
+available memory, cache-hit rate, disk-read, CPU-inflow, per-core CPU use and
+temperature stats below it. The profiler split and top-k counters are still sent
+by the engine but are not drawn yet.
 
 ```
 make tui               # builds bin/dsv4-serve, then launches the TUI
@@ -64,6 +66,11 @@ stdin
   {"cmd":"stats"}
   {"cmd":"quit"}
 
+SIGUSR1
+  stop the running turn at the next token boundary; emits done with
+  "stop":"cancel". The partial turn is closed like an EOS on the next generate,
+  so the context stays valid.
+
 stdout, one object per line
   ready  start  layer  token  done  reset  system  stats  error
 ```
@@ -99,11 +106,11 @@ The defaults match the development machine:
 Budget matters. The trunk is ~6.3 GB and one decode pass touches ~3.2 GB of
 experts; a budget below roughly 9.5 GB leaves the expert cache with fewer slots
 than a forward pass needs, so it misses on every request. At `--budget 10` the
-cache is a little above that working set. Raise it if you have the RAM; the TUI
-shows the hit rate directly, so the effect of the number is visible rather than
-theoretical. `--budget auto` reads `MemAvailable` and subtracts the model's
-embed/head weights, a 1 GiB reserve and 0.5 GiB of runtime, which is the right
-choice on a machine whose free memory is not known in advance.
+cache is a little above that working set. Raise it if you have the RAM; the
+panel's `hit` line shows the effect directly. `--budget auto` reads
+`MemAvailable` and subtracts the model's embed/head weights, a 1 GiB reserve
+and 0.5 GiB of runtime, which is the right choice on a machine whose free
+memory is not known in advance.
 
 `--ctx` sizes the per-layer KV state and the RoPE tables. 4096 is cheap on this
 model; raise it for longer conversations.
@@ -117,6 +124,7 @@ model; raise it for longer conversations.
 | `Up` / `Down` | scroll one line |
 | `Ctrl-U` | clear the input line |
 | `Esc` | clear the input line |
+| click `[cancel]` | stop generation at the next token (dark-red button at the end of the footer) |
 | `Ctrl-C` | quit (kills the engine process) |
 
 | command | action |
@@ -134,40 +142,59 @@ model; raise it for longer conversations.
 
 Only one turn generates at a time. The engine is greedy (the repository's
 bit-exactness contract is built around that), so this is a continuation engine,
-not a sampler playground.
+not a sampler playground. Clicking `[cancel]` stops at the next token boundary;
+the partial reply stays in the model context, so the next message continues the
+conversation from there. During a long prompt prefill the cancel is honoured
+after prefill completes, because the engine does not leave a half-forwarded
+prompt in the KV state.
 
 ## Reading the panel
 
-Stats in the right-hand panel are sampled at **1 Hz**, plus a final snapshot at
-the end of a turn. Layer progress and token text still arrive on every event, so
-the transcript and the layer counter stay live; the numbers are deliberately not
-repainted 27 times a second, and rates over a one-second window are more
-meaningful than rates over a single layer.
+The right-hand panel currently starts with a throughput timeline and keeps the
+live resource numbers that are useful while the model runs:
 
-* **PROCESS / RSS, peak** — from `/proc/self/status`; peak is `VmHWM`, not an
-  estimate.
-* **PROCESS / disk** — `/proc/self/io` `read_bytes`: actual device reads, which
-  is larger than the engine's logical model-byte accounting when O_DIRECT
-  alignment widens a read.
-* **CPU** — process CPU time delta divided by wall delta, sampled at each event.
-* **EXPERT CACHE / hit rate** — the LRU cache for routed experts. Below one
-  forward pass's working set this is 0% by construction; that is the number to
-  watch when choosing `--budget`.
-* **TRUNK / pinned** — the trunk is a cyclic scan, so it pins a prefix and uses
-  round-robin for the rest rather than LRU. With a 10 GB budget all 43 layers pin.
-* **THIS TURN / speed** — rolling mean of the last 16 token intervals. TTFT
-  includes prompt prefill.
-* **PROFILE / TURN** — the engine's own `DSV4Prof` counters, reset per turn:
-  expert I/O, expert matmul, attention, mHC+norms, shared expert, router.
-* **NEXT-TOKEN TOP-3** — greedy choice and the runner-ups with softmax
-  probabilities over the full vocab, useful for seeing how decided a token is.
+* **THROUGHPUT** — one graph of **tok/s**, shared by prompt prefill (cyan) and
+  decode (green). Prompt tokens are placed before generated tokens, so the
+  hand-off from prefill to decode is visible instead of being two unrelated
+  charts. The graph is right-aligned and scrolls left as new tokens arrive, and
+  uses a linear axis with round labels (0, 0.25, 0.5, 0.75, 1.0, 1.25, …). The
+  colour legend is right-aligned below the graph.
+* **readout** — the latest speed sits on the `THROUGHPUT` line as
+  `xx tok/s (xx s/tok)`. There are no prefill/decode sample counts.
+* **decode-avg** — the mean of every decode sample in the current turn, shown
+  directly under `THROUGHPUT` in the same `xx tok/s (xx s/tok)` form. The
+  `tok/s` value is highlighted in pink because it is the number to watch.
+* **MEMORY** — below the graph:
+  * **RSS / avail** — current resident set size and `MemAvailable` from
+    `/proc/meminfo`, on the same line. Peak RSS is omitted because it barely
+    moves after the checkpoint loads.
+  * **cache-hit** — expert-cache hit rate.
+  * **disk** — current device read rate from `/proc/self/io`.
+  * **inflow** — estimated RAM→CPU traffic. Each token reads the dense trunk
+    plus `layers × topk` expert slots from RAM, so the readout is
+    `(trunk_gb + layers × topk × slot_mb / 1024) × current_tok/s`. This is an
+    estimate of model-weight traffic, not a measured memory-bus counter.
+* **CPU** — utilization of cores 0–3 from `/proc/stat` deltas, and the CPU
+  package temperature from the first matching `hwmon` sensor (preferring
+  `Package`, `Tctl`/`Tdie`, then `x86_pkg_temp`). Temperature shows `n/a` when
+  no CPU sensor is exposed by sysfs.
+
+Prefill timings come from the per-layer events: every prompt position is one
+forward, so the difference between consecutive prompt-position timestamps is
+that token's latency. With `/layers off` the graph still shows decode, and the
+readout falls back to the aggregate `ttft / prompt_tokens`.
+
+The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
+graph update on each token event. The trunk hit rate, profiler split and top-k
+counters are still collected and sent by `bin/dsv4-serve`, but are not drawn
+while this panel is being reworked.
 
 ## Caveats
 
 This is a prototype. It assumes a local terminal, one model process, and a
 checkpoint already packed with `tools/pack_trunk.py` and
-`tools/pack_tokenizer.py`. It does not implement a cancel button (Ctrl-C kills
-the whole TUI), speculative decoding, or a chat template beyond the single-turn
+`tools/pack_tokenizer.py`. It does not implement speculative decoding or a
+chat template beyond the single-turn
 `BOS system <User> … <Assistant> </think>` encoding used by the existing CLI;
 multi-turn context is kept by appending the official turn tokens and the EOS in
 the engine. In thinking mode the generated reasoning stays in the context (the
