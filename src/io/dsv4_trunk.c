@@ -102,12 +102,47 @@ static int parse_manifest(DSV4Trunk *tr, const char *dir)
     return 0;
 }
 
+/* Resolve plan_layer()'s request order to manifest indices once per layer.
+ * Doing it here turns the per-token bind loop into an array walk; the names are
+ * identical to the ones bind would otherwise format and compare every token. */
+typedef struct { DSV4TrunkLayer *lay; } BindMapCtx;
+
+static int bind_map_emit(void *ctx, int i, const char *name)
+{
+    DSV4TrunkLayer *lay = ((BindMapCtx *)ctx)->lay;
+    int found = -1;
+    for (int j = 0; j < lay->nt; j++)
+        if (!strcmp(lay->t[j].name, name)) { found = j; break; }
+    lay->bind_of[i] = found;
+    return 0;
+}
+
+static int build_bind_map(const DSV4Cfg *c, int L, DSV4TrunkLayer *lay)
+{
+    if (lay->nt == 0) return 0;                 /* layer absent: nothing to bind */
+    const int n = dsv4_bind_layer_plan(c, L, NULL, NULL);
+    if (n < 0) return -1;
+    lay->bind_of = (int32_t *)malloc((size_t)(n ? n : 1) * sizeof *lay->bind_of);
+    if (!lay->bind_of) return -1;
+    lay->nbind = n;
+    BindMapCtx ctx = { lay };
+    return dsv4_bind_layer_plan(c, L, bind_map_emit, &ctx) == n ? 0 : -1;
+}
+
 int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
                     int64_t budget_bytes)
 {
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
     if (parse_manifest(tr, dir) != 0) { dsv4_trunk_close(tr); return -1; }
+    /* A trunk can legally carry layers this config does not use (the packer may
+     * be pointed at a superset); only build maps for layers the engine can ask
+     * for, since plan_layer() reads the per-layer compress ratio from config. */
+    for (int L = 0; L < tr->n_layers && L < c->n_layers; L++)
+        if (build_bind_map(c, L, &tr->lay[L]) != 0) {
+            fprintf(stderr, "dsv4_trunk: cannot resolve bind map for layer %d\n", L);
+            dsv4_trunk_close(tr); return -1;
+        }
 
     char p[1024];
     snprintf(p, sizeof p, "%s/trunk.bin", dir);
@@ -194,7 +229,11 @@ void dsv4_trunk_close(DSV4Trunk *tr)
     for (int i = 0; i < tr->npin; i++) if (tr->pin) free(tr->pin[i]);
     free(tr->pin); free(tr->ring); free(tr->widen);
     free(tr->layer_of); free(tr->slot_of);
-    if (tr->lay) for (int L = 0; L < tr->n_layers; L++) free(tr->lay[L].t);
+    if (tr->lay) for (int L = 0; L < tr->n_layers; L++) {
+        free(tr->lay[L].t);
+        free(tr->lay[L].bind_of);
+        free(tr->lay[L].bind_widen);
+    }
     free(tr->lay); free(tr->json_arena); free(tr->json_text);
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
@@ -232,9 +271,9 @@ static int read_run(DSV4Trunk *tr, int L, unsigned char *dst)
     return 0;
 }
 
-/* Resolver handed to dsv4_bind_layer_mem: linear over one layer's ~40 tensors,
- * which is faster than building a hash for a list this short and is called once
- * per layer per token rather than per lookup. */
+/* Resolvers handed to dsv4_bind_layer_mem. The by-name one is kept for the
+ * generic DSV4MemSrc contract and for callers that have not pre-resolved a
+ * plan; the trunk uses the by-index one, whose map was built at open. */
 typedef struct { const DSV4TrunkLayer *lay; } FindCtx;
 
 static int trunk_find(void *ctx, const char *name,
@@ -248,6 +287,18 @@ static int trunk_find(void *ctx, const char *name,
             return 0;
         }
     return -1;
+}
+
+static int trunk_find_idx(void *ctx, int i, const char *name,
+                          int64_t *off, int64_t *nbytes, int *dtype)
+{
+    const DSV4TrunkLayer *lay = ((FindCtx *)ctx)->lay;
+    if (i < 0 || i >= lay->nbind) return -1;
+    const int ti = lay->bind_of[i];
+    if (ti < 0 || ti >= lay->nt) return -1;
+    *off = lay->t[ti].off; *nbytes = lay->t[ti].nbytes;
+    *dtype = lay->t[ti].dtype;
+    return 0;
 }
 
 int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
@@ -286,8 +337,36 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
         tr->misses++;
     }
 
-    FindCtx fc = { &tr->lay[L] };
-    DSV4MemSrc src = { trunk_find, &fc };
+    DSV4TrunkLayer *lay = &tr->lay[L];
+    /* A pinned run is immutable, so its binding is too. Hand back the one built
+     * on first use instead of re-planning and re-widening every token. */
+    if (L < tr->npin && lay->bind_ready) {
+        *b = lay->bind_cached;
+        return 0;
+    }
+
+    FindCtx fc = { lay };
+    DSV4MemSrc src = { trunk_find, &fc, trunk_find_idx };
+
+    if (L < tr->npin) {
+        /* Size the persistent widen area exactly. The first pass is the same
+         * validation every bind does; the second writes the bytes we keep. */
+        size_t used = 0;
+        if (dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap,
+                                &used) != 0)
+            return -1;
+        unsigned char *w = (unsigned char *)malloc(used ? used : 1);
+        if (!w) return -1;
+        if (dsv4_bind_layer_mem(c, L, b, run, &src, w, used, &used) != 0) {
+            free(w);
+            return -1;
+        }
+        lay->bind_widen = w;
+        lay->bind_cached = *b;
+        lay->bind_ready = 1;
+        return 0;
+    }
+
     return dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap, NULL);
 }
 

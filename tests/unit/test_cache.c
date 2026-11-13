@@ -297,6 +297,63 @@ int main(void)
         dsv4_cache_free(&b);
     }
 
+    printf("\n-- GATE 9  prefetched experts are served and byte-identical --\n");
+    {
+        /* The hash-layer prefetch area is a separate set of slots, filled by
+         * one reader before begin() asks. The request must wait only for the
+         * slot it needs, count as a hit, and produce the same bytes as a
+         * normal cache load. */
+        const int ids[6] = { 0, 1, 2, 3, 4, 5 };
+        const int lay[6] = { 2, 2, 2, 2, 2, 2 };
+        const int64_t cache_bytes = dsv4_cache_slot_bytes(&c) * 32;
+        DSV4Cache a, b;
+        dsv4_cache_init(&a, &st, &c, cache_bytes);
+        dsv4_cache_init(&b, &st, &c, cache_bytes);
+        CHECK(dsv4_cache_enable_prefetch(&b) == 0,
+              "prefetch could not be enabled");
+        CHECK(dsv4_cache_prefetch(&b, lay, ids, 6) == 0,
+              "prefetch request was rejected");
+
+        const DSV4ExpertW *many[6];
+        const int rc = dsv4_cache_get_many(&b, 2, ids, 6, many);
+        CHECK(rc == 0, "get_many after prefetch failed (%d)", rc);
+        CHECK(b.pf_hits == 6, "prefetch served %llu of 6 requests",
+              (unsigned long long)b.pf_hits);
+        CHECK(b.pf_loads == 6, "prefetch loaded %llu of 6 experts",
+              (unsigned long long)b.pf_loads);
+        CHECK(b.hits == 6 && b.misses == 0,
+              "requests were not served from prefetch: %llu hits, %llu misses",
+              (unsigned long long)b.hits, (unsigned long long)b.misses);
+
+        int bad = 0;
+        for (int k = 0; k < 6; k++) {
+            const DSV4ExpertW *one = dsv4_cache_get(&a, 2, ids[k]);
+            if (!one || !many[k]) {
+                CHECK(0, "expert %d missing on one path", ids[k]);
+                bad++;
+                continue;
+            }
+            const DSV4QMat *x[3] = { &one->w1, &one->w2, &one->w3 };
+            const DSV4QMat *y[3] = { &many[k]->w1, &many[k]->w2, &many[k]->w3 };
+            for (int q = 0; q < 3; q++) {
+                const int64_t nb = (int64_t)x[q]->rows * x[q]->cols / 2;
+                const int64_t ns = (int64_t)x[q]->rows
+                                 * ((x[q]->cols + 31) / 32);
+                if (memcmp(x[q]->w, y[q]->w, (size_t)nb) != 0 ||
+                    memcmp(x[q]->s, y[q]->s, (size_t)ns) != 0) {
+                    CHECK(0, "expert %d matrix %d differs from the normal path",
+                          ids[k], q);
+                    bad++;
+                }
+            }
+        }
+        if (!bad)
+            printf("  ok    6 experts served from prefetch, weights and scales "
+                   "byte-identical\n");
+        dsv4_cache_free(&a);
+        dsv4_cache_free(&b);
+    }
+
     dsv4_st_close(&st);
     printf("\n");
     if (fails) { printf("CACHE GATE FAILED: %d check(s)\n", fails); return 1; }

@@ -154,7 +154,7 @@ with no GPU in the picture.
 
 **A narrower reader pool does not buy the contention back**, though the
 argument that it should is a good one. Five interleaved rounds varying
-`DSV4_READERS`: exposed I/O 667.9 / 488.5 / 418.3 / 375.4 / 351.3 ms/pass at
+`--readers`: exposed I/O 667.9 / 488.5 / 418.3 / 375.4 / 351.3 ms/pass at
 1 / 2 / 3 / 4 / 6 readers, and s/token 1.72 / 1.54 / 1.40 / 1.39 / 1.39.
 Widest wins. The QD sweep measures *throughput* over 48 reads; what `end()`
 waits for is the *makespan* of a batch of six against a fixed amount of

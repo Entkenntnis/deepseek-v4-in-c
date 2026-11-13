@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <omp.h>
 
 #include <unistd.h>
@@ -14,6 +15,34 @@
  * Declared here because init and free are above them. */
 static void reader_pool_start(DSV4Cache *c);
 static void reader_pool_stop(DSV4Cache *c);
+
+typedef struct {
+    DSV4Cache *c;
+    int        bi;          /* which bounce buffer this reader owns */
+} ReaderArg;
+
+struct DSV4CacheJob {
+    DSV4CacheBatch *b;
+    int             j;
+};
+
+static double cache_now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
+
+/* Caller holds rmx. */
+static int rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j)
+{
+    if (c->rq_n >= c->rq_cap) return -1;
+    c->rq[c->rq_tail].b = b;
+    c->rq[c->rq_tail].j = j;
+    c->rq_tail = (c->rq_tail + 1) % c->rq_cap;
+    c->rq_n++;
+    return 0;
+}
 
 /* An expert's six tensors, in the order they are laid out inside a slot.
  * w2 is the down projection and has the transposed shape, which is why its
@@ -132,21 +161,17 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
      *
      * This used to be omp_get_max_threads() alone, so dropping the compute
      * team to the 4 P-cores also dropped the reader pool to 4 -- changing two
-     * things at once in every pinning experiment. The pool width is now
-     * max(compute threads, DSV4_READERS default 6), so the thread policy and
-     * the queue depth can be measured independently. */
-    int readers = DSV4_MAX_TOPK;
-    {
-        const char *renv = getenv("DSV4_READERS");
-        if (renv) {
-            const int n = atoi(renv);
-            if (n > 0) readers = n;
-        }
-    }
+     * things at once in every pinning experiment. The pool width now comes
+     * straight from the CLI's --readers value (stored in DSV4ThreadOpts), so
+     * the thread policy and the queue depth can be measured independently.
+     * There is no environment override. */
+    int readers = dsv4_threads_readers();
+    if (readers < 1) readers = 1;
     if (readers > DSV4_MAX_TOPK) readers = DSV4_MAX_TOPK;
     c->nbounce = omp_get_max_threads();
-    if (c->nbounce < readers) c->nbounce = readers;
-    if (c->nbounce < 1) c->nbounce = 1;
+    /* +1: bounce[0] belongs to synchronous get(), readers use 1..nrth. */
+    if (c->nbounce < readers + 1) c->nbounce = readers + 1;
+    if (c->nbounce < 2) c->nbounce = 2;
     c->bounce = (unsigned char **)calloc((size_t)c->nbounce, sizeof *c->bounce);
     if (!c->bounce) return -1;
     for (int b = 0; b < c->nbounce; b++)
@@ -196,6 +221,8 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
 
     for (int i = 0; i < c->nslot; i++) {
         c->slot[i].layer = -1;
+        c->slot[i].expert = -1;
+        c->slot[i].pending = 0;
         /* 4096-aligned so a widened O_DIRECT window can be read straight in. */
         if (posix_memalign((void **)&c->slot[i].bytes, 4096,
                            (size_t)c->slot_bytes) != 0) {
@@ -211,21 +238,37 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
         bind_slot(c, &c->slot[i]);
     }
 
+    /* One FIFO for every reader job: normal begin() batches and the optional
+     * hash prefetch batch. Sized well above the largest burst (one prefetch
+     * of 18 plus one layer's top-k); overflow is a hard error, not a stall. */
+    c->rq_cap = c->nslot + 64;
+    if (c->rq_cap < 256) c->rq_cap = 256;
+    c->rq = (struct DSV4CacheJob *)calloc((size_t)c->rq_cap,
+                                          sizeof *c->rq);
+    if (!c->rq) { dsv4_cache_free(c); return -1; }
+    c->rq_head = c->rq_tail = c->rq_n = 0;
+
     reader_pool_start(c);
+    /* Hash prefetch is automatic. enable_prefetch() only allocates the tiny
+     * batch and records that the cache is willing; the per-token check
+     * (pf_has_room) still decides whether this cache is large enough. */
+    (void)dsv4_cache_enable_prefetch(c);
     return 0;
 }
 
 void dsv4_cache_free(DSV4Cache *c)
 {
-    if (!c || !c->slot) return;
+    if (!c) return;
     /* Readers first, and before anything they point at is freed. */
-    reader_pool_stop(c);
+    if (c->slot) reader_pool_stop(c);
     for (int i = 0; i < c->nslot; i++) free(c->slot[i].bytes);
     free(c->slot);
     if (c->bounce) {
         for (int b = 0; b < c->nbounce; b++) free(c->bounce[b]);
         free(c->bounce);
     }
+    free(c->rq);
+    free(c->pf_batch);
     memset(c, 0, sizeof *c);
 }
 
@@ -408,44 +451,208 @@ static int load_expert(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
     return 0;
 }
 
+/* ------------------------------------------------------- hash prefetch ---- */
+
+int dsv4_cache_enable_prefetch(DSV4Cache *c)
+{
+    if (!c || c->pf_enabled) return 0;
+    if (c->nrth <= 0) return -1;      /* without readers a pending slot hangs */
+    if (!c->pf_batch) {
+        c->pf_batch = (DSV4CacheBatch *)calloc(1, sizeof *c->pf_batch);
+        if (!c->pf_batch) return -1;
+        c->pf_batch->is_prefetch = 1;
+    }
+    c->pf_enabled = 1;
+    return 0;
+}
+
+/* True when the main cache can hold `n` prefetched experts AND still leave one
+ * layer's top-k worth of slots for normal misses. */
+static int pf_has_room(const DSV4Cache *c, int n)
+{
+    return c->pf_enabled && c->nrth > 0 && n > 0 &&
+           c->nslot > n + c->cfg->topk;
+}
+
+/* Reserve a slot for (layer, expert). Caller holds rmx. Prefers an empty slot,
+ * then LRU, and never takes a slot another reader owns. */
+static int claim_slot(DSV4Cache *c, int layer, int expert,
+                      const int *claimed, int nclaim)
+{
+    int victim = -1;
+    uint64_t oldest = UINT64_MAX;
+    for (int i = 0; i < c->nslot; i++) {
+        DSV4Slot *s = &c->slot[i];
+        if (s->pending) continue;
+        int taken = 0;
+        for (int j = 0; j < nclaim; j++)
+            if (claimed[j] == i) { taken = 1; break; }
+        if (taken) continue;
+        if (s->layer < 0) { victim = i; break; }
+        if (s->stamp < oldest) { oldest = s->stamp; victim = i; }
+    }
+    if (victim < 0) return -1;
+    DSV4Slot *s = &c->slot[victim];
+    if (s->layer >= 0) c->evictions++;
+    s->layer = layer;
+    s->expert = expert;
+    s->pending = 1;
+    s->stamp = ++c->clock;
+    return victim;
+}
+
+int dsv4_cache_prefetch(DSV4Cache *c, const int *layers, const int *experts,
+                        int n)
+{
+    if (!c || n <= 0 || n > DSV4_MAX_PREFETCH) return 0;
+    if (!pf_has_room(c, n)) return 0;
+
+    pthread_mutex_lock(&c->rmx);
+    /* The previous token's prefetch must have landed before its batch is
+     * reused. Its slots are normal residents by now. */
+    while (c->pf_batch->ntodo > c->pf_batch->rdone)
+        pthread_cond_wait(&c->rdone, &c->rmx);
+    c->pf_batch->ntodo = 0;
+    c->pf_batch->rdone = 0;
+    c->pf_batch->is_prefetch = 1;
+
+    int queued = 0;
+    for (int i = 0; i < n; i++) {
+        const int layer = layers[i], expert = experts[i];
+
+        int resident = -1;
+        for (int j = 0; j < c->nslot; j++)
+            if (c->slot[j].layer == layer && c->slot[j].expert == expert) {
+                resident = j; break;
+            }
+        if (resident >= 0) {
+            if (c->slot[resident].pending) continue; /* already in flight */
+            c->slot[resident].stamp = ++c->clock;
+            c->pf_hits++;
+            continue;
+        }
+
+        const DSV4Tensor *t[6];
+        if (resolve_expert(c, layer, expert, t) != 0) {
+            c->pf_fail++;
+            continue;
+        }
+        const int slot = claim_slot(c, layer, expert, NULL, 0);
+        if (slot < 0) break;              /* cannot happen with pf_has_room */
+        DSV4CacheBatch *b = c->pf_batch;
+        const int j = b->ntodo++;
+        b->slot_of[j]   = slot;
+        b->k_of[j]      = i;
+        b->layer_of[j]  = layer;
+        b->expert_of[j] = expert;
+        memcpy(b->t_of[j], t, sizeof t);
+        b->failed[j] = 0;
+        b->got[j] = 0;
+        if (rq_push(c, b, j) != 0) {
+            c->slot[slot].layer = -1;
+            c->slot[slot].pending = 0;
+            b->ntodo--;
+            c->pf_fail++;
+            break;
+        }
+        queued++;
+    }
+    c->pf_requests += (uint64_t)queued;
+    if (queued > 0) pthread_cond_broadcast(&c->rwork);
+    pthread_mutex_unlock(&c->rmx);
+    return 0;
+}
+
+int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id)
+{
+    if (!c || !c->pf_enabled) return 0;
+    const DSV4Cfg *cfg = c->cfg;
+    if (!cfg || token_id < 0 || token_id >= cfg->vocab) return -1;
+    if (cfg->topk <= 0 || cfg->topk > DSV4_MAX_TOPK) return -1;
+    const int n_total = cfg->num_hash_layers * cfg->topk;
+    if (n_total > DSV4_MAX_PREFETCH) return 0;
+    if (!pf_has_room(c, n_total)) return 0;
+
+    int layers[DSV4_MAX_PREFETCH], experts[DSV4_MAX_PREFETCH], n = 0;
+    for (int L = 0; L < cfg->num_hash_layers && L < cfg->n_layers; L++) {
+        char name[224];
+        snprintf(name, sizeof name, "layers.%d.ffn.gate.tid2eid", L);
+        const DSV4Tensor *t = dsv4_st_find(c->st, name);
+        if (!t || t->dtype != DSV4_DT_I64) continue;
+        const int64_t row_bytes = (int64_t)cfg->topk * (int64_t)sizeof(int64_t);
+        if ((int64_t)(token_id + 1) * row_bytes > t->nbytes) continue;
+        DSV4Tensor row = *t;
+        row.off += (int64_t)token_id * row_bytes;
+        row.nbytes = row_bytes;
+        int64_t vals[DSV4_MAX_TOPK];
+        if (dsv4_st_read(c->st, &row, vals) != row_bytes) continue;
+        for (int k = 0; k < cfg->topk && n < DSV4_MAX_PREFETCH; k++) {
+            layers[n] = L;
+            experts[n] = (int)vals[k];
+            n++;
+        }
+    }
+    if (n == 0) return 0;
+    return dsv4_cache_prefetch(c, layers, experts, n);
+}
+
 const DSV4ExpertW *dsv4_cache_get(DSV4Cache *c, int layer, int expert)
 {
-    c->clock++;
     if (c->route_log) fprintf(c->route_log, "%d %d\n", layer, expert);
 
-    for (int i = 0; i < c->nslot; i++) {
+    const DSV4Tensor *t[6];
+    pthread_mutex_lock(&c->rmx);
+    c->clock++;
+
+    int found = -1;
+    for (int i = 0; i < c->nslot; i++)
         if (c->slot[i].layer == layer && c->slot[i].expert == expert) {
-            c->slot[i].stamp = c->clock;
-            c->hits++;
-            return &c->slot[i].w;
+            found = i; break;
         }
+    if (found >= 0 && c->slot[found].pending) {
+        const double t0 = cache_now_s();
+        while (c->slot[found].pending)
+            pthread_cond_wait(&c->rdone, &c->rmx);
+        c->pf_wait_s += cache_now_s() - t0;
+        if (c->slot[found].layer != layer || c->slot[found].expert != expert)
+            found = -1;
+    }
+    if (found >= 0) {
+        c->slot[found].stamp = ++c->clock;
+        c->hits++;
+        const DSV4ExpertW *w = &c->slot[found].w;
+        pthread_mutex_unlock(&c->rmx);
+        return w;
     }
 
     /* Resolve FIRST, so a request that cannot be satisfied never disturbs the
      * cache. Only once every tensor is known good is a victim chosen. */
-    const DSV4Tensor *t[6];
-    if (resolve_expert(c, layer, expert, t) != 0) return NULL;
-
-    /* Take an empty slot if there is one, else the least recently used.
-     * Scanning is fine at these slot counts: a 24 GB budget is ~1,800 slots and
-     * the scan is trivial beside a 13 MB read. */
-    int victim = -1;
-    uint64_t oldest = UINT64_MAX;
-    for (int i = 0; i < c->nslot; i++) {
-        if (c->slot[i].layer < 0) { victim = i; break; }
-        if (c->slot[i].stamp < oldest) { oldest = c->slot[i].stamp; victim = i; }
-    }
-    if (c->slot[victim].layer >= 0) c->evictions++;
-
-    if (load_expert(c, &c->slot[victim], t, c->bounce[0], &c->bytes_read) != 0) {
-        c->slot[victim].layer = -1;      /* do not leave a half-read slot live */
+    if (resolve_expert(c, layer, expert, t) != 0) {
+        pthread_mutex_unlock(&c->rmx);
         return NULL;
     }
-    c->slot[victim].layer  = layer;
-    c->slot[victim].expert = expert;
-    c->slot[victim].stamp  = c->clock;
-    c->misses++;
-    return &c->slot[victim].w;
+
+    const int victim = claim_slot(c, layer, expert, NULL, 0);
+    if (victim < 0) {
+        pthread_mutex_unlock(&c->rmx);
+        return NULL;
+    }
+    DSV4Slot *s = &c->slot[victim];
+    pthread_mutex_unlock(&c->rmx);
+
+    uint64_t got = 0;
+    const int bad = load_expert(c, s, t, c->bounce[0], &got) != 0;
+
+    pthread_mutex_lock(&c->rmx);
+    s->pending = 0;
+    if (bad) {
+        s->layer = s->expert = -1;       /* do not leave a half-read slot live */
+    } else {
+        c->misses++;
+        c->bytes_read += got;
+    }
+    pthread_mutex_unlock(&c->rmx);
+    return bad ? NULL : &s->w;
 }
 
 /* ------------------------------------------------------------ reader pool ---
@@ -464,7 +671,8 @@ const DSV4ExpertW *dsv4_cache_get(DSV4Cache *c, int layer, int expert)
  */
 static void *reader_main(void *arg)
 {
-    DSV4Cache *c = (DSV4Cache *)arg;
+    ReaderArg *ra = (ReaderArg *)arg;
+    DSV4Cache *c = ra->c;
 
     /* These threads inherited the COMPUTE affinity mask. Put them where the
      * thread policy asked for them -- on this machine the E-cores, where they
@@ -473,26 +681,42 @@ static void *reader_main(void *arg)
 
     pthread_mutex_lock(&c->rmx);
     for (;;) {
-        while (!c->rshutdown && (!c->rbatch || c->rnext >= c->rbatch->ntodo))
+        while (!c->rshutdown && c->rq_n == 0)
             pthread_cond_wait(&c->rwork, &c->rmx);
         if (c->rshutdown) break;
 
-        DSV4CacheBatch *b = c->rbatch;
-        const int j = c->rnext++;
-        /* Bounce index is the JOB, not the thread. Jobs in one batch are
-         * distinct and never outnumber the buffers, so no two readers can
-         * land in the same staging buffer. */
-        const int bi = j < c->nbounce ? j : 0;
+        const struct DSV4CacheJob job = c->rq[c->rq_head];
+        c->rq_head = (c->rq_head + 1) % c->rq_cap;
+        c->rq_n--;
         pthread_mutex_unlock(&c->rmx);
 
+        DSV4CacheBatch *b = job.b;
+        const int j = job.j;
         uint64_t got = 0;
         const int bad = load_expert(c, &c->slot[b->slot_of[j]], b->t_of[j],
-                                    c->bounce[bi], &got) != 0;
+                                    c->bounce[ra->bi], &got) != 0;
 
         pthread_mutex_lock(&c->rmx);
         b->failed[j] = bad;
         b->got[j]    = got;
-        if (++c->rdone_n >= b->ntodo) pthread_cond_broadcast(&c->rdone);
+        if (b->is_prefetch) {
+            /* Publish immediately: a layer's begin() may be waiting on this
+             * exact slot, and there is no end() call for a prefetch batch. */
+            DSV4Slot *s = &c->slot[b->slot_of[j]];
+            s->pending = 0;
+            if (bad) {
+                s->layer = s->expert = -1;
+                c->pf_fail++;
+            } else {
+                s->layer  = b->layer_of[j];
+                s->expert = b->expert_of[j];
+                c->pf_loads++;
+                c->pf_hits++;
+                c->pf_bytes += got;
+            }
+        }
+        b->rdone++;
+        pthread_cond_broadcast(&c->rdone);
     }
     pthread_mutex_unlock(&c->rmx);
     return NULL;
@@ -514,7 +738,7 @@ static void reader_pool_start(DSV4Cache *c)
      * FP4 kernel. So a narrower pool should buy back matmul time for free.
      *
      * It does not. Five interleaved rounds on the real checkpoint,
-     * --gen 15 --budget 16, varying DSV4_READERS:
+     * --gen 15 --budget 16, varying --readers:
      *
      *   readers            1      2      3      4      6
      *   exposed I/O ms   667.9  488.5  418.3  375.4  351.3
@@ -529,16 +753,13 @@ static void reader_pool_start(DSV4Cache *c)
      * instead of one; the drive is no busier, but the caller waits longer. A
      * queue-depth curve cannot see that, because it never has a deadline.
      *
-     * DSV4_READERS stays as the knob that produced the table, and for drives
-     * whose curve is not this one. */
-    int want = DSV4_MAX_TOPK;
-    const char *env = getenv("DSV4_READERS");
-    if (env) {
-        const int n = atoi(env);
-        if (n > 0) want = n;
-    }
+     * --readers is the knob that produced the table, and the one to change for
+     * drives whose curve is not this one. */
+    int want = dsv4_threads_readers();
+    if (want < 1) want = 1;
     if (want > DSV4_MAX_TOPK) want = DSV4_MAX_TOPK;
-    if (want > c->nbounce) want = c->nbounce;
+    /* bounce[0] is reserved for synchronous get(); readers start at 1. */
+    if (want > c->nbounce - 1) want = c->nbounce - 1;
     if (want < 1) return;
 
     if (pthread_mutex_init(&c->rmx, NULL) != 0) return;
@@ -553,12 +774,19 @@ static void reader_pool_start(DSV4Cache *c)
     }
 
     c->rth = (pthread_t *)calloc((size_t)want, sizeof *c->rth);
-    if (!c->rth) return;
+    ReaderArg *args = (ReaderArg *)calloc((size_t)want, sizeof *args);
+    if (!c->rth || !args) { free(c->rth); free(args); c->rth = NULL; return; }
+    c->rargs = args;
     for (int i = 0; i < want; i++) {
-        if (pthread_create(&c->rth[i], NULL, reader_main, c) != 0) break;
+        args[i].c = c;
+        args[i].bi = i + 1;          /* 0 is the synchronous get() buffer */
+        if (pthread_create(&c->rth[i], NULL, reader_main, &args[i]) != 0) break;
         c->nrth++;
     }
-    if (c->nrth == 0) { free(c->rth); c->rth = NULL; }
+    if (c->nrth == 0) {
+        free(c->rth); c->rth = NULL;
+        free(args); c->rargs = NULL;
+    }
 }
 
 static void reader_pool_stop(DSV4Cache *c)
@@ -570,7 +798,9 @@ static void reader_pool_stop(DSV4Cache *c)
     pthread_mutex_unlock(&c->rmx);
     for (int i = 0; i < c->nrth; i++) pthread_join(c->rth[i], NULL);
     free(c->rth);
+    free(c->rargs);
     c->rth  = NULL;
+    c->rargs = NULL;
     c->nrth = 0;
     pthread_cond_destroy(&c->rwork);
     pthread_cond_destroy(&c->rdone);
@@ -588,45 +818,34 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               int n, const DSV4ExpertW **out,
                               DSV4CacheBatch *b)
 {
-    int claimed[DSV4_MAX_TOPK], nclaim = 0;
-
-    b->layer = layer;
-    b->n     = n;
-    b->ntodo = 0;
-    b->ndup  = 0;
-    b->rc    = 0;
-
     if (n > DSV4_MAX_TOPK) { b->rc = -1; return -1; }
 
+    int claimed[DSV4_MAX_TOPK], nclaim = 0;
+    b->layer = layer;
+    b->n = n;
+    b->ntodo = 0;
+    b->ndup = 0;
+    b->rc = 0;
+    b->rdone = 0;
+    b->is_prefetch = 0;
+
+    pthread_mutex_lock(&c->rmx);
     for (int k = 0; k < n; k++) {
         const int e = experts[k];
         out[k] = NULL;
         c->clock++;
         if (c->route_log) fprintf(c->route_log, "%d %d\n", layer, e);
 
-        int found = -1;
-        for (int i = 0; i < c->nslot; i++)
-            if (c->slot[i].layer == layer && c->slot[i].expert == e) {
-                found = i; break;
-            }
-        if (found >= 0) {
-            c->slot[found].stamp = c->clock;
-            c->hits++;
-            out[k] = &c->slot[found].w;      /* resident: safe to use NOW */
-            claimed[nclaim++] = found;
-            continue;
-        }
-
         /* A duplicate request inside one call must not take a second slot --
          * top-k yields distinct experts today, but nothing here should depend
-         * on that. It also must not publish out[k] yet: the slot it points at
-         * is IN FLIGHT, and a caller computing between begin and end would
-         * read a half-loaded expert. Recorded, and filled in by end(). */
+         * on that. This check MUST come before the pending-slot wait: the
+         * duplicate's read has not been queued yet (the batch is queued after
+         * the loop), so waiting for it here would deadlock. */
         int dup = -1;
         for (int j = 0; j < b->ntodo; j++)
             if (b->expert_of[j] == e) { dup = j; break; }
         if (dup >= 0) {
-            c->slot[b->slot_of[dup]].stamp = c->clock;
+            c->slot[b->slot_of[dup]].stamp = ++c->clock;
             c->hits++;
             b->dup_k[b->ndup] = k;
             b->dup_j[b->ndup] = dup;
@@ -634,26 +853,37 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             continue;
         }
 
+        int found = -1;
+        for (int i = 0; i < c->nslot; i++)
+            if (c->slot[i].layer == layer && c->slot[i].expert == e) {
+                found = i; break;
+            }
+        if (found >= 0 && c->slot[found].pending) {
+            const double t0 = cache_now_s();
+            while (c->slot[found].pending)
+                pthread_cond_wait(&c->rdone, &c->rmx);
+            c->pf_wait_s += cache_now_s() - t0;
+            if (c->slot[found].layer != layer || c->slot[found].expert != e)
+                found = -1;
+        }
+        if (found >= 0) {
+            c->slot[found].stamp = ++c->clock;
+            c->hits++;
+            out[k] = &c->slot[found].w;      /* resident: safe to use NOW */
+            claimed[nclaim++] = found;
+            continue;
+        }
+
         const DSV4Tensor *t[6];
         if (resolve_expert(c, layer, e, t) != 0) { b->rc = -1; continue; }
 
-        int victim = -1;
-        uint64_t oldest = UINT64_MAX;
-        for (int i = 0; i < c->nslot; i++) {
-            int taken = 0;
-            for (int j = 0; j < nclaim; j++) if (claimed[j] == i) { taken = 1; break; }
-            if (taken) continue;             /* never evict this call's own work */
-            if (c->slot[i].layer < 0) { victim = i; break; }
-            if (c->slot[i].stamp < oldest) { oldest = c->slot[i].stamp; victim = i; }
-        }
+        const int victim = claim_slot(c, layer, e, claimed, nclaim);
         if (victim < 0) { b->rc = -1; continue; }   /* fewer slots than top-k */
-        if (c->slot[victim].layer >= 0) c->evictions++;
-
-        c->slot[victim].layer = -1;          /* in flight: not a valid entry yet */
-        c->slot[victim].stamp = c->clock;
         claimed[nclaim++] = victim;
+
         b->slot_of[b->ntodo]   = victim;
         b->k_of[b->ntodo]      = k;
+        b->layer_of[b->ntodo]  = layer;
         b->expert_of[b->ntodo] = e;
         memcpy(b->t_of[b->ntodo], t, sizeof t);
         b->failed[b->ntodo] = 0;
@@ -662,49 +892,54 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     }
 
     if (b->ntodo > 0 && c->nrth > 0) {
-        pthread_mutex_lock(&c->rmx);
-        c->rbatch  = b;
-        c->rnext   = 0;
-        c->rdone_n = 0;
+        for (int j = 0; j < b->ntodo; j++) {
+            if (rq_push(c, b, j) != 0) {
+                DSV4Slot *sl = &c->slot[b->slot_of[j]];
+                sl->layer = sl->expert = -1;
+                sl->pending = 0;
+                b->ntodo = j;
+                b->rc = -1;
+                break;
+            }
+        }
         pthread_cond_broadcast(&c->rwork);
-        pthread_mutex_unlock(&c->rmx);
     }
+    pthread_mutex_unlock(&c->rmx);
     return b->rc;
 }
 
 int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
                             DSV4CacheBatch *b)
 {
-    if (b->ntodo > 0) {
-        if (c->nrth > 0) {
-            pthread_mutex_lock(&c->rmx);
-            while (c->rdone_n < b->ntodo) pthread_cond_wait(&c->rdone, &c->rmx);
-            c->rbatch = NULL;
-            pthread_mutex_unlock(&c->rmx);
-        } else {
-            /* No pool. Still concurrent, just not overlapped with the caller --
-             * exactly what this function did before the pool existed. */
+    if (b->ntodo > 0 && c->nrth == 0) {
+        /* No pool. Still concurrent, just not overlapped with the caller --
+         * exactly what this function did before the pool existed. */
 #pragma omp parallel for schedule(dynamic, 1) if (b->ntodo > 1)
-            for (int j = 0; j < b->ntodo; j++) {
-                int bi = omp_get_thread_num();
-                if (bi >= c->nbounce) bi = 0;
-                b->failed[j] = load_expert(c, &c->slot[b->slot_of[j]],
-                                           b->t_of[j], c->bounce[bi],
-                                           &b->got[j]) != 0;
-            }
+        for (int j = 0; j < b->ntodo; j++) {
+            int bi = omp_get_thread_num();
+            if (bi >= c->nbounce) bi = 0;
+            b->failed[j] = load_expert(c, &c->slot[b->slot_of[j]],
+                                       b->t_of[j], c->bounce[bi],
+                                       &b->got[j]) != 0;
         }
+        b->rdone = b->ntodo;
     }
+
+    pthread_mutex_lock(&c->rmx);
+    while (b->rdone < b->ntodo)
+        pthread_cond_wait(&c->rdone, &c->rmx);
 
     /* ---- serial pass: publish -------------------------------------- */
     for (int j = 0; j < b->ntodo; j++) {
         DSV4Slot *sl = &c->slot[b->slot_of[j]];
         c->bytes_read += b->got[j];
+        sl->pending = 0;
         if (b->failed[j]) {
-            sl->layer = -1;                  /* no half-read slot goes live */
+            sl->layer = sl->expert = -1;     /* no half-read slot goes live */
             b->rc = -1;
             continue;
         }
-        sl->layer  = b->layer;
+        sl->layer  = b->layer_of[j];
         sl->expert = b->expert_of[j];
         c->misses++;
         out[b->k_of[j]] = &sl->w;
@@ -713,6 +948,7 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
         const int j = b->dup_j[d];
         if (!b->failed[j]) out[b->dup_k[d]] = &c->slot[b->slot_of[j]].w;
     }
+    pthread_mutex_unlock(&c->rmx);
     return b->rc;
 }
 
@@ -728,6 +964,8 @@ int dsv4_cache_get_many(DSV4Cache *c, int layer, const int *experts, int n,
 void dsv4_cache_reset_stats(DSV4Cache *c)
 {
     c->hits = c->misses = c->evictions = c->bytes_read = 0;
+    c->pf_requests = c->pf_hits = c->pf_loads = c->pf_fail = c->pf_bytes = 0;
+    c->pf_wait_s = 0.0;
 }
 
 void dsv4_cache_report(const DSV4Cache *c, const char *label)
@@ -742,5 +980,14 @@ void dsv4_cache_report(const DSV4Cache *c, const char *label)
            n ? 100.0 * (double)c->hits / (double)n : 0.0,
            (unsigned long long)c->misses, (unsigned long long)c->evictions);
     printf("  %.2f GB read from disk\n",
-           (double)c->bytes_read / 1073741824.0);
+           (double)(c->bytes_read + c->pf_bytes) / 1073741824.0);
+    if (c->pf_enabled && c->pf_requests > 0)
+        printf("  prefetch: %llu requests, %llu hits, %llu loads, "
+               "%llu failed, %.2f GB, %.1f ms waiting\n",
+               (unsigned long long)c->pf_requests,
+               (unsigned long long)c->pf_hits,
+               (unsigned long long)c->pf_loads,
+               (unsigned long long)c->pf_fail,
+               (double)c->pf_bytes / 1073741824.0,
+               c->pf_wait_s * 1e3);
 }

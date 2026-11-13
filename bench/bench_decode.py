@@ -51,6 +51,9 @@ def parse(log):
         return cast(m.group(1)) if m else None
 
     d = {}
+    # Set before the synthetic branch: both paths below may read it, and the
+    # non-synthetic path only fills it after parsing TTFT and wall.
+    d["decode"] = None
     d["ntok"] = first(r"(\d+) tokens in [0-9.]+ s", int)
     d["wall"] = first(rf"\d+ tokens in {NUM} s")
     d["ttft"] = first(rf"time to first token: {NUM} s")
@@ -71,6 +74,18 @@ def parse(log):
         d["evictions"] = int(m.group(5))
         d["disk_gb"] = float(m.group(6))
 
+    # The synthetic modes print their own summary instead of the normal
+    # "N tokens in T s" line: prefill is skipped, so there is no meaningful
+    # wall time to subtract TTFT from. Read the decode rate directly.
+    m = re.search(r"synthetic KV: start=(\d+) gen=(\d+)\s+"
+                  rf"TTFT={NUM} s\s+decode={NUM} s/token", log)
+    if m:
+        d["synthetic_kv"] = int(m.group(1))
+        d["ntok"] = int(m.group(2)) + 1
+        d["ttft"] = float(m.group(3))
+        d["decode"] = float(m.group(4))
+        d["reported"] = d["decode"]
+
     d["prof"] = {}
     for name in PROFILES:
         m = re.search(rf"^  {re.escape(name)}\s+{NUM} s\s+([0-9.]+)%\s+"
@@ -86,11 +101,10 @@ def parse(log):
         ids = [int(x) for x in re.findall(r"-?\d+", text)]
     d["ids"] = ids
 
-    if d["ntok"] and d["wall"] is not None and d["ttft"] is not None:
-        n = d["ntok"] - 1
-        d["decode"] = (d["wall"] - d["ttft"]) / n if n > 0 else None
-    else:
-        d["decode"] = None
+    if d["decode"] is None:
+        if d["ntok"] and d["wall"] is not None and d["ttft"] is not None:
+            n = d["ntok"] - 1
+            d["decode"] = (d["wall"] - d["ttft"]) / n if n > 0 else None
     return d
 
 
@@ -120,6 +134,10 @@ def main():
                     help="expert-reader threads; 0 = engine default")
     ap.add_argument("--reader-pin", choices=["off", "p", "e", "all"],
                     default="off", help="affinity for the reader threads")
+    ap.add_argument("--synthetic-kv", type=int, default=0, metavar="START_POS",
+                    help="fill the KV state for an N-token context and skip prefill")
+    ap.add_argument("--synthetic-experts", action="store_true",
+                    help="use one fixed FP4 expert in RAM (no routed-expert disk I/O)")
     ap.add_argument("--json", metavar="FILE", help="write all parsed reps as JSON")
     ap.add_argument("--keep", metavar="DIR", help="keep raw logs in DIR")
     args = ap.parse_args()
@@ -130,6 +148,10 @@ def main():
     cmd = [args.bin, args.model, "--trunk", args.trunk, "--tok", args.tok,
            "--prompt", args.prompt, "--gen", str(args.gen),
            "--budget", str(args.budget)]
+    if args.synthetic_kv > 0:
+        cmd += ["--synthetic-kv", str(args.synthetic_kv)]
+    if args.synthetic_experts:
+        cmd += ["--synthetic-experts"]
     env = dict(os.environ)
     prefix = []
 
@@ -177,8 +199,12 @@ def main():
         d["rep"] = i + 1
         d["real_wall"] = time.time() - t0
         reps.append(d)
-        print(f"{d['decode']:.3f} s/token decode "
-              f"(wall {d['wall']:.1f} s, ttft {d['ttft']:.1f} s)")
+        if d["wall"] is not None:
+            print(f"{d['decode']:.3f} s/token decode "
+                  f"(wall {d['wall']:.1f} s, ttft {d['ttft']:.1f} s)")
+        else:
+            print(f"{d['decode']:.3f} s/token decode "
+                  f"(synthetic KV, ttft {d['ttft']:.1f} s)")
 
     dec = [r["decode"] for r in reps]
     med = statistics.median(dec)
@@ -188,7 +214,11 @@ def main():
     print()
     print(f"decode s/token : median {med:.3f}   min {lo:.3f}   max {hi:.3f}   "
           f"spread {spread:.1f}%")
-    print(f"reported s/tok : {reps[0]['reported']:.2f} (includes prefill; ignore)")
+    if reps[0].get("synthetic_kv"):
+        print(f"synthetic KV   : start {reps[0]['synthetic_kv']}, "
+              f"decode measured directly (prefill skipped)")
+    else:
+        print(f"reported s/tok : {reps[0]['reported']:.2f} (includes prefill; ignore)")
     print(f"ttft           : {statistics.median([r['ttft'] for r in reps]):.1f} s")
     print(f"peak RSS       : {statistics.median([r['rss'] for r in reps]):.2f} GB")
     print(f"expert cache   : {reps[0]['slots']} slots, "

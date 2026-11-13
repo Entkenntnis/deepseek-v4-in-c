@@ -119,6 +119,105 @@ The "attention" row is mostly the FP8 GEMVs (`wq_a`, `wq_b`, `wo_a`, `wo_b`,
 
 ## Change history
 
+### 2026-11-13 — hash-layer expert prefetch through the main cache queue
+
+**Workload.** `--gen 20`, budget 16 GB, real routed experts, P-cores. Same
+prompt as the decode baseline. Prefetch is automatic when the cache has room;
+the A/B was run with a temporary flag before that flag was removed.
+
+**Design.** Layers below `num_hash_layers` route from `tid2eid`, so all 18
+experts (3 layers × top-6) are known from the token id alone. At the start of
+each forward pass, `dsv4_cache_prefetch_hash_layers()` reads those rows and
+queues all 18 as one batch in the **main cache's** reader FIFO. A normal
+`begin()` that asks for a slot still in flight waits on that slot's `pending`
+bit instead of issuing a second read. The prefetch is only used when the main
+cache can hold 18 experts and still leave one layer's top-k (`nslot > 18 + 6`);
+there is no dedicated area and no extra memory.
+
+**What was rejected.** A first implementation used 18 dedicated prefetch slots
+and one prefetch reader thread. It was consistently ~10% slower: the single
+reader could not keep up, layer 0 waited on it, and the reads competed with the
+main pool. That version was removed. The queue above shares the existing 16
+readers (the pool defaults to `DSV4_MAX_TOPK` in the test harness; the CLI
+passes 6), so the 18 jobs go out at queue depth instead of serially.
+
+**Interleaved A/B** (`off on on off off on`), generated ids identical in all
+six runs:
+
+| arm | decode s/token | exposed expert I/O ms/pass |
+|---|---|---:|
+| off | 0.845 / 0.915 / 0.845 — median **0.845** | 277 / 332 / 284 — median **284** |
+| on | 0.825 / 0.820 / 0.830 — median **0.825** | 250 / 255 / 267 — median **255** |
+
+Decode improves **−2.4%** and exposed expert I/O falls **−29 ms/pass**. The
+bytes read are unchanged (33.77 GB in both arms): the 359 hash-layer misses are
+moved earlier, and the 55 experts already resident are skipped by the prefetch
+scan. Routed-expert matmul and attention are flat to slightly better, so the
+DMA contention did not eat the gain.
+
+Prefetch counters on the three `on` runs: 359 requests, 359 loads, 0 failures,
+4.47 GB, 552–610 ms total waiting across 23 passes (~24–27 ms/pass).
+
+**Status:** automatic, no flag. `dsv4_cache_init()` enables the batch when a
+reader pool exists, and every token-start call re-checks that
+`nslot > num_hash_layers * topk + topk`. A cache too small to keep one layer's
+misses alongside the 18 prefetched experts simply never prefetches. 2.4% is
+above this machine's run-to-run noise in this A/B but not enough to be called
+large; keep an eye on it in longer traces. Three automatic post-removal runs
+measured 0.780 / 0.780 / 0.790 s/token, 359 loads, 0 failures, identical ids.
+
+```sh
+python3 bench/bench_decode.py --reps 3 --gen 20 --budget 16
+```
+
+### 2026-11-13 — bind: pre-resolved plan and cached pinned layers
+
+**Workload.** `--synthetic-kv 1024 --synthetic-experts --gen 50 --budget 8
+--pin p --threads 4 --readers 6`: 1k context, I/O-free control, 50 generated
+tokens. The 8 GB budget pins all 43 layers, so this isolates the bind path
+rather than trunk reads.
+
+**What was actually slow.** The profile row was **10.6 ms/pass** at baseline.
+`bin/bind_resolve` (new; real manifest, no reads or widening) separates the
+lookup: the old linear `strcmp` scan over a layer's ~46 manifest entries cost
+**51.8 µs/token**; the precomputed map costs **2.3 µs/token**. That is 0.05 ms,
+not 10 ms. The rest was re-widening ~3.3 MB of BF16 mHC and compressor vectors
+for every layer on every token. A pinned layer's run never moves, and neither
+do those widened values, so the binding is now built once and returned from a
+per-layer cache. Ring layers still bind per pass.
+
+**Changes.**
+
+1. `dsv4_bind_layer_plan()` exposes the order in which `plan_layer()` requests
+   tensors. `DSV4MemSrc` gained an optional `find_idx` callback, and
+   `dsv4_trunk_open()` resolves name → manifest index once. The per-token path
+   indexes that array instead of running `strcmp`.
+2. `dsv4_trunk_bind()` caches the complete `DSV4LayerBind` for pinned layers,
+   including a per-layer widen area, instead of re-running the plan and the
+   widening loop each token.
+
+**Interleaved A/B** (`old new new old old new`), generated ids identical in all
+six runs:
+
+| arm | decode s/token | bind ms/pass |
+|---|---|---:|
+| old | 0.6202 / 0.6411 / 0.6401 — median **0.6401** | 10.5 / 10.9 / 10.9 |
+| new | 0.6277 / 0.6473 / 0.6319 — median **0.6319** | 2.6 / 2.6 / 2.5 |
+
+The median is **−1.3%**, consistent with removing 8.1 ms/pass from a 640 ms
+token. Peak RSS went 8.32 → 8.45 GB: each of the 43 pinned layers now keeps its
+own ~3.4 MB of widened vectors instead of sharing one transient buffer.
+
+**Verified:** `test_trunk` (streamed bind byte-identical to the shard bind),
+`test_bindmem`, `test_bind`; generated ids identical across every arm.
+
+```sh
+./bin/bind_resolve                      # lookup cost, linear vs map
+python3 bench/bench_decode.py --reps 3 --gen 50 --budget 8 \
+  --cpu-pin p --threads 4 --readers 6 \
+  --synthetic-kv 1024 --synthetic-experts
+```
+
 ### 2026-11-13 — context 2k A/B: indexer, top-k and the serial dot kernels
 
 **Why a synthetic KV cache.** A real 2k prefill costs ~1 s per prompt token on
@@ -308,7 +407,7 @@ was measuring a **confound**: `--pin pcores` in the bench meant `taskset -c 0-3`
 **and** `OMP_NUM_THREADS=4`, and `OMP_NUM_THREADS` also sized the expert-reader
 pool (`nbounce = omp_get_max_threads()`), so it changed core selection, compute
 width and queue depth at once. The reader width is now independent
-(`max(compute threads, DSV4_READERS)`, default 6), and the engine pins itself.
+(`--readers`, default 6), and the engine pins itself.
 
 Matrix, `--budget 16`, `--gen 20`, one rep per cell, two rounds in opposite
 order. All cells produced **identical token ids**.

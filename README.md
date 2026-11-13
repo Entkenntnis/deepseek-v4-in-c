@@ -651,7 +651,7 @@ If DMA is what costs the matmul 34%, and
 [the drive plateaus by QD2–4](#is-the-read-path-queue-depth-bound-no-and-that-closes-a-whole-roadmap-item),
 then readers past the plateau spend DRAM bandwidth and return none — so a
 narrower pool should be free money. It is not. Five interleaved rounds,
-`--gen 15 --budget 16 --gpu`, varying `DSV4_READERS`:
+`--gen 15 --budget 16 --gpu`, varying `--readers`:
 
 | readers | 1 | 2 | 3 | 4 | **6 (default)** |
 |---|---|---|---|---|---|

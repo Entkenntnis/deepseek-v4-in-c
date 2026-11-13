@@ -216,6 +216,39 @@ int main(int argc, char **argv)
                100.0 * (double)tr.npin / (double)n_present);
     }
 
+    printf("\n-- GATE 5  a pinned cache survives ring binds --\n");
+    {
+        /* Pinned layers keep their widened vectors in their own allocation.
+         * The ring uses one shared widen area, so if the cache accidentally
+         * aliased it, a full sweep would overwrite the pinned layer's wide
+         * pointers and only show up as subtly wrong output much later. */
+        if (tr.npin == 0) {
+            printf("  SKIP  no pinned layer\n");
+        } else {
+            const int L = 0;
+            DSV4LayerBind a, b;
+            if (dsv4_bind_layer(&st, &c, L, &a) != 0) {
+                CHECK(0, "shard bind failed for layer %d", L);
+            } else if (dsv4_trunk_bind(&tr, &c, L, &b) != 0) {
+                CHECK(0, "trunk bind failed for layer %d", L);
+                dsv4_bind_free(&a);
+            } else {
+                CHECK(a.w.attn_norm && b.w.attn_norm &&
+                      memcmp(a.w.attn_norm, b.w.attn_norm,
+                             (size_t)c.hidden * sizeof(float)) == 0,
+                      "layer %d attn_norm was disturbed by ring binds", L);
+                CHECK(a.w.hc_attn.fn && b.w.hc_attn.fn &&
+                      memcmp(a.w.hc_attn.fn, b.w.hc_attn.fn,
+                             (size_t)dsv4_mix_hc(&c) * dsv4_hc_dim(&c)
+                             * sizeof(float)) == 0,
+                      "layer %d hc_attn.fn was disturbed by ring binds", L);
+                printf("  ok    pinned layer %d still matches the shard "
+                       "after a full sweep\n", L);
+                dsv4_bind_free(&a);
+            }
+        }
+    }
+
     printf("\n");
     dsv4_trunk_report(&tr, "after the gate");
     dsv4_trunk_close(&tr);

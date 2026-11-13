@@ -30,7 +30,7 @@ typedef enum {
 typedef struct {
     int pin;            /* DSV4Pin for the compute/OpenMP team             */
     int threads;        /* omp_set_num_threads; 0 = leave the runtime alone */
-    int readers;        /* expert-reader pool width; 0 = cache default (6)  */
+    int readers;        /* expert-reader pool width; 0 = default (6)        */
     int reader_pin;     /* DSV4Pin for the reader pthreads                 */
 } DSV4ThreadOpts;
 
@@ -46,6 +46,10 @@ int  dsv4_threads_apply(const DSV4ThreadOpts *o);
 /* Re-pin the CALLING thread according to opts.reader_pin. Called by each cache
  * reader thread at startup, because those threads inherited the compute mask. */
 void dsv4_threads_pin_current_reader(void);
+
+/* Reader-pool width chosen by the CLI (--readers). Returns 6 when unset. The
+ * cache uses this directly; there is no environment override. */
+int  dsv4_threads_readers(void);
 
 /* One-line human-readable description of what apply() did, for --help output,
  * logs and the TUI's ready event. Never NULL. */

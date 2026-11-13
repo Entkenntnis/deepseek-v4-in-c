@@ -45,7 +45,11 @@
 #define DSV4_SLOT_SLACK (6 * 4096)
 
 typedef struct {
-    int      layer, expert;    /* key; layer < 0 means the slot is empty */
+    /* Key. layer < 0 and pending == 0 means empty. While a reader owns the
+     * slot the key is already set and pending is 1, so a later request for the
+     * same expert can wait for this load instead of issuing a duplicate read. */
+    int      layer, expert;
+    int      pending;
     uint64_t stamp;            /* for LRU */
     DSV4ExpertW w;             /* points into `bytes` */
     unsigned char *bytes;      /* 4096-aligned; O_DIRECT reads land here */
@@ -55,6 +59,13 @@ typedef struct {
      * so this is recomputed on every load and bind_slot reads it. */
     int64_t  toff[6];
 } DSV4Slot;
+
+/* Upper bound on one hash-layer prefetch batch: num_hash_layers * topk.
+ * 18 on both released models; 64 leaves room and keeps the batch fixed-size. */
+#define DSV4_MAX_PREFETCH 64
+
+struct DSV4CacheBatch;
+struct DSV4CacheJob;
 
 typedef struct {
     const DSV4St  *st;
@@ -92,8 +103,8 @@ typedef struct {
      * ONE PER THREAD. Expert loads within a layer ARE issued concurrently --
      * see dsv4_cache_get_many -- so a single shared staging buffer would have
      * every reader scribbling over the others. nbounce is fixed at cache
-     * construction at max(compute threads, DSV4_READERS), so a narrow compute
-     * team does not silently narrow the reader pool. */
+     * construction from the CLI's --readers value, so a narrow compute team
+     * does not silently narrow the reader pool. */
     unsigned char **bounce;
     int             nbounce;
     int64_t         bounce_cap;
@@ -121,12 +132,26 @@ typedef struct {
     int             nrth;
     pthread_mutex_t rmx;
     pthread_cond_t  rwork, rdone;
-    struct DSV4CacheBatch *rbatch;   /* the batch in flight, NULL when idle */
-    int             rnext, rdone_n, rshutdown;
+    struct DSV4CacheJob *rq;         /* FIFO of reader jobs */
+    int             rq_cap, rq_head, rq_tail, rq_n;
+    void           *rargs;           /* per-reader {cache, bounce index} */
+    int             rshutdown;
 
     /* stats */
     uint64_t hits, misses, evictions;
     uint64_t bytes_read;
+
+    /* HASH-LAYER PREFETCH -- optional, off unless enabled.
+     *
+     * Uses the SAME slots and reader pool as everything else: batches of jobs
+     * share one FIFO, and a slot's `pending` bit lets begin() wait for an
+     * in-flight prefetch instead of reading the same expert twice. Only used
+     * when the main cache can hold all hash-layer experts with room to spare;
+     * a dedicated area was measurably worse and is left for later. */
+    int             pf_enabled;
+    struct DSV4CacheBatch *pf_batch; /* persistent batch for one token */
+    uint64_t pf_requests, pf_hits, pf_loads, pf_fail, pf_bytes;
+    double   pf_wait_s;
 } DSV4Cache;
 
 /* budget_bytes decides the slot count. Returns 0 on success.
@@ -147,6 +172,29 @@ int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg);
 int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
                      int64_t budget_bytes);
 void dsv4_cache_free(DSV4Cache *c);
+
+/* ---- hash-layer prefetch -------------------------------------------------
+ *
+ * Automatic. dsv4_cache_init() enables the batch once a reader pool exists;
+ * there is no CLI switch. The token-start path then queues the hash layers'
+ * known experts into the main cache, but only when the cache can hold all of
+ * them AND still leave room for one layer's top-k misses. A smaller cache
+ * simply never prefetches, so the feature costs it nothing.
+ *
+ * enable_prefetch() is idempotent and is normally called by init; it remains
+ * exposed for the cache gate that exercises the path directly.
+ */
+int dsv4_cache_enable_prefetch(DSV4Cache *c);
+
+/* Queue n (layer, expert) pairs into the main cache. Non-blocking; the caller
+ * waits later through begin()/get() only for the slots it actually needs. A
+ * failed prefetch read is not fatal; the normal path retries. */
+int dsv4_cache_prefetch(DSV4Cache *c, const int *layers, const int *experts,
+                        int n);
+
+/* Read every hash layer's tid2eid row for token_id and queue the resulting
+ * (layer, expert) pairs as one batch, as early as the decode loop can. */
+int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id);
 
 /* Fetch one expert, loading it if absent. Returns NULL only on a read failure,
  * which callers must treat as fatal: routing a token through fewer experts than
@@ -252,15 +300,21 @@ int dsv4_cache_get_many(DSV4Cache *c, int layer, const int *experts, int n,
 typedef struct DSV4CacheBatch DSV4CacheBatch;
 struct DSV4CacheBatch {
     int layer, n, ntodo;
-    int slot_of[DSV4_MAX_TOPK];         /* slot each pending read fills   */
-    int k_of[DSV4_MAX_TOPK];            /* which request that read serves */
-    const DSV4Tensor *t_of[DSV4_MAX_TOPK][6];
-    int expert_of[DSV4_MAX_TOPK];
-    int failed[DSV4_MAX_TOPK];
-    uint64_t got[DSV4_MAX_TOPK];
+    /* True for the persistent hash-prefetch batch: jobs may span layers and
+     * the reader publishes each slot as it lands. Normal batches are one layer
+     * and are published by end(). */
+    int is_prefetch;
+    int rdone;                          /* jobs completed */
+    int slot_of[DSV4_MAX_PREFETCH];     /* slot each pending read fills   */
+    int k_of[DSV4_MAX_PREFETCH];        /* which request that read serves */
+    const DSV4Tensor *t_of[DSV4_MAX_PREFETCH][6];
+    int expert_of[DSV4_MAX_PREFETCH];
+    int layer_of[DSV4_MAX_PREFETCH];    /* used by the prefetch batch      */
+    int failed[DSV4_MAX_PREFETCH];
+    uint64_t got[DSV4_MAX_PREFETCH];
     /* Requests that asked for an expert another request in the same batch is
      * already reading. They cannot be answered until that read lands. */
-    int ndup, dup_k[DSV4_MAX_TOPK], dup_j[DSV4_MAX_TOPK];
+    int ndup, dup_k[DSV4_MAX_PREFETCH], dup_j[DSV4_MAX_PREFETCH];
     int rc;
 };
 

@@ -84,7 +84,7 @@ int main(void)
 
         const size_t wcap = dsv4_bind_widen_bytes(&c);
         unsigned char *widen = (unsigned char *)malloc(wcap);
-        DSV4MemSrc src = { run_find, &run };
+        DSV4MemSrc src = { run_find, &run, NULL };
         DSV4LayerBind b;
         size_t used = 0;
         if (dsv4_bind_layer_mem(&c, L, &b, bytes, &src, widen, wcap, &used) != 0) {

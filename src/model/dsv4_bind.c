@@ -255,6 +255,19 @@ static void plan_model(Plan *p, const DSV4Cfg *c, int want_head, DSV4ModelW *w)
     plan_hc(p, c, &w->hc_head, c->hc_mult, 1, "hc_head");
 }
 
+int dsv4_bind_layer_plan(const DSV4Cfg *c, int L,
+                         int (*emit)(void *ctx, int i, const char *name),
+                         void *ctx)
+{
+    Plan p; memset(&p, 0, sizeof p);
+    DSV4LayerW tmp;
+    plan_layer(&p, c, L, &tmp);
+    if (p.bad) return -1;
+    for (int i = 0; i < p.n; i++)
+        if (emit && emit(ctx, i, p.r[i].name) != 0) return -1;
+    return p.n;
+}
+
 /* --------------------------------------------------------------- resolve ---- */
 
 /* Resolve and validate everything, and lay out the blob, before reading a byte. */
@@ -473,7 +486,10 @@ int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
         Req *q = &p.r[i];
         int64_t off = 0, nbytes = 0;
         int dtype = 0;
-        if (src->find(src->ctx, q->name, &off, &nbytes, &dtype) != 0) {
+        const int found = src->find_idx
+            ? src->find_idx(src->ctx, i, q->name, &off, &nbytes, &dtype)
+            : src->find(src->ctx, q->name, &off, &nbytes, &dtype);
+        if (found != 0) {
             fprintf(stderr, "dsv4_bind: %s is not in the trunk run for layer %d\n",
                     q->name, layer);
             return -1;

@@ -115,7 +115,7 @@ static int sweep(const DSV4St *st, const DSV4Cfg *cfg, int per_point,
      * are scattered, and scattered reads have per-request latency that only
      * more requests in flight can hide.
      *
-     * That difference is measurable in the engine: at DSV4_READERS=2 a live
+     * That difference is measurable in the engine: at --readers 2 a live
      * run spends 488 ms/pass in exposed I/O against 369 at 4-6. So the
      * ordered sweep understates what depth is worth. Shuffled is the default
      * because it is the honest model of the workload; pass `ordered` as the

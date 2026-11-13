@@ -174,3 +174,8 @@ const char *dsv4_threads_desc(void)
 {
     return g_desc;
 }
+
+int dsv4_threads_readers(void)
+{
+    return g_opt.readers > 0 ? g_opt.readers : 6;
+}

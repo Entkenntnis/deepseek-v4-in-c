@@ -53,6 +53,19 @@ typedef struct {
     int64_t          nbytes;
     DSV4TrunkTensor *t;
     int              nt;
+    /* plan_layer() order -> index into t[], resolved once at open. Name lookup
+     * is on the per-token path (43 layers x ~46 tensors), so the hot bind loop
+     * indexes this instead of scanning the manifest with strcmp. -1 means the
+     * plan named a tensor this layer does not carry; bind reports it. */
+    int32_t         *bind_of;
+    int              nbind;
+    /* A pinned layer's run never moves, and its widened vectors are
+     * independent of the token, so its binding can be built once. Rebuilding
+     * it per token re-widens ~3.3 MB of mHC/compressor vectors every pass,
+     * which dominated the "bind / widen" profile row. */
+    DSV4LayerBind    bind_cached;
+    unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
+    int              bind_ready;
 } DSV4TrunkLayer;
 
 typedef struct {

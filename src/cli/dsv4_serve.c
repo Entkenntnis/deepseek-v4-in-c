@@ -267,14 +267,20 @@ static void write_cache(const Engine *e)
     const uint64_t n = c->hits + c->misses;
     printf("\"cache\":{\"slots\":%d,\"hit\":%llu,\"miss\":%llu,\"evict\":%llu,"
            "\"hit_rate\":%.4f,\"read_gb\":%.4f,\"resident_gb\":%.3f,"
-           "\"slot_mb\":%.2f}",
+           "\"slot_mb\":%.2f,\"pf\":%d,\"pf_hit\":%llu,\"pf_load\":%llu,"
+           "\"pf_read_gb\":%.4f,\"pf_wait_ms\":%.1f}",
            c->nslot,
            (unsigned long long)c->hits, (unsigned long long)c->misses,
            (unsigned long long)c->evictions,
            n ? (double)c->hits / (double)n : 0.0,
-           (double)c->bytes_read / 1073741824.0,
+           (double)(c->bytes_read + c->pf_bytes) / 1073741824.0,
            (double)c->slot_bytes * (double)c->nslot / 1073741824.0,
-           (double)c->slot_bytes / 1048576.0);
+           (double)c->slot_bytes / 1048576.0,
+           c->pf_enabled,
+           (unsigned long long)c->pf_hits,
+           (unsigned long long)c->pf_loads,
+           (double)c->pf_bytes / 1073741824.0,
+           c->pf_wait_s * 1e3);
 }
 
 static void write_trunk(const Engine *e)
@@ -700,6 +706,9 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
 {
     const int hc = e->c.hc_mult, d = e->c.hidden;
 
+    if (e->cache.pf_enabled)
+        dsv4_cache_prefetch_hash_layers(&e->cache, tid);
+
     dsv4_embed_row(e->xh, e->mb.w.embed, e->mb.w.wdt, tid, d);
     for (int j = 0; j < hc; j++)
         memcpy(e->h + (size_t)j * d, e->xh, (size_t)d * sizeof(float));
@@ -972,11 +981,6 @@ int main(int argc, char **argv)
     if (pin_id < 0 || rpin_id < 0) {
         fprintf(stderr, "invalid --pin/--reader-pin (use off|all|p|e)\n");
         return 2;
-    }
-    if (readers > 0) {
-        char rb[16];
-        snprintf(rb, sizeof rb, "%d", readers);
-        setenv("DSV4_READERS", rb, 1);
     }
     const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
     dsv4_threads_apply(&topts);

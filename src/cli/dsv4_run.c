@@ -288,11 +288,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "invalid --pin/--reader-pin (use off|all|p|e)\n");
         return 2;
     }
-    if (readers > 0) {
-        char rb[16];
-        snprintf(rb, sizeof rb, "%d", readers);
-        setenv("DSV4_READERS", rb, 1);
-    }
     const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
     dsv4_threads_apply(&topts);
 
@@ -510,6 +505,12 @@ int main(int argc, char **argv)
     for (int step = 0; step < nsteps; step++) {
         const int pos = start_pos + step;
         const int32_t tid = ids[step];
+
+        /* Hash layers route from tid2eid, so their experts are known before
+         * the layer loop starts. Queue them now; the prefetch reader overlaps
+         * the reads with the attention/mHC work of layers 0..2. */
+        if (cache.pf_enabled && !synthetic_experts)
+            dsv4_cache_prefetch_hash_layers(&cache, tid);
 
         /* embed, then expand to hc_mult identical copies (model.py Transformer:
          * h.unsqueeze(2).repeat(1,1,hc_mult,1)) */

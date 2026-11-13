@@ -102,7 +102,22 @@ typedef struct {
     int (*find)(void *ctx, const char *name,
                 int64_t *off, int64_t *nbytes, int *dtype);
     void *ctx;
+    /* Optional fast path. plan_layer() asks for tensors in a stable order, so a
+     * source can resolve the whole plan ONCE and then answer by request index
+     * instead of by name. When set, dsv4_bind_layer_mem() calls this instead of
+     * find(); `i` is the request's position in dsv4_bind_layer_plan()'s order.
+     * Both callbacks must describe the same tensor for every i. */
+    int (*find_idx)(void *ctx, int i, const char *name,
+                    int64_t *off, int64_t *nbytes, int *dtype);
 } DSV4MemSrc;
+
+/* Walk the requests plan_layer() will make for `c` layer `L`, in order. `emit`
+ * (when non-NULL) is called once per request with its index and name. Returns
+ * the request count, or -1 if `emit` rejects one. This is the contract that
+ * lets a source pre-resolve names without duplicating the plan. */
+int dsv4_bind_layer_plan(const DSV4Cfg *c, int L,
+                         int (*emit)(void *ctx, int i, const char *name),
+                         void *ctx);
 
 int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
                         const unsigned char *run, const DSV4MemSrc *src,
