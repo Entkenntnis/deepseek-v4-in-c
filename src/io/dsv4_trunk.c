@@ -144,6 +144,23 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
             dsv4_trunk_close(tr); return -1;
         }
 
+    /* One byte per 128-byte FP8 block, reserved up front so every layer's mask
+     * survives ring eviction and the budget is honest. It is 43.6 MiB for all
+     * 43 Flash layers: 0.78% of the FP8 weights. */
+    for (int L = 0; L < tr->n_layers && L < c->n_layers; L++) {
+        if (tr->lay[L].nt == 0) continue;
+        const size_t mb = dsv4_bind_layer_mask_bytes(c, L);
+        if (!mb) continue;
+        tr->lay[L].special = (unsigned char *)malloc(mb);
+        if (!tr->lay[L].special) {
+            fprintf(stderr, "dsv4_trunk: OOM allocating %zu mask bytes for "
+                            "layer %d\n", mb, L);
+            dsv4_trunk_close(tr); return -1;
+        }
+        tr->lay[L].special_bytes = mb;
+        tr->special_total += mb;
+    }
+
     char p[1024];
     snprintf(p, sizeof p, "%s/trunk.bin", dir);
     tr->fd = open(p, O_RDONLY | O_DIRECT);
@@ -178,7 +195,8 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
      * A pinned layer gets an EXACT allocation: sizing every pin like the widest
      * layer would waste the difference between a 165 MB indexed layer and a
      * 131 MB dense one on every single pin. */
-    int64_t left = budget_bytes - tr->slot_bytes - (int64_t)tr->widen_cap;
+    int64_t left = budget_bytes - tr->slot_bytes - (int64_t)tr->widen_cap
+                 - (int64_t)tr->special_total;
     int npin = 0;
     while (npin < tr->n_layers && tr->lay[npin].nbytes > 0
            && left >= tr->lay[npin].nbytes) {
@@ -217,7 +235,8 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
 
 int64_t dsv4_trunk_resident_bytes(const DSV4Trunk *tr)
 {
-    int64_t n = (int64_t)tr->nslot * tr->slot_bytes + (int64_t)tr->widen_cap;
+    int64_t n = (int64_t)tr->nslot * tr->slot_bytes + (int64_t)tr->widen_cap
+              + (int64_t)tr->special_total;
     for (int i = 0; i < tr->npin; i++) n += tr->lay[i].nbytes;
     return n;
 }
@@ -233,6 +252,7 @@ void dsv4_trunk_close(DSV4Trunk *tr)
         free(tr->lay[L].t);
         free(tr->lay[L].bind_of);
         free(tr->lay[L].bind_widen);
+        free(tr->lay[L].special);
     }
     free(tr->lay); free(tr->json_arena); free(tr->json_text);
     memset(tr, 0, sizeof *tr);
@@ -353,21 +373,31 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
          * validation every bind does; the second writes the bytes we keep. */
         size_t used = 0;
         if (dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap,
-                                &used) != 0)
+                                &used, NULL, 0, 0, NULL) != 0)
             return -1;
         unsigned char *w = (unsigned char *)malloc(used ? used : 1);
         if (!w) return -1;
-        if (dsv4_bind_layer_mem(c, L, b, run, &src, w, used, &used) != 0) {
+        size_t mused = 0;
+        if (dsv4_bind_layer_mem(c, L, b, run, &src, w, used, &used,
+                                lay->special, lay->special_bytes,
+                                !lay->special_ready, &mused) != 0) {
             free(w);
             return -1;
         }
         lay->bind_widen = w;
         lay->bind_cached = *b;
         lay->bind_ready = 1;
+        lay->special_ready = 1;
         return 0;
     }
 
-    return dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap, NULL);
+    size_t mused = 0;
+    const int rc = dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen,
+                                       tr->widen_cap, NULL,
+                                       lay->special, lay->special_bytes,
+                                       !lay->special_ready, &mused);
+    if (rc == 0) lay->special_ready = 1;
+    return rc;
 }
 
 void dsv4_trunk_report(const DSV4Trunk *tr, const char *label)
@@ -385,4 +415,7 @@ void dsv4_trunk_report(const DSV4Trunk *tr, const char *label)
            tr->load_seconds > 0
                ? (double)tr->bytes_read / tr->load_seconds / 1e9 : 0.0,
            tr->direct ? " (O_DIRECT)" : " (buffered)");
+    if (tr->special_total)
+        printf("  FP8 special masks: %zu bytes = %.2f MiB\n",
+               tr->special_total, (double)tr->special_total / 1048576.0);
 }

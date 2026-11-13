@@ -127,6 +127,19 @@ static inline float dsv4_e4m3_to_f32(uint8_t b)
     return v.f;
 }
 
+/* Does this E4M3 byte need the exact gather decoder?
+ *
+ * The closed-form fast path in the FP8 matmul assumes a normal, finite value:
+ *     bits = 0x3C000000 + ((b & 0x7F) << 20) | sign
+ * That is wrong for exponent zero (subnormal or zero) and for the two NaN
+ * encodings, so those codes take the table/gather path. The AVX2 scan and the
+ * bind-time mask builder must agree on this predicate exactly; the mask is
+ * only a cached answer to this question for a whole 128-byte block. */
+static inline int dsv4_e4m3_needs_gather(uint8_t b)
+{
+    return ((b & 0x78u) == 0) || ((b & 0x7Fu) == 0x7Fu);
+}
+
 /* --------------------------------------------------- E2M1 (float4_e2m1fn) ---
  * Only sixteen encodings exist, so a table is both exact and faster than any
  * bit manipulation. Index is the 4-bit code; the sign bit is bit 3.

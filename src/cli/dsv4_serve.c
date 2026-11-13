@@ -741,7 +741,7 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
     const double th = now_s();
     hc_head(e->xh, e->h, &e->mb.w.hc_head, hc, d, e->c.rms_eps, e->c.hc_eps);
     dsv4_rmsnorm(e->xh, e->xh, e->mb.w.norm, d, e->c.rms_eps);
-    DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0 };
+    DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0, NULL };
     dsv4_mmq(e->logits, e->xh, &head);
     dsv4_prof.head += now_s() - th;
     sample_top(e, top);

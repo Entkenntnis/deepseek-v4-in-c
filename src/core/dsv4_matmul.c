@@ -530,9 +530,9 @@ void dsv4_matmul_fp8_f32_hybrid(float *y, const float *x, const uint8_t *W,
  * same order with the same scale, so this is bitwise identical to the hybrid
  * kernel, not merely within its L2 bound. Scheduling row blocks instead of
  * rows cannot change a result because rows do not interact. */
-void dsv4_matmul_fp8_f32_rows(float *y, const float *x, const uint8_t *W,
-                              const uint8_t *S, int in, int out,
-                              int blk_r, int blk_c)
+static void fp8_rows_impl(float *y, const float *x, const uint8_t *W,
+                          const uint8_t *S, int in, int out,
+                          int blk_r, int blk_c, const uint8_t *special)
 {
     const int sc = (in + blk_c - 1) / blk_c;
     if (!(blk_c == 128 && (in & 127) == 0 && blk_r == 128)) {
@@ -560,12 +560,17 @@ void dsv4_matmul_fp8_f32_rows(float *y, const float *x, const uint8_t *W,
         if (o1 > out) o1 = out;
         for (int o = o0; o < o1; o++) {
             const uint8_t *rw = W + (size_t)o * in;
+            /* One mask byte per 128-byte block, row-major: exactly the `bi`
+             * indexing the old scan used. NULL keeps the scan for callers that
+             * did not bind through DSV4QMat (tests, the reference bench). */
+            const uint8_t *mrow = special ? special + (size_t)o * sc : NULL;
             double total = 0.0;
             int bi = 0;
             for (int c0 = 0; c0 < in; c0 += 128) {
                 const uint8_t *wb = rw + c0;
                 const float *xb = x + c0;
-                const double acc = fp8_block_has_special(wb)
+                const int sp = mrow ? mrow[bi] : fp8_block_has_special(wb);
+                const double acc = sp
                                  ? fp8_block_dot_f32_128_gather(wb, xb)
                                  : fp8_block_dot_f32_128_normal(wb, xb);
                 total += acc * sdec[bi++];
@@ -573,6 +578,13 @@ void dsv4_matmul_fp8_f32_rows(float *y, const float *x, const uint8_t *W,
             y[o] = (float)total;
         }
     }
+}
+
+void dsv4_matmul_fp8_f32_rows(float *y, const float *x, const uint8_t *W,
+                              const uint8_t *S, int in, int out,
+                              int blk_r, int blk_c)
+{
+    fp8_rows_impl(y, x, W, S, in, out, blk_r, blk_c, NULL);
 }
 
 /* The reference gather kernel. Kept callable so the gate and matmul_variants
@@ -840,8 +852,8 @@ void dsv4_mmq(float *y, const float *x, const DSV4QMat *m)
         dsv4_matmul_bf16(y, x, (const uint16_t *)m->w, m->cols, m->rows);
         break;
     case DSV4_WFP8:
-        dsv4_matmul_fp8(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
-                        m->cols, m->rows, m->blk_r, m->blk_c);
+        fp8_rows_impl(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
+                      m->cols, m->rows, m->blk_r, m->blk_c, m->special);
         break;
     case DSV4_WFP4:
         dsv4_matmul_fp4(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
