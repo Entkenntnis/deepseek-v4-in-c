@@ -336,6 +336,16 @@ static void attention(float *out, const float *x, const DSV4LayerW *w,
             slice.s = (const unsigned char *)w->attn.wo_a.s
                     + (size_t)g * (size_t)(gr / (slice.blk_r ? slice.blk_r : 1)) * sc_row;
         }
+        if (slice.special && (gw & 127) == 0) {
+            /* The FP8 block-special mask is row-major with one byte per
+             * 128-byte block, so a row slice advances by gw/128 bytes per
+             * row. Copying `special` unchanged would make groups 1..7 ask
+             * group 0's mask -- the weights are sliced but the mask was not,
+             * and the wrong answer is "no special" for a block that needs the
+             * exact gather decode. */
+            slice.special = w->attn.wo_a.special
+                          + (size_t)g * (size_t)gr * (size_t)(gw / 128);
+        }
         dsv4_mmq(s->ogrp + (size_t)g * gr, s->o + (size_t)g * gw, &slice);
     }
     dsv4_mmq(out, s->ogrp, &w->attn.wo_b);

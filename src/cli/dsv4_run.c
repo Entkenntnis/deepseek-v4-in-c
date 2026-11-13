@@ -93,11 +93,11 @@ static int synth_expert_init(const DSV4Cfg *c)
     }
 
     g_synth_expert.w1 = (DSV4QMat){ g_synth_bufs[0], g_synth_bufs[3],
-                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32 };
+                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32, NULL };
     g_synth_expert.w3 = (DSV4QMat){ g_synth_bufs[2], g_synth_bufs[5],
-                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32 };
+                                    DSV4_WFP4, c->moe_inter, c->hidden, 1, 32, NULL };
     g_synth_expert.w2 = (DSV4QMat){ g_synth_bufs[1], g_synth_bufs[4],
-                                    DSV4_WFP4, c->hidden, c->moe_inter, 1, 32 };
+                                    DSV4_WFP4, c->hidden, c->moe_inter, 1, 32, NULL };
     return 0;
 }
 
@@ -563,7 +563,7 @@ int main(int argc, char **argv)
             const double th = now_s();
             hc_head(xh, h, &mb.w.hc_head, hc, d, c.rms_eps, c.hc_eps);
             dsv4_rmsnorm(xh, xh, mb.w.norm, d, c.rms_eps);
-            DSV4QMat head = { mb.w.head, NULL, DSV4_WBF16, c.vocab, d, 0, 0 };
+            DSV4QMat head = { mb.w.head, NULL, DSV4_WBF16, c.vocab, d, 0, 0, NULL };
             dsv4_mmq(logits, xh, &head);
             dsv4_prof.head += now_s() - th;
 

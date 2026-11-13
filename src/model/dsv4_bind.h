@@ -62,6 +62,12 @@ void dsv4_bind_free(DSV4LayerBind *b);
 /* Bytes one layer needs, without reading any. For sizing and reporting. */
 int64_t dsv4_bind_layer_bytes(const DSV4St *s, const DSV4Cfg *c, int layer);
 
+/* Bytes of FP8 block-special mask a layer needs: one byte per 128-byte block
+ * of every FP8 matrix, or 0 when the layer carries no FP8 weights. This is
+ * what the trunk allocates per layer and what `dsv4_bind_layer_mem` fills in.
+ * A shard bind keeps the same bytes at the tail of its blob. */
+size_t dsv4_bind_layer_mask_bytes(const DSV4Cfg *c, int layer);
+
 typedef struct {
     void      *blob;
     size_t     nbytes;
@@ -119,10 +125,16 @@ int dsv4_bind_layer_plan(const DSV4Cfg *c, int L,
                          int (*emit)(void *ctx, int i, const char *name),
                          void *ctx);
 
+/* `masks` is the caller-owned FP8 block-special area, `mask_cap` its size and
+ * `build_masks` says whether to fill it from `run` (first read of a layer) or
+ * just point the matrices at the values already there (every later bind of the
+ * same layer). Pass masks = NULL, build_masks = 0 on a sizing pass. */
 int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
                         const unsigned char *run, const DSV4MemSrc *src,
                         unsigned char *widen, size_t widen_cap,
-                        size_t *widen_used);
+                        size_t *widen_used,
+                        unsigned char *masks, size_t mask_cap,
+                        int build_masks, size_t *mask_used);
 
 /* Upper bound on the widen area one layer needs, so a trunk slot can be sized
  * once for every layer kind. Uses the WIDEST layer (ratio 4, which carries both
