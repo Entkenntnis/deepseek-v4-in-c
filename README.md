@@ -136,6 +136,7 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--pin p\|e\|all\|off` | compute affinity (default `p` = P-cores 0–3) |
 | `--readers N` | expert-reader threads, independent of compute (default 6) |
 | `--reader-pin p\|e\|all\|off` | affinity for the reader threads |
+| `--stream-miss N` | keep N miss reads in flight and run each expert's matmul as it lands (default 6); `0` restores the old end-of-batch barrier |
 | `--gpu` | put the dense trunk's FP8 matrices in VRAM (opt-in) |
 | `--route-log FILE` | record every expert request, for `tools/sim_cache.py` |
 

@@ -141,6 +141,24 @@ typedef struct {
     uint64_t hits, misses, evictions;
     uint64_t bytes_read;
 
+    /* STREAM THE MISSES.
+     *
+     * The CLI sets this to 6 by default. 0 keeps the historical begin()/end()
+     * contract: end() is a barrier, and
+     * only after it returns may the caller run a miss expert's matmul.
+     *
+     * >0 publishes each miss as its read lands and queues at most this many
+     * reads at once. The caller can then consume experts in completion order
+     * through dsv4_cache_wait_any(), while the remaining reads are still in
+     * flight. The cap exists because issuing all top-k reads at once makes
+     * them finish together, which leaves nothing to overlap; a cap of 2-3
+     * keeps the drive at its queue-depth plateau and staggers the completions.
+     *
+     * This changes WHEN a finished expert becomes usable, never WHICH slot was
+     * chosen or what it contains. Cache-state decisions are still made in
+     * begin(), in request order. */
+    int             stream_cap;
+
     /* HASH-LAYER PREFETCH -- optional, off unless enabled.
      *
      * Uses the SAME slots and reader pool as everything else: batches of jobs
@@ -302,8 +320,15 @@ struct DSV4CacheBatch {
     int layer, n, ntodo;
     /* True for the persistent hash-prefetch batch: jobs may span layers and
      * the reader publishes each slot as it lands. Normal batches are one layer
-     * and are published by end(). */
+     * and are published by end(), unless streaming is on. */
     int is_prefetch;
+    /* Publish each normal miss as it lands, and let the caller consume them
+     * before end(). 0 = historical barrier. */
+    int streaming;
+    int next_j;                         /* next job index to queue        */
+    int published[DSV4_MAX_PREFETCH];   /* reader has published this miss */
+    int taken[DSV4_MAX_PREFETCH];       /* wait_any() has handed it out   */
+    const DSV4ExpertW **out;            /* caller's result array          */
     int rdone;                          /* jobs completed */
     int slot_of[DSV4_MAX_PREFETCH];     /* slot each pending read fills   */
     int k_of[DSV4_MAX_PREFETCH];        /* which request that read serves */
@@ -323,6 +348,25 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               DSV4CacheBatch *b);
 int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
                             DSV4CacheBatch *b);
+
+/* ---- streaming misses ----------------------------------------------------
+ *
+ * Set the maximum number of expert reads a single begin()/end() batch keeps
+ * in flight. 0 restores the barrier. Values are clamped to DSV4_MAX_TOPK.
+ * Must be called before the first begin(); the reader threads read it only
+ * through the batch each time, so changing it between tokens is safe. */
+void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);
+
+/* Block until one miss of this streaming batch has landed, and hand back its
+ * request index k. *k indexes the caller's `out` array, which already holds
+ * the loaded expert (or NULL on a read failure). Returns 1 when an expert was
+ * returned and 0 when every miss has been consumed. Safe to call after the
+ * batch has been fully consumed: it returns 0 immediately.
+ *
+ * The caller may run the expert's matmul between calls. Each k still needs its
+ * own accumulator; the caller must keep the final weighted sum in k order.
+ */
+int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
 
 void dsv4_cache_reset_stats(DSV4Cache *c);
 void dsv4_cache_report(const DSV4Cache *c, const char *label);

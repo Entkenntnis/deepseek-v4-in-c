@@ -489,6 +489,14 @@ static int run_end_experts(void *ctx, const DSV4ExpertW **out)
     return dsv4_cache_get_many_end((DSV4Cache *)ctx, out, &g_batch);
 }
 
+static int run_wait_any(void *ctx, int *k)
+{
+    return dsv4_cache_wait_any((DSV4Cache *)ctx, &g_batch, k);
+}
+
+/* 0 = old end() barrier; >0 = miss reads in flight per layer. */
+static int g_stream_miss = 6;
+
 static int engine_init(Engine *e, const char *model, const char *trunkdir,
                        const char *tokfile, double budget_gb, int budget_auto,
                        int ctx, int gen_default, int think_default,
@@ -578,6 +586,11 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
     if (dsv4_trunk_open(&e->tr, trunkdir, &e->c, budget - efloor) != 0) return -1;
     const int64_t left = budget - dsv4_trunk_resident_bytes(&e->tr);
     if (dsv4_cache_init(&e->cache, &e->st, &e->c, left) != 0) return -1;
+    if (g_stream_miss > 0) {
+        dsv4_cache_set_stream_cap(&e->cache, g_stream_miss);
+        fprintf(stderr, "stream-miss: up to %d miss reads in flight; experts "
+                        "are consumed as they land\n", e->cache.stream_cap);
+    }
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));
@@ -714,7 +727,8 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
         memcpy(e->h + (size_t)j * d, e->xh, (size_t)d * sizeof(float));
 
     DSV4ExpertSrc src = { run_get_expert, run_get_experts,
-                          run_begin_experts, run_end_experts, &e->cache };
+                          run_begin_experts, run_end_experts,
+                          run_wait_any, &e->cache };
 
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerBind lb;
@@ -928,7 +942,7 @@ static void usage(const char *me)
             "usage: %s <model_dir> --trunk <dir> --tok <file> "
             "[--budget GB|auto] [--ctx N] [--gen N] [--think] [--no-layers]\n"
             "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
-            "       [--reader-pin off|all|p|e]\n"
+            "       [--reader-pin off|all|p|e] [--stream-miss N (default 6)]\n"
             "\n"
             "Speaks JSON lines on stdin/stdout. Start it from the TUI:\n"
             "  python3 tui/dsv4_tui.py\n", me);
@@ -959,6 +973,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
         else if (!strcmp(argv[i], "--readers") && i + 1 < argc) readers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc) reader_pin = argv[++i];
+        else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
+            g_stream_miss = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--think")) think = 1;
         else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }

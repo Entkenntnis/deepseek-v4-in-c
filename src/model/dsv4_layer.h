@@ -79,6 +79,13 @@ typedef struct {
                  const DSV4ExpertW **out);
     int (*end)(void *ctx, const DSV4ExpertW **out);
 
+    /* Optional streaming join, used only when the cache was configured with a
+     * nonzero stream cap. Returns 1 and sets *k for the next miss whose read
+     * has completed, or 0 when every miss has been handed out. The caller can
+     * run that expert's matmul while the remaining reads are still in flight.
+     * NULL means "wait for the whole batch in end()", the old behaviour. */
+    int (*wait_any)(void *ctx, int *k);
+
     void *ctx;
 } DSV4ExpertSrc;
 

@@ -472,6 +472,32 @@ static void moe(float *out, const float *x, const DSV4LayerW *w,
                        c->moe_inter * c->n_shared, c->swiglu_limit);
         dsv4_prof.shared += pnow() - t0;
 
+        /* STREAMING JOIN: a miss whose read has landed can be
+         * computed NOW, while the other misses are still on the wire. This is
+         * the same idea as the resident matmuls above, extended to the reads
+         * that are actually blocking. On a 6-miss layer it removes all but the
+         * last read-to-matmul tail; with a small in-flight cap it also keeps
+         * the drive at its queue-depth plateau instead of issuing one burst.
+         *
+         * The k accumulator is still per-expert, and the weighted sum below
+         * still runs in k order, so completion order cannot change a bit. */
+        if (src->wait_any) {
+            for (;;) {
+                int k = -1;
+                t0 = pnow();
+                const int got = src->wait_any(src->ctx, &k);
+                dsv4_prof.expert_io += pnow() - t0;  /* time blocked */
+                if (!got) break;
+                if (k < 0 || k >= c->topk || !ex[k]) continue;
+                t0 = pnow();
+                expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
+                               x, ex[k], s, c->hidden, c->moe_inter,
+                               c->swiglu_limit);
+                dsv4_prof.expert_mm += pnow() - t0;
+                done[k] = 1;
+            }
+        }
+
         /* Whatever the drive still owes. Counted as I/O because that is what it
          * is: time this thread spent blocked with nothing left to overlap. As
          * the overlap works this shrinks, which makes expert_io the number to

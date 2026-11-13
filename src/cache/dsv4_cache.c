@@ -714,6 +714,47 @@ static void *reader_main(void *arg)
                 c->pf_hits++;
                 c->pf_bytes += got;
             }
+        } else if (b->streaming) {
+            /* Publish this miss immediately, so the caller can run
+             * its matmul while the rest of the batch is still on the wire.
+             * All eviction and slot decisions were made in begin(); this only
+             * moves the publication earlier. */
+            DSV4Slot *s = &c->slot[b->slot_of[j]];
+            s->pending = 0;
+            if (bad) {
+                s->layer = s->expert = -1;     /* no half-read slot goes live */
+                b->rc = -1;
+                b->out[b->k_of[j]] = NULL;
+            } else {
+                s->layer  = b->layer_of[j];
+                s->expert = b->expert_of[j];
+                c->misses++;
+                c->bytes_read += got;
+                b->out[b->k_of[j]] = &s->w;
+            }
+            b->published[j] = 1;
+
+            /* Keep the read pipeline full: queue the next job as this one
+             * retires. With cap >= ntodo this queues everything at once, which
+             * is the old read pattern plus early publication. */
+            if (b->next_j < b->ntodo) {
+                const int nj = b->next_j++;
+                if (rq_push(c, b, nj) != 0) {
+                    /* Cannot happen with the FIFO sized at construction, but
+                     * never leave end() waiting on jobs nobody will run. */
+                    b->rc = -1;
+                    for (int t = nj; t < b->ntodo; t++) {
+                        DSV4Slot *st = &c->slot[b->slot_of[t]];
+                        st->pending = 0;
+                        st->layer = st->expert = -1;
+                        b->failed[t] = 1;
+                        b->published[t] = 1;
+                        b->out[b->k_of[t]] = NULL;
+                        b->rdone++;
+                    }
+                    b->next_j = b->ntodo;
+                }
+            }
         }
         b->rdone++;
         pthread_cond_broadcast(&c->rdone);
@@ -828,6 +869,13 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     b->rc = 0;
     b->rdone = 0;
     b->is_prefetch = 0;
+    b->streaming = (c->stream_cap > 0 && c->nrth > 0) ? 1 : 0;
+    b->next_j = 0;
+    b->out = out;
+    for (int i = 0; i < DSV4_MAX_PREFETCH; i++) {
+        b->published[i] = 0;
+        b->taken[i] = 0;
+    }
 
     pthread_mutex_lock(&c->rmx);
     for (int k = 0; k < n; k++) {
@@ -892,12 +940,16 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     }
 
     if (b->ntodo > 0 && c->nrth > 0) {
-        for (int j = 0; j < b->ntodo; j++) {
+        int first = b->ntodo;
+        if (b->streaming && c->stream_cap < first) first = c->stream_cap;
+        b->next_j = first;
+        for (int j = 0; j < first; j++) {
             if (rq_push(c, b, j) != 0) {
                 DSV4Slot *sl = &c->slot[b->slot_of[j]];
                 sl->layer = sl->expert = -1;
                 sl->pending = 0;
                 b->ntodo = j;
+                b->next_j = j;
                 b->rc = -1;
                 break;
             }
@@ -929,20 +981,32 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
     while (b->rdone < b->ntodo)
         pthread_cond_wait(&c->rdone, &c->rmx);
 
-    /* ---- serial pass: publish -------------------------------------- */
-    for (int j = 0; j < b->ntodo; j++) {
-        DSV4Slot *sl = &c->slot[b->slot_of[j]];
-        c->bytes_read += b->got[j];
-        sl->pending = 0;
-        if (b->failed[j]) {
-            sl->layer = sl->expert = -1;     /* no half-read slot goes live */
-            b->rc = -1;
-            continue;
+    if (b->streaming) {
+        /* The reader already published and accounted every miss. Anything the
+         * caller did not consume through wait_any() is handed out here, so
+         * begin()/end() users (get_many) keep the old contract. */
+        for (int j = 0; j < b->ntodo; j++) {
+            if (b->taken[j]) continue;
+            b->taken[j] = 1;
+            out[b->k_of[j]] = b->failed[j] ? NULL
+                                           : &c->slot[b->slot_of[j]].w;
         }
-        sl->layer  = b->layer_of[j];
-        sl->expert = b->expert_of[j];
-        c->misses++;
-        out[b->k_of[j]] = &sl->w;
+    } else {
+        /* ---- serial pass: publish ---------------------------------- */
+        for (int j = 0; j < b->ntodo; j++) {
+            DSV4Slot *sl = &c->slot[b->slot_of[j]];
+            c->bytes_read += b->got[j];
+            sl->pending = 0;
+            if (b->failed[j]) {
+                sl->layer = sl->expert = -1; /* no half-read slot goes live */
+                b->rc = -1;
+                continue;
+            }
+            sl->layer  = b->layer_of[j];
+            sl->expert = b->expert_of[j];
+            c->misses++;
+            out[b->k_of[j]] = &sl->w;
+        }
     }
     for (int d = 0; d < b->ndup; d++) {
         const int j = b->dup_j[d];
@@ -950,6 +1014,36 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
     }
     pthread_mutex_unlock(&c->rmx);
     return b->rc;
+}
+
+void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap)
+{
+    if (!c) return;
+    if (cap < 0) cap = 0;
+    if (cap > DSV4_MAX_TOPK) cap = DSV4_MAX_TOPK;
+    c->stream_cap = cap;
+}
+
+int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
+{
+    if (!c || !b || !k) return 0;
+    if (!b->streaming) return 0;
+
+    pthread_mutex_lock(&c->rmx);
+    for (;;) {
+        for (int j = 0; j < b->ntodo; j++) {
+            if (!b->published[j] || b->taken[j]) continue;
+            b->taken[j] = 1;
+            *k = b->k_of[j];
+            pthread_mutex_unlock(&c->rmx);
+            return 1;
+        }
+        if (b->rdone >= b->ntodo) {
+            pthread_mutex_unlock(&c->rmx);
+            return 0;                      /* everything consumed */
+        }
+        pthread_cond_wait(&c->rdone, &c->rmx);
+    }
 }
 
 int dsv4_cache_get_many(DSV4Cache *c, int layer, const int *experts, int n,
@@ -981,6 +1075,9 @@ void dsv4_cache_report(const DSV4Cache *c, const char *label)
            (unsigned long long)c->misses, (unsigned long long)c->evictions);
     printf("  %.2f GB read from disk\n",
            (double)(c->bytes_read + c->pf_bytes) / 1073741824.0);
+    if (c->stream_cap > 0)
+        printf("  miss streaming: up to %d reads in flight, consumed as they "
+               "land\n", c->stream_cap);
     if (c->pf_enabled && c->pf_requests > 0)
         printf("  prefetch: %llu requests, %llu hits, %llu loads, "
                "%llu failed, %.2f GB, %.1f ms waiting\n",

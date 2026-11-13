@@ -354,6 +354,71 @@ int main(void)
         dsv4_cache_free(&b);
     }
 
+    printf("\n-- GATE 10  streaming misses are usable before end() --\n");
+    {
+        /* With a nonzero stream cap, the reader publishes each miss as it
+         * lands and moe() consumes it through wait_any() while the rest of the
+         * batch is still on the wire. The contract is stronger than begin()'s
+         * old one: every pointer wait_any() hands back is complete, and the
+         * bytes must match the serial path exactly.
+         *
+         * A cold cache means all six are misses, so this exercises the actual
+         * streaming branch rather than the resident fast path. */
+        const int ids[6] = { 0, 1, 2, 3, 4, 5 };
+        DSV4Cache a, b;
+        dsv4_cache_init(&a, &st, &c, 1LL << 30);
+        dsv4_cache_init(&b, &st, &c, 1LL << 30);
+        dsv4_cache_set_stream_cap(&b, 2);
+        CHECK(b.stream_cap == 2, "stream cap is %d, expected 2", b.stream_cap);
+
+        const DSV4ExpertW *ex[6];
+        DSV4CacheBatch bat;
+        const int rc = dsv4_cache_get_many_begin(&b, 2, ids, 6, ex, &bat);
+        CHECK(rc == 0, "streaming begin reported failure (%d)", rc);
+
+        int seen = 0;
+        for (;;) {
+            int k = -1;
+            if (!dsv4_cache_wait_any(&b, &bat, &k)) break;
+            CHECK(k >= 0 && k < 6, "wait_any returned k=%d", k);
+            if (k >= 0 && k < 6) {
+                CHECK(ex[k] != NULL, "streamed expert k=%d is NULL", k);
+                seen++;
+            }
+        }
+        CHECK(seen == 6, "wait_any produced %d of 6 misses", seen);
+        CHECK(b.misses == 6 && b.hits == 0,
+              "streaming counters are %llu hits / %llu misses, expected 0/6",
+              (unsigned long long)b.hits, (unsigned long long)b.misses);
+
+        const int rc2 = dsv4_cache_get_many_end(&b, ex, &bat);
+        CHECK(rc2 == 0, "streaming end reported failure (%d)", rc2);
+
+        int bad10 = 0;
+        for (int k = 0; k < 6; k++) {
+            const DSV4ExpertW *one = dsv4_cache_get(&a, 2, ids[k]);
+            if (!one || !ex[k]) { CHECK(0, "expert %d missing", ids[k]); continue; }
+            const DSV4QMat *x[3] = { &one->w1, &one->w2, &one->w3 };
+            const DSV4QMat *y[3] = { &ex[k]->w1, &ex[k]->w2, &ex[k]->w3 };
+            for (int q = 0; q < 3; q++) {
+                const int64_t nb = (int64_t)x[q]->rows * x[q]->cols / 2;
+                const int64_t ns = (int64_t)x[q]->rows
+                                 * ((x[q]->cols + 31) / 32);
+                if (memcmp(x[q]->w, y[q]->w, (size_t)nb) != 0 ||
+                    memcmp(x[q]->s, y[q]->s, (size_t)ns) != 0) {
+                    CHECK(0, "streamed expert %d matrix %d differs from serial",
+                          ids[k], q);
+                    bad10++;
+                }
+            }
+        }
+        if (!bad10 && seen == 6)
+            printf("  ok    6 misses consumed before end(), weights and scales "
+                   "byte-identical to the serial path\n");
+        dsv4_cache_free(&a);
+        dsv4_cache_free(&b);
+    }
+
     dsv4_st_close(&st);
     printf("\n");
     if (fails) { printf("CACHE GATE FAILED: %d check(s)\n", fails); return 1; }

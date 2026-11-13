@@ -144,6 +144,13 @@ static int dsv4_run_end_experts(void *ctx, const DSV4ExpertW **out)
     return dsv4_cache_get_many_end((DSV4Cache *)ctx, out, &g_batch);
 }
 
+/* Consume a miss as soon as its read lands. Only does anything when
+ * --stream-miss set a nonzero cap; otherwise the batch keeps the old barrier. */
+static int dsv4_run_wait_any(void *ctx, int *k)
+{
+    return dsv4_cache_wait_any((DSV4Cache *)ctx, &g_batch, k);
+}
+
 static double now_s(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -231,7 +238,7 @@ static void usage(const char *me)
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
            "       [--reader-pin off|all|p|e] [--synthetic-kv START_POS]\n"
-           "       [--synthetic-experts]\n", me);
+           "       [--synthetic-experts] [--stream-miss N (default 6)]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -248,6 +255,7 @@ int main(int argc, char **argv)
     int threads = 4, readers = 6;
     int synthetic_kv = 0;       /* >0: prefill the KV state, start at this pos */
     int synthetic_experts = 0;  /* benchmark: one fixed FP4 expert in RAM */
+    int stream_miss = 6;        /* miss reads in flight per layer; 0 = barrier */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -273,6 +281,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--synthetic-kv") && i + 1 < argc)
             synthetic_kv = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--synthetic-experts")) synthetic_experts = 1;
+        else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
+            stream_miss = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -392,6 +402,11 @@ int main(int argc, char **argv)
     int64_t left = budget - dsv4_trunk_resident_bytes(&tr);
     DSV4Cache cache;
     if (dsv4_cache_init(&cache, &st, &c, left) != 0) return 1;
+    if (stream_miss > 0) {
+        dsv4_cache_set_stream_cap(&cache, stream_miss);
+        fprintf(stderr, "stream-miss: up to %d miss reads in flight; experts "
+                        "are consumed as they land\n", cache.stream_cap);
+    }
     if (routelog) {
         cache.route_log = fopen(routelog, "w");
         if (!cache.route_log) { perror(routelog); return 1; }
@@ -439,13 +454,13 @@ int main(int argc, char **argv)
             return 1;
         }
         src = (DSV4ExpertSrc){ synth_get, synth_get_many,
-                               synth_begin, synth_end, NULL };
+                               synth_begin, synth_end, NULL, NULL };
         fprintf(stderr, "synthetic experts: one fixed FP4 expert in RAM; "
                         "routed-expert disk traffic is disabled\n");
     } else {
         src = (DSV4ExpertSrc){ dsv4_run_get_expert, dsv4_run_get_experts,
                                dsv4_run_begin_experts, dsv4_run_end_experts,
-                               &cache };
+                               dsv4_run_wait_any, &cache };
     }
 
     /* ---- chat encoding, per the checkpoint's own encoding/README.md ----

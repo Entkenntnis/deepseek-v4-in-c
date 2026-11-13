@@ -129,6 +129,68 @@ The "attention" row is mostly the FP8 GEMVs (`wq_a`, `wq_b`, `wo_a`, `wo_b`,
 
 ## Change history
 
+### 2026-11-14 — stream miss experts: consume a read as it lands (now default)
+
+**Question.** `begin()` already overlaps the *resident* experts' matmuls with
+the misses' reads, but `end()` was still a hard barrier: even the first miss to
+land could not be computed until the slowest read in the batch had finished.
+Reads for one layer are independent, and each miss's matmul needs only its own
+data, so that join is not arithmetic — it is just where the API stopped
+overlapping.
+
+**What was built.** A miss is now published by the reader thread the moment its
+`pread` completes, and `moe()` consumes it through `dsv4_cache_wait_any()`
+while the rest of the batch is still in flight. The last piece of the old
+behaviour is still there for `--stream-miss 0`, and for callers that never call
+`wait_any()`: `end()` waits and publishes whatever was not consumed, so
+`get_many()` keeps its contract.
+
+The optional in-flight cap (`--stream-miss N`) queues at most N reads at once
+and refills the pipeline as each one retires. On this drive it turned out not
+to matter: N=3 and N=6 measured the same, because completion order already
+varies enough for the early publishes to overlap. The cap is kept because it is
+the knob that keeps a different drive at its queue-depth plateau.
+
+Correctness is unchanged by construction: slot choice, eviction order and LRU
+stamps are still decided in `begin()`, in request order, before any read. Each
+expert still lands in its own `k` accumulator and the weighted sum still runs
+in `k` order. A new cache gate (10) asks for six cold misses with a cap of 2,
+consumes all six through `wait_any()` before `end()`, and compares weights and
+scales byte-for-byte against the serial path.
+
+**Interleaved A/B, production path** (`--gen 20 --budget 16`, real experts,
+one fixed prompt, three rounds, order rotated, ids identical in every arm):
+
+| arm | runs (s/token) | median | vs barrier |
+|---|---|---|---:|
+| barrier | 0.6300 / 0.6100 / 0.6050 | 0.610 | — |
+| stream, cap 3 | 0.5600 / 0.5600 / 0.5650 | **0.560** | **−8.2 %** |
+| stream, cap 6 | 0.5550 / 0.5600 / 0.5600 | **0.560** | **−8.2 %** |
+
+The profile says this is the intended mechanism and nothing else: exposed
+expert I/O **263.2 → 201.7 ms/pass** (−23 %), expert matmul 238.0 → 223.2,
+attention 155.9 → 156.7, shared expert and bind flat. Cache counters are
+identical (same requests, hits, misses, evictions and bytes read); only *when*
+a loaded slot becomes usable changed.
+
+**Cold-cache control** (`--gen 30 --budget 16 --synthetic-kv 512`, same
+interleaving). With no prompt pass to warm the cache, misses dominate:
+barrier **1.2272**, cap 3 **0.9696** (−21.0 %), cap 6 **0.9491** (−22.7 %).
+This is the configuration where the old barrier had the least resident matmul
+to hide behind.
+
+**Small-budget path** (`--gen 20 --budget 4`). At 4 GB the expert cache hit rate
+is 0 %, so every expert is a miss and the old design had no resident work at
+all to put in the read window: barrier **2.115** vs cap 6 **1.720 s/token**
+(−18.7 %). The trunk still streams synchronously; this gain is entirely the
+expert-read tail.
+
+**Status: default, with an exact off switch.** Both binaries now default to
+`--stream-miss 6`; `0` restores the historical end-of-batch barrier for an A/B
+or for debugging. The ceiling is the miss matmul that used to run after
+`end()`; the remaining exposed I/O is the genuine read tail and will not be
+removed by more overlap alone.
+
 ### 2026-11-13 — FP8 special-block mask: one byte per 128-byte block
 
 **Question.** The FP8 row kernel scanned every 128-byte block with four
