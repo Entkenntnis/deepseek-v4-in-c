@@ -68,6 +68,16 @@ Useful options:
 | `--synthetic-kv N` | benchmark-only: fill the KV state for an N-token context, start at position N, skip prefill |
 | `--synthetic-experts` | benchmark-only: use one fixed FP4 expert in RAM, no routed-expert disk traffic |
 
+To compare **builds** instead of measuring one, use `bench/ab.py`. It runs two
+or more binaries interleaved, rotates the order every round, pairs each arm
+against the reference within the same round, and checks the generated ids:
+
+```sh
+python3 bench/ab.py --bin base=bin/dsv4 --bin lto=bin/variants/dsv4.lto \
+  --reps 5 --gen 50 --budget 8 --synthetic-kv 1024 --synthetic-experts \
+  --extra "--cpu-pin p --threads 4 --readers 6" --json /tmp/ab.json
+```
+
 ## Machine
 
 | | |
@@ -118,6 +128,63 @@ The "attention" row is mostly the FP8 GEMVs (`wq_a`, `wq_b`, `wo_a`, `wo_b`,
 `dsv4_matmul_fp8_avx2` and <2% to everything that is not a matmul.
 
 ## Change history
+
+### 2026-11-13 — compiler matrix: `-O3` is the ceiling
+
+**Question.** Is there anything left in the compiler flags? The hot loops are
+hand-written AVX2 intrinsics, and `-ffp-contract=off` is a correctness
+constraint, so the honest prior was "not much". This measures it instead of
+assuming it.
+
+**Harness.** `bench/ab.py` (new) runs two or more binaries interleaved, rotates
+the order every round, compares each arm against the reference *in the same
+round*, and checks the generated ids. It imports `bench_decode.parse()`, so the
+TTFT subtraction and synthetic-KV handling are the same code as the one-shot
+baseline. Workload: `--gen 50 --budget 8 --synthetic-kv 1024
+--synthetic-experts --cpu-pin p --threads 4 --readers 6`. That is the 1k
+compute-only control from the two entries above; the base binary measured
+0.6475 s/token here against 0.628 in the cooler single run, so absolute numbers
+are session-bound and only the paired deltas are compared.
+
+**Variants.** Built from the same sources with `make -B bin/dsv4
+CFLAGS="..."`, copied to `bin/variants/`, so `bin/dsv4` stayed the reference.
+One warmup run, five rounds, random order per round.
+
+| arm | flags on top of the baseline | median s/token | spread | paired delta | ids |
+|---|---|---:|---:|---:|---|
+| base | `-O3 -march=native -ffp-contract=off` | **0.6475** | 5.0% | — | — |
+| lto | `-flto=auto` | 0.6605 | 2.6% | +0.11% | same |
+| pgo | `-fprofile-generate/use`, 2×20-token profile | 0.6576 | 4.0% | −0.34% | same |
+| fma | `-ffp-contract=fast` (upper bound) | 0.6625 | 1.7% | +1.33% | same |
+| ofast | `-Ofast` (upper bound) | 0.6559 | 3.9% | +0.92% | same |
+
+The 3-round screen also covered `-flto=auto -fno-semantic-interposition
+-fno-plt` (−0.45%), `-falign-functions=32 -falign-loops=32` (+0.25%) and
+`-O2` (**+3.96%**, clearly worse). PGO generation with
+`-fprofile-update=atomic` was unusable (~35× slower, one 50-token run took
+20 minutes); the profile above used the default update and
+`-fprofile-correction` at use time.
+
+**Result.** No shippable flag is faster than the current build. LTO and PGO
+are inside the noise (−0.3% and +0.1%), and PGO would add a two-build bootstrap
+and a machine-specific profile for nothing. More importantly, the two
+deliberately non-bit-exact upper bounds are *not faster either*: `-ffp-contract=fast`
+and `-Ofast` land at +1.3% and +0.9%, i.e. slower, so the remaining headroom is
+not "GCC failed to emit FMA". The generated ids stayed identical over 50 tokens
+in both arms, but that is not proof of bit-exactness and neither flag is
+mergeable under the engine's contract.
+
+**Decision:** keep `-O3 -march=native -ffp-contract=off` exactly as it is.
+The next lever is source-level: the FP8 kernels still accumulate in `double`
+(`BLOCK_DOT_V_8`), and FP8 is ~57% of this workload. That is an accuracy-policy
+change, not a compiler flag.
+
+```sh
+python3 bench/ab.py --bin base=bin/variants/dsv4.base \
+  --bin ofast=bin/variants/dsv4.ofast --reps 5 \
+  --gen 50 --budget 8 --synthetic-kv 1024 --synthetic-experts \
+  --extra "--cpu-pin p --threads 4 --readers 6"
+```
 
 ### 2026-11-13 — hash-layer expert prefetch through the main cache queue
 
