@@ -157,15 +157,6 @@ int main(int argc, char **argv)
                     CHECK(memcmp(x->s, y->s, ns) == 0,
                           "layer %d %s scale bytes differ", L, nar[i].what);
                 }
-                if (x->wdt == DSV4_WFP8 && (x->cols & 127) == 0) {
-                    const size_t mb = (size_t)x->rows * (size_t)(x->cols / 128);
-                    CHECK(x->special && y->special,
-                          "layer %d %s has no special mask on one path",
-                          L, nar[i].what);
-                    if (x->special && y->special)
-                        CHECK(memcmp(x->special, y->special, mb) == 0,
-                              "layer %d %s special mask differs", L, nar[i].what);
-                }
             }
             CHECK(a.w.has_idx == b.w.has_idx && a.w.has_comp == b.w.has_comp
                   && a.w.compress_ratio == b.w.compress_ratio,
@@ -251,11 +242,6 @@ int main(int argc, char **argv)
                              (size_t)dsv4_mix_hc(&c) * dsv4_hc_dim(&c)
                              * sizeof(float)) == 0,
                       "layer %d hc_attn.fn was disturbed by ring binds", L);
-                const DSV4QMat *mx = &a.w.attn.wq_a, *my = &b.w.attn.wq_a;
-                CHECK(mx->special && my->special &&
-                      memcmp(mx->special, my->special,
-                             (size_t)mx->rows * (size_t)(mx->cols / 128)) == 0,
-                      "layer %d wq_a special mask was disturbed by ring binds", L);
                 printf("  ok    pinned layer %d still matches the shard "
                        "after a full sweep\n", L);
                 dsv4_bind_free(&a);

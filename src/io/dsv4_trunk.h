@@ -66,13 +66,6 @@ typedef struct {
     DSV4LayerBind    bind_cached;
     unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
     int              bind_ready;
-    /* FP8 block-special mask, one byte per 128-byte block. Owned here and
-     * allocated at open, so a ring layer that comes back after eviction reuses
-     * the mask it built on its first read instead of rescanning 130 KB of
-     * weights per token. Built on the first bind that has the run in memory. */
-    unsigned char   *special;
-    size_t           special_bytes;
-    int              special_ready;
 } DSV4TrunkLayer;
 
 typedef struct {
@@ -93,7 +86,6 @@ typedef struct {
 
     unsigned char   *widen;      /* one widen area, reused per bind              */
     size_t           widen_cap;
-    size_t           special_total; /* sum of every layer's mask bytes           */
 
     uint64_t         hits, misses, bytes_read;
     double           load_seconds;

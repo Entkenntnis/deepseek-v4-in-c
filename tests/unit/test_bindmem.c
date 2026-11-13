@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include "dsv4_bind.h"
 #include "dsv4_cfg.h"
-#include "dsv4_quant.h"
 
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \
@@ -85,17 +84,13 @@ int main(void)
 
         const size_t wcap = dsv4_bind_widen_bytes(&c);
         unsigned char *widen = (unsigned char *)malloc(wcap);
-        const size_t mcap = dsv4_bind_layer_mask_bytes(&c, L);
-        unsigned char *masks = mcap ? (unsigned char *)malloc(mcap) : NULL;
         DSV4MemSrc src = { run_find, &run, NULL };
         DSV4LayerBind b;
-        size_t used = 0, mused = 0;
-        if (dsv4_bind_layer_mem(&c, L, &b, bytes, &src, widen, wcap, &used,
-                                masks, mcap, 1, &mused) != 0) {
+        size_t used = 0;
+        if (dsv4_bind_layer_mem(&c, L, &b, bytes, &src, widen, wcap, &used) != 0) {
             printf("  FAIL  memory bind failed\n"); fails++;
         } else {
             CHECK(used <= wcap, "widen used %zu of %zu", used, wcap);
-            CHECK(mused == mcap, "mask used %zu of %zu", mused, mcap);
 
             struct { const char *what; const float *x, *y; int n; } wide[] = {
                 { "attn_norm",   a.w.attn_norm,    b.w.attn_norm,    c.hidden   },
@@ -143,27 +138,6 @@ int main(void)
                     CHECK(memcmp(x->s, y->s, ns) == 0,
                           "%s scale bytes differ between paths", nar[i].what);
                 }
-                if (x->wdt == DSV4_WFP8 && (x->cols & 127) == 0) {
-                    const size_t mb = (size_t)x->rows * (size_t)(x->cols / 128);
-                    CHECK(x->special && y->special,
-                          "%s has no special-block mask on one path", nar[i].what);
-                    if (x->special && y->special) {
-                        CHECK(memcmp(x->special, y->special, mb) == 0,
-                              "%s special mask differs between paths", nar[i].what);
-                        /* Check the cached answer against the scalar
-                         * definition, not against the other binder's copy. */
-                        int bad = 0;
-                        for (size_t blk = 0; blk < mb; blk++) {
-                            const uint8_t *p = (const uint8_t *)x->w + blk * 128;
-                            int want = 0;
-                            for (int j = 0; j < 128; j++)
-                                if (dsv4_e4m3_needs_gather(p[j])) { want = 1; break; }
-                            if (x->special[blk] != (uint8_t)want) bad++;
-                        }
-                        CHECK(bad == 0, "%s mask disagrees with the scalar "
-                              "predicate in %d of %zu blocks", nar[i].what, bad, mb);
-                    }
-                }
             }
 
             CHECK(a.w.has_idx == b.w.has_idx && a.w.has_comp == b.w.has_comp
@@ -183,7 +157,7 @@ int main(void)
                    (int)(sizeof nar / sizeof nar[0]), used, wcap);
         }
         dsv4_bind_free(&a);
-        free(bytes); free(widen); free(masks); free(run.e);
+        free(bytes); free(widen); free(run.e);
     }
 
     dsv4_st_close(&st);

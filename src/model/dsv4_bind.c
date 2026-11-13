@@ -9,13 +9,11 @@
  * every kernel downstream the wrong strides while producing plausible output.
  */
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "dsv4_bind.h"
-#include "dsv4_quant.h"
 
 #define MAXB 96      /* the widest layer, a ratio-4 indexed one, needs 46 */
 
@@ -26,20 +24,12 @@ typedef struct {
     int               narrow;  /* 1 = keep checkpoint bytes, 0 = widen to fp32   */
     const void      **dest;
     size_t            off;     /* byte offset into the blob, filled while sizing */
-    /* FP8 weight requests carry the block-special mask that belongs to this
-     * matrix. `mat` is NULL for every other request. `mask_bytes` is one byte
-     * per 128-byte block (stored_bytes / 128), or 0 when no mask applies. */
-    DSV4QMat         *mat;
-    size_t            mask_off;   /* offset in the binder's mask area */
-    int64_t           mask_bytes;
 } Req;
 
 typedef struct {
     Req r[MAXB];
     int n;
     int bad;
-    size_t mask_base;   /* start of the mask area inside the blob */
-    size_t mask_total;  /* bytes of mask data at that offset      */
 } Plan;
 
 static void req_(Plan *p, const void **dest, int narrow, int64_t want,
@@ -73,65 +63,6 @@ static void reqn(Plan *p, const void **dest, int64_t want, const char *fmt, ...)
 
 static size_t align8(size_t x) { return (x + 7u) & ~(size_t)7u; }
 static int64_t ceil_div(int64_t a, int64_t b) { return (a + b - 1) / b; }
-
-/* ------------------------------------------------- FP8 block-special mask ---
- *
- * The FP8 kernel's fast path is valid only for normal E4M3 values; exponent
- * zero and the two NaNs need the exact gather decode. `fp8_block_has_special`
- * in dsv4_matmul.c answers that for one 128-byte block with AVX2. This is the
- * bind-time equivalent, cached as one byte per block so the hot loop never
- * scans the weights again.
- *
- * Eight bytes at a time, with the classic has-zero-byte trick, because the
- * scalar form costs a pass over all 5.9 GB of FP8 weights at startup:
- *
- *   (v - 0x01..01) & ~v & 0x80..80   is nonzero iff some byte of v is zero
- *
- * Apply it to `v & 0x78` (exponent zero) and to `(v & 0x7F) ^ 0x7F` (abs is
- * the NaN code 0x7F). The predicate is dsv4_e4m3_needs_gather(); the AVX2 scan
- * and this must agree, and test_bindmem checks the cached mask against the
- * scalar definition rather than trusting either one. */
-static int fp8_any_special8(uint64_t v)
-{
-    const uint64_t ones = UINT64_C(0x0101010101010101);
-    const uint64_t high = UINT64_C(0x8080808080808080);
-    const uint64_t exp  = v & UINT64_C(0x7878787878787878);
-    const uint64_t nan  = (v & UINT64_C(0x7f7f7f7f7f7f7f7f))
-                        ^ UINT64_C(0x7f7f7f7f7f7f7f7f);
-    return (((exp - ones) & ~exp & high) |
-            ((nan - ones) & ~nan & high)) != 0;
-}
-
-/* nbytes is a multiple of 128: reqq only requests a mask for exact 128-column
- * matrices, so the blocks are contiguous and row-major. */
-static void fp8_mask_build(uint8_t *mask, const uint8_t *w, size_t nbytes)
-{
-    const size_t nblocks = nbytes / 128;
-    for (size_t b = 0; b < nblocks; b++) {
-        const uint8_t *p = w + b * 128;
-        int special = 0;
-        for (int j = 0; j < 128; j += 8) {
-            uint64_t v;
-            memcpy(&v, p + j, sizeof v);
-            if (fp8_any_special8(v)) { special = 1; break; }
-        }
-        mask[b] = (uint8_t)special;
-    }
-}
-
-/* Assign each FP8 matrix its slot in the mask area. The layout is independent
- * of the weight layout, so it can be computed before or after plan_resolve. */
-static size_t plan_mask_layout(Plan *p)
-{
-    size_t off = 0;
-    for (int i = 0; i < p->n; i++) {
-        Req *q = &p->r[i];
-        if (!q->mat || q->mask_bytes <= 0) continue;
-        q->mask_off = off;
-        off += (size_t)q->mask_bytes;
-    }
-    return off;
-}
 
 /* QUANTISED PAIR. A weight and its block scales are requested together and land
  * in one DSV4QMat, because binding either alone is never correct.
@@ -183,16 +114,6 @@ static void reqq(Plan *p, DSV4QMat *m, int wdt, int64_t rows, int64_t cols,
     }
 
     reqn(p, &m->w, stored, "%s.weight", base);
-    /* The FP8 fast path scans 128-byte blocks. Cache that answer at bind time
-     * as one byte per block. Only exact 128-column matrices are eligible: the
-     * generic path has no mask consumer, and a partial tail block would need a
-     * different layout for no benefit. */
-    if (wdt == DSV4_WFP8 && (cols & 127) == 0 &&
-        p->n > 0 && p->r[p->n - 1].dest == &m->w) {
-        Req *q = &p->r[p->n - 1];
-        q->mat = m;
-        q->mask_bytes = stored / 128;
-    }
     if (m->blk_c) {
         const int64_t ns = ceil_div(rows, m->blk_r) * ceil_div(cols, m->blk_c);
         reqn(p, &m->s, ns, "%s.scale", base);
@@ -384,12 +305,6 @@ static int64_t plan_resolve(Plan *p, const DSV4St *s)
         q->off = off;
         off = align8(off + bytes);
     }
-    /* Masks live after the weight/scales data, once per matrix. They are
-     * 43.6 MiB across Flash's FP8 weights, and keeping them out of the weight
-     * layout means a masked bin does not shift every tensor offset. */
-    p->mask_base = align8(off);
-    p->mask_total = plan_mask_layout(p);
-    off = p->mask_base + p->mask_total;
     return p->bad ? -1 : (int64_t)off;
 }
 
@@ -411,11 +326,6 @@ static int plan_load(Plan *p, const DSV4St *s, unsigned char *blob)
             }
         }
         *q->dest = dst;
-        if (q->mat && q->mask_bytes > 0) {
-            uint8_t *mask = (uint8_t *)blob + p->mask_base + q->mask_off;
-            q->mat->special = mask;
-            fp8_mask_build(mask, dst, (size_t)q->mask_bytes * 128);
-        }
     }
     return 0;
 }
@@ -428,14 +338,6 @@ int64_t dsv4_bind_layer_bytes(const DSV4St *s, const DSV4Cfg *c, int L)
     DSV4LayerW tmp;
     plan_layer(&p, c, L, &tmp);
     return plan_resolve(&p, s);
-}
-
-size_t dsv4_bind_layer_mask_bytes(const DSV4Cfg *c, int L)
-{
-    Plan p; memset(&p, 0, sizeof p);
-    DSV4LayerW tmp;
-    plan_layer(&p, c, L, &tmp);
-    return plan_mask_layout(&p);
 }
 
 int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head)
@@ -570,9 +472,7 @@ size_t dsv4_bind_widen_bytes(const DSV4Cfg *c)
 int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
                         const unsigned char *run, const DSV4MemSrc *src,
                         unsigned char *widen, size_t widen_cap,
-                        size_t *widen_used,
-                        unsigned char *masks, size_t mask_cap,
-                        int build_masks, size_t *mask_used)
+                        size_t *widen_used)
 {
     memset(b, 0, sizeof *b);
     b->layer = layer;
@@ -580,12 +480,6 @@ int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
 
     Plan p; memset(&p, 0, sizeof p);
     plan_layer(&p, c, layer, &b->w);
-    const size_t mask_total = plan_mask_layout(&p);
-    if (build_masks && !masks && mask_total > 0) {
-        fprintf(stderr, "dsv4_bind: asked to build %zu mask bytes for layer %d "
-                        "without a mask area\n", mask_total, layer);
-        return -1;
-    }
 
     size_t woff = 0;
     for (int i = 0; i < p.n; i++) {
@@ -632,27 +526,8 @@ int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
             *q->dest = widen + woff;
             woff = align8(woff + need);
         }
-
-        if (q->mat && q->mask_bytes > 0) {
-            if (!masks) {
-                q->mat->special = NULL;
-            } else {
-                if (q->mask_off + (size_t)q->mask_bytes > mask_cap) {
-                    fprintf(stderr, "dsv4_bind: mask area too small for layer %d "
-                                    "(need %zu, have %zu)\n", layer,
-                            q->mask_off + (size_t)q->mask_bytes, mask_cap);
-                    return -1;
-                }
-                uint8_t *m = masks + q->mask_off;
-                q->mat->special = m;
-                if (build_masks)
-                    fp8_mask_build(m, run + off,
-                                   (size_t)q->mask_bytes * 128);
-            }
-        }
     }
 
     if (widen_used) *widen_used = woff;
-    if (mask_used) *mask_used = mask_total;
     return 0;
 }
