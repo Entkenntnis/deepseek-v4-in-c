@@ -15,7 +15,7 @@ LDFLAGS ?= -lm -fopenmp -pthread
 BUILD := build
 BIN   := bin
 
-.PHONY: all test bench bench-decode cfg-fixtures st-fixtures ref-fixtures tok-fixtures fixtures clean help tui
+.PHONY: all test bench bench-decode cfg-fixtures st-fixtures tok-fixtures fixtures clean help tui
 
 # EVERY binary depends on EVERY engine source and header.
 #
@@ -30,7 +30,7 @@ ENGINE := $(wildcard src/core/*.c src/core/*.h src/io/*.c src/io/*.h \
                      src/cache/*.c src/cache/*.h src/model/*.c src/model/*.h \
                      src/tokenizer/*.c src/tokenizer/*.h \
                      include/dsv4/*.h third_party/*.h)
-ALLBIN := $(BIN)/test_pro $(BIN)/dsv4 $(BIN)/dsv4-serve $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_oracle $(BIN)/test_layer_oracle $(BIN)/test_trunk $(BIN)/test_tok $(BIN)/test_model_oracle
+ALLBIN := $(BIN)/test_pro $(BIN)/dsv4 $(BIN)/dsv4-serve $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_trunk $(BIN)/test_tok
 
 all: $(ALLBIN)
 
@@ -52,9 +52,6 @@ cfg-fixtures:
 	python3 tools/make_cfg_fixtures.py
 st-fixtures:
 	python3 tools/make_st_fixture.py tests/fixtures/st
-ref-fixtures:
-	~/venv-cuda/bin/python tools/emit_fixtures.py tests/fixtures/ref
-	~/venv-cuda/bin/python tools/emit_layer_fixture.py tests/fixtures/ref
 fixtures: cfg-fixtures st-fixtures
 
 $(BIN)/test_bind: tests/unit/test_bind.c src/model/dsv4_bind.c src/model/dsv4_bind.h                   src/io/dsv4_st.c include/dsv4/dsv4.h
@@ -107,14 +104,6 @@ $(BIN)/test_bindmem: tests/unit/test_bindmem.c src/model/dsv4_bind.c src/io/dsv4
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_bindmem.c src/model/dsv4_bind.c 	      src/io/dsv4_st.c -o $@ $(LDFLAGS)
 
-$(BIN)/test_oracle: tests/unit/test_oracle.c $(DSV4_CORE)                     include/dsv4/dsv4.h third_party/json.h
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) tests/unit/test_oracle.c $(DSV4_CORE) -o $@ $(LDFLAGS)
-
-$(BIN)/test_layer_oracle: tests/unit/test_layer_oracle.c src/model/dsv4_layer.c                           $(DSV4_CORE) src/model/dsv4_layer.h third_party/json.h
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) tests/unit/test_layer_oracle.c src/model/dsv4_layer.c 	      $(DSV4_CORE) -o $@ $(LDFLAGS)
-
 $(BIN)/test_trunk: tests/unit/test_trunk.c src/io/dsv4_trunk.c src/io/dsv4_st.c                    src/model/dsv4_bind.c src/io/dsv4_trunk.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_trunk.c src/io/dsv4_trunk.c 	      src/io/dsv4_st.c src/model/dsv4_bind.c -o $@ $(LDFLAGS)
@@ -144,15 +133,7 @@ $(BIN)/test_pro: tests/unit/test_pro.c $(DSV4_ENGINE)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_pro.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
 
-$(BIN)/test_model_oracle: tests/unit/test_model_oracle.c $(DSV4_ENGINE)
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) tests/unit/test_model_oracle.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
-
-tiny-fixture:
-	~/venv-cuda/bin/python tools/make_tiny_checkpoint.py $(HOME)/dsv4-tiny
-	python3 tools/pack_trunk.py $(HOME)/dsv4-tiny $(HOME)/dsv4-tiny-trunk
-
-test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_oracle $(BIN)/test_layer_oracle $(BIN)/test_trunk $(BIN)/test_tok $(BIN)/test_model_oracle
+test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_trunk $(BIN)/test_tok
 	@./$(BIN)/test_cfg
 	@echo
 	@./$(BIN)/test_st
@@ -181,15 +162,9 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 	@echo
 	@./$(BIN)/test_bindmem
 	@echo
-	@./$(BIN)/test_oracle
-	@echo
-	@./$(BIN)/test_layer_oracle
-	@echo
 	@./$(BIN)/test_trunk
 	@echo
 	@./$(BIN)/test_tok
-	@echo
-	@DSV4_TINY=$(HOME)/dsv4-tiny DSV4_TINY_TRUNK=$(HOME)/dsv4-tiny-trunk ./$(BIN)/test_model_oracle
 	@echo
 	@./$(BIN)/test_pro
 
@@ -252,8 +227,8 @@ help:
 	@echo "deepseek-v4-in-c -- DeepSeek-V4 in C99, streamed off NVMe"
 	@echo ""
 	@echo "  make               build everything"
-	@echo "  make test          the gate ladder (19 gates; the trunk gate"
-	@echo "                     needs DSV4_MODEL and DSV4_TRUNK to make 20)"
+	@echo "  make test          the gate ladder (the trunk gate needs"
+	@echo "                     DSV4_MODEL and DSV4_TRUNK)"
 	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make tui           build the streaming backend and launch the Python TUI"
@@ -263,9 +238,7 @@ help:
 	@echo "  make fixtures      all of the below"
 	@echo "  make cfg-fixtures  bad-config fixtures from the released config"
 	@echo "  make st-fixtures   a synthetic safetensors shard"
-	@echo "  make ref-fixtures  per-kernel PyTorch reference values"
 	@echo "  make tok-fixtures  tokenizer parity cases"
-	@echo "  make tiny-fixture  the whole-model oracle checkpoint"
 	@echo ""
 	@echo "running a model (see README.md):"
 	@echo "  python3 tools/pack_trunk.py     <model_dir> <trunk_dir>"

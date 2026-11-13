@@ -99,23 +99,18 @@ int main(int argc, char **argv)
         }
 
         const double flop = 2.0 * (double)in * (double)out;
-        if (job[j].fp4) {
-            double err2 = 0.0, ref2 = 0.0;
-            for (int i = 0; i < out; i++) {
-                const double d = (double)yb[i] - (double)ya[i];
-                err2 += d * d;
-                ref2 += (double)ya[i] * (double)ya[i];
-            }
-            const double rel = sqrt(err2 / (ref2 > 0.0 ? ref2 : 1.0));
-            printf("%-22s %7.1f GF %7.1f GF %7.2fx  f32 L2 %.1e\n",
-                   job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
-                   rel);
-        } else {
-            const int same = memcmp(ya, yb, (size_t)out * sizeof *ya) == 0;
-            printf("%-22s %7.1f GF %7.1f GF %7.2fx  %s\n",
-                   job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
-                   same ? "bitwise" : "NO -- THE PATHS DISAGREE");
+        /* Both AVX2 kernels are float-inner/double-fold now, so both are
+         * bounded by L2 relative error rather than bit equality. */
+        double err2 = 0.0, ref2 = 0.0;
+        for (int i = 0; i < out; i++) {
+            const double d = (double)yb[i] - (double)ya[i];
+            err2 += d * d;
+            ref2 += (double)ya[i] * (double)ya[i];
         }
+        const double rel = sqrt(err2 / (ref2 > 0.0 ? ref2 : 1.0));
+        printf("%-22s %7.1f GF %7.1f GF %7.2fx  f32 L2 %.1e\n",
+               job[j].name, flop / ts * 1e-9, flop / tv * 1e-9, ts / tv,
+               rel);
 
         free(x); free(ya); free(yb); free(W); free(S);
     }

@@ -46,6 +46,10 @@ void dsv4_matmul_fp8_unroll(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
 void dsv4_matmul_fp8_dt(float *, const float *, const uint8_t *,
                         const uint8_t *, int, int, int, int);
+void dsv4_matmul_fp8_f32(float *, const float *, const uint8_t *,
+                         const uint8_t *, int, int, int, int);
+void dsv4_matmul_fp8_avx2(float *, const float *, const uint8_t *,
+                          const uint8_t *, int, int, int, int);
 #endif
 
 typedef struct {
@@ -177,9 +181,10 @@ int main(int argc, char **argv)
         { "rowblock",       dsv4_matmul_fp4_32_nd2 },
     };
     const variant fp8[] = {
-        { "baseline",       dsv4_matmul_fp8 },
+        { "double",         dsv4_matmul_fp8_avx2 },
         { "unroll4",        dsv4_matmul_fp8_unroll },
         { "dtable",         dsv4_matmul_fp8_dt },
+        { "f32inner",       dsv4_matmul_fp8_f32 },
     };
     run_shape("fp4 expert w1 2048x4096", 4096, 2048, 1, 32, 0,
               fp4, (int)(sizeof fp4 / sizeof fp4[0]), reps);

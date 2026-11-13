@@ -7,12 +7,12 @@
  *   are powers of two, and the activations are small integers or halves. Those
  *   structural gates still use bit equality.
  *
- *   The one deliberate exception is the AVX2 FP4 kernel: it accumulates each
- *   32-wide block in float and folds blocks in double, so it cannot be bitwise
- *   equal to the scalar double reference. Its random-data gate uses an L2
- *   relative-error bound (1e-6) instead. The small FP4 fixtures below are still
- *   exactly representable, so they check bit equality and catch the structural
- *   mistakes.
+ *   The deliberate exceptions are the AVX2 FP4 and FP8 kernels: both form a
+ *   scale block's dot product in float and fold the block in double, so they
+ *   cannot be bitwise equal to the scalar double reference. Their random-data
+ *   gates use an L2 relative-error bound (1e-6) instead. The small FP4/FP8
+ *   fixtures below are still exactly representable, so they check bit equality
+ *   and catch the structural mistakes.
  *
  *   A loose tolerance would be the wrong instrument. The failures this file is
  *   looking for -- a wrong block stride, a scale applied per element instead of
@@ -255,18 +255,18 @@ int main(void)
     printf("\n");
     printf("\n-- GATE  the AVX2 path matches the scalar reference --\n");
     {
-        /* bf16 and FP8 must still be bitwise: -ffp-contract=off exists so that
-         * a faster kernel cannot quietly become a different kernel.
+        /* bf16 must still be bitwise: -ffp-contract=off exists so that a
+         * faster kernel cannot quietly become a different kernel.
          *
-         * FP4 is the deliberate exception. Its AVX2 path accumulates one
-         * 32-wide block in float and folds blocks in double, so exact bits are
+         * FP4 and FP8 are the deliberate exceptions. Their AVX2 paths form one
+         * scale block in float and fold blocks in double, so exact bits are
          * not the contract any more. The gate instead bounds the L2 relative
          * error at 1e-6, which is far below any structural bug but far above
-         * the measured 7e-8.
+         * the measured 7-10e-8.
          *
-         * Sizes are deliberately not multiples of the vector width in the
-         * output dimension, and the FP8 block width 128 and FP4 block width 32
-         * both exercise the 16-wide main loop plus the scalar tail. */
+         * OUT is deliberately not a multiple of the vector width. IN=256 takes
+         * the specialised 128-wide FP8 block and the 32-wide FP4 block; the
+         * fixtures exercise the generic block geometry separately. */
         enum { IN = 256, OUT = 37 };
         static float x[IN], ys[OUT], yv[OUT];
         static uint8_t W8[(size_t)OUT * IN], W4[(size_t)OUT * IN / 2];
@@ -313,7 +313,31 @@ int main(void)
 
         dsv4_matmul_fp8_scalar(ys, x, W8, S8, IN, OUT, 128, 128);
         dsv4_matmul_fp8(yv, x, W8, S8, IN, OUT, 128, 128);
-        CHECK(memcmp(ys, yv, sizeof ys) == 0, "fp8 differs between paths");
+        double e8 = 0.0, r8 = 0.0;
+        for (int i = 0; i < OUT; i++) {
+            const double d = (double)yv[i] - (double)ys[i];
+            e8 += d * d;
+            r8 += (double)ys[i] * (double)ys[i];
+        }
+        const double fp8_rel = sqrt(e8 / (r8 > 0.0 ? r8 : 1.0));
+        CHECK(fp8_rel <= 1e-6,
+              "fp8 L2 relative error %.3e exceeds 1e-6", fp8_rel);
+
+        /* A non-128 block width takes the generic FP8 path and its 32-wide
+         * main loop plus scalar tail. 256 = 100 + 100 + 56 makes the last
+         * block non-multiple-of-32. */
+        dsv4_matmul_fp8_scalar(ys, x, W8, S8, IN, OUT, 128, 100);
+        dsv4_matmul_fp8(yv, x, W8, S8, IN, OUT, 128, 100);
+        double e8g = 0.0, r8g = 0.0;
+        for (int i = 0; i < OUT; i++) {
+            const double d = (double)yv[i] - (double)ys[i];
+            e8g += d * d;
+            r8g += (double)ys[i] * (double)ys[i];
+        }
+        const double fp8_gen_rel = sqrt(e8g / (r8g > 0.0 ? r8g : 1.0));
+        CHECK(fp8_gen_rel <= 1e-6,
+              "fp8 generic-block L2 relative error %.3e exceeds 1e-6",
+              fp8_gen_rel);
 
         dsv4_matmul_fp4_scalar(ys, x, W4, S4, IN, OUT, 1, 32);
         dsv4_matmul_fp4(yv, x, W4, S4, IN, OUT, 1, 32);
@@ -328,8 +352,9 @@ int main(void)
               "fp4 L2 relative error %.3e exceeds 1e-6", fp4_rel);
 
         if (!fails)
-            printf("  ok    bf16 and fp8 bitwise; fp4 L2 rel %.1e over "
-                   "%d x %d\n", fp4_rel, OUT, IN);
+            printf("  ok    bf16 bitwise; fp8 L2 rel %.1e (128-block) / %.1e "
+                   "(generic); fp4 L2 rel %.1e over %d x %d\n",
+                   fp8_rel, fp8_gen_rel, fp4_rel, OUT, IN);
     }
 
 

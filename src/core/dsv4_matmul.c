@@ -11,15 +11,16 @@
  *
  * THE REDUCTION ORDER IS PART OF THE CONTRACT
  *   Inherited from kimi-k3-in-c: accumulate in DOUBLE via fma(), in a fixed
- *   16-accumulator tree, so that a scalar build, an OpenMP build and (later) an
- *   AVX2 build produce BITWISE identical output. -ffp-contract=off in the
- *   Makefile stops the compiler fusing anything behind our back. The point is
- *   that a performance change can never quietly become an accuracy change.
+ *   16-accumulator tree, so that a scalar build and an OpenMP build produce
+ *   BITWISE identical output. -ffp-contract=off in the Makefile stops the
+ *   compiler fusing anything behind our back.
  *
- *   An AVX2 path exists and reproduces this tree lane for lane; test_matmul
- *   gates it on bit equality against the scalar path, exactly as K3 does.
- *   Adding a faster kernel that is merely *close* would forfeit the property
- *   this whole file is arranged around.
+ *   BF16 still follows that tree exactly and test_matmul gates it on bit
+ *   equality. FP4 and FP8 are the deliberate exceptions: their AVX2 kernels
+ *   form one scale block in float and fold it in double, which is measurably
+ *   faster but cannot be bitwise-equal to the scalar double reference. Those
+ *   two use an L2 bound (1e-6, measured ~7-8e-8). The scalar double bodies
+ *   remain as the references and as the non-AVX2 paths.
  *
  * WHERE THE SCALES GO
  *   inference/kernel.py fp4_gemm applies the weight scale to the ACCUMULATOR
@@ -281,7 +282,7 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
  * x is the same vector for all `out` rows, so widening it inside the row loop
  * did the work `out` times over: a 2048x4096 expert matrix converted 2.1M
  * values where 1024 suffice. (double)float is exact, so hoisting it changes the
- * count and nothing else -- the gate still reports bit equality.
+ * count and nothing else. The BF16 path, which still uses it, stays bitwise.
  *
  * malloc rather than a fixed array: Pro's widest reduce dimension is 16384, and
  * a kernel that is correct only up to some assumed maximum is precisely the
@@ -306,8 +307,9 @@ static double *widen_x(const float *x, int in)
  * `..._avx2` where the machine has AVX2+FMA. Two instantiations of ONE body, so
  * they cannot drift apart, and both are callable at runtime so the gate can
  * compare them on real data instead of trusting the argument that they must
- * agree. FP4 is the deliberate exception: its AVX2 kernel is the float-inner
- * path below, and the scalar double body remains the reference.
+ * agree. The FP8 AVX2 pair is now the reference for `matmul_variants`; the
+ * production FP8 entry point is the float-inner path below. FP4 took the same
+ * float-inner shape, and its scalar double body remains the reference.
  *
  * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
  * default compute team is four threads pinned to the four identical P-cores, so
@@ -321,9 +323,10 @@ static double *widen_x(const float *x, int in)
  * This cannot change a result: a row's dot product depends only on its own
  * columns, and the reduction inside the row is untouched. Only which thread
  * computes which row changes, and rows do not interact. */
-/* One FP8 GEMV body, emitted for the scalar and AVX2 variants. Kept apart from
- * the bf16/FP4 generators so the kernel is the SAME body with a different
- * loader, not a second implementation that could drift. */
+/* One FP8 GEMV body, emitted for the scalar and the double AVX2 reference.
+ * Keep the bf16/FP4 generators apart so the kernel is the SAME body with a
+ * different loader, not a second implementation that could drift. The
+ * production float-inner FP8 kernel is `dsv4_matmul_fp8_f32` below. */
 #define GEN_FP8_BODY(NAME, DOT)                                                \
 void NAME(float *y, const float *x, const uint8_t *W,                          \
                           const uint8_t *S, int in, int out,                   \
@@ -414,6 +417,116 @@ GEN_FP8_BODY(dsv4_matmul_fp8_avx2, BLOCK_DOT_FP8)
 void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
                           const uint8_t *S, int in, int out,
                           int blk_r, int blk_c);
+
+/* FP8 WITH A FLOAT-INNER BLOCK AND A DOUBLE FOLD.
+ *
+ * The double kernel above converts every weight f32 -> f64 (four `vcvtps2pd`
+ * per 16 weights). `perf annotate` put ~33% of the FP8 kernel's cycles on that
+ * conversion, and the FP8 kernel is ~52% of all decode compute. FP4 already
+ * took the same trade and measured 1.36x in the kernel and -5.7% wall, so FP8
+ * gets the same shape: form each 128-wide scale block's dot product with
+ * 8-lane float FMAs, widen the block ONCE, and keep the block scale and the
+ * cross-block sum in double.
+ *
+ * This is deliberately NOT bitwise-equal to the scalar double reference. The
+ * factory gate bounds the L2 relative error (measured ~8e-8), exactly as it
+ * already does for FP4. The comparison kernel stays in the build as
+ * `dsv4_matmul_fp8_avx2` so `bench/matmul_variants` can still A/B the two. */
+static inline double fp8_block_dot_f32_128(const uint8_t *wb,
+                                           const float *xb)
+{
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    for (int i = 0; i < 128; i += 32) {
+        a0 = _mm256_fmadd_ps(load8_fp8(wb, i),
+                             _mm256_loadu_ps(xb + i), a0);
+        a1 = _mm256_fmadd_ps(load8_fp8(wb, i + 8),
+                             _mm256_loadu_ps(xb + i + 8), a1);
+        a2 = _mm256_fmadd_ps(load8_fp8(wb, i + 16),
+                             _mm256_loadu_ps(xb + i + 16), a2);
+        a3 = _mm256_fmadd_ps(load8_fp8(wb, i + 24),
+                             _mm256_loadu_ps(xb + i + 24), a3);
+    }
+
+    __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                             _mm256_add_ps(a2, a3));
+    __m128 lo = _mm256_castps256_ps128(s);
+    __m128 hi = _mm256_extractf128_ps(s, 1);
+    __m128 t = _mm_add_ps(lo, hi);
+    t = _mm_hadd_ps(t, t);
+    t = _mm_hadd_ps(t, t);
+    return (double)_mm_cvtss_f32(t);
+}
+
+/* Generic block width, for fixtures and any non-128 geometry. */
+static inline double fp8_block_dot_f32(const uint8_t *wb, const float *xb,
+                                       int n)
+{
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 31 < n; i += 32) {
+        a0 = _mm256_fmadd_ps(load8_fp8(wb, i),
+                             _mm256_loadu_ps(xb + i), a0);
+        a1 = _mm256_fmadd_ps(load8_fp8(wb, i + 8),
+                             _mm256_loadu_ps(xb + i + 8), a1);
+        a2 = _mm256_fmadd_ps(load8_fp8(wb, i + 16),
+                             _mm256_loadu_ps(xb + i + 16), a2);
+        a3 = _mm256_fmadd_ps(load8_fp8(wb, i + 24),
+                             _mm256_loadu_ps(xb + i + 24), a3);
+    }
+
+    __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                             _mm256_add_ps(a2, a3));
+    __m128 lo = _mm256_castps256_ps128(s);
+    __m128 hi = _mm256_extractf128_ps(s, 1);
+    __m128 t = _mm_add_ps(lo, hi);
+    t = _mm_hadd_ps(t, t);
+    t = _mm_hadd_ps(t, t);
+    double acc = (double)_mm_cvtss_f32(t);
+
+    for (; i < n; i++)
+        acc += (double)dsv4_e4m3_to_f32(wb[i]) * (double)xb[i];
+    return acc;
+}
+
+void dsv4_matmul_fp8_f32(float *y, const float *x, const uint8_t *W,
+                         const uint8_t *S, int in, int out,
+                         int blk_r, int blk_c)
+{
+    const int sc = (in + blk_c - 1) / blk_c;
+
+    if (blk_c == 128 && (in & 127) == 0) {
+        _Pragma("omp parallel for schedule(static) if (out > 64)")
+        for (int o = 0; o < out; o++) {
+            const uint8_t *rw = W + (size_t)o * in;
+            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+            double total = 0.0;
+            int bi = 0;
+            for (int c0 = 0; c0 < in; c0 += 128) {
+                const double acc = fp8_block_dot_f32_128(rw + c0, x + c0);
+                total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);
+            }
+            y[o] = (float)total;
+        }
+        return;
+    }
+
+    _Pragma("omp parallel for schedule(static) if (out > 64)")
+    for (int o = 0; o < out; o++) {
+        const uint8_t *rw = W + (size_t)o * in;
+        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+        double total = 0.0;
+        int bi = 0;
+        for (int c0 = 0; c0 < in; c0 += blk_c) {
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;
+            const double acc = fp8_block_dot_f32(rw + c0, x + c0, n);
+            total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);
+        }
+        y[o] = (float)total;
+    }
+}
+
 #define PICK(name) name##_avx2
 int dsv4_matmul_has_avx2(void) { return 1; }
 #else
@@ -431,7 +544,11 @@ void dsv4_matmul_bf16(float *y, const float *x, const uint16_t *W,
 void dsv4_matmul_fp8(float *y, const float *x, const uint8_t *W,
                      const uint8_t *S, int in, int out, int blk_r, int blk_c)
 {
-    PICK(dsv4_matmul_fp8)(y, x, W, S, in, out, blk_r, blk_c);
+#if defined(__AVX2__) && defined(__FMA__)
+    dsv4_matmul_fp8_f32(y, x, W, S, in, out, blk_r, blk_c);
+#else
+    dsv4_matmul_fp8_scalar(y, x, W, S, in, out, blk_r, blk_c);
+#endif
 }
 
 void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
@@ -788,6 +905,7 @@ void dsv4_matmul_fp8_dt(float *y, const float *x, const uint8_t *W,
     }
     free(xd);
 }
+
 #endif /* DSV4_MATMUL_EXPERIMENTS */
 #endif
 

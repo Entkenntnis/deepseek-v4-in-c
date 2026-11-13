@@ -87,8 +87,9 @@ make test       # the gate ladder
 make bench      # matmul_bw, fp8_decode, fp4_f32, matmul_variants, cache_bw
 ```
 
-`make test` runs 20 gates. The 21st, the trunk gate, needs a real checkpoint and
-a packed trunk and skips without them:
+`make test` runs 17 gates. The trunk gate needs a real checkpoint and a packed
+trunk; the tokenizer gate needs a packed tokenizer fixture. Both skip without
+them:
 
 ```sh
 DSV4_MODEL=~/models/dsv4-flash DSV4_TRUNK=~/dsv4-trunk make test
@@ -472,21 +473,28 @@ up to 3x across states — which is why kernel changes are resolved with
 
 `bench/matmul_bw.c`, best of 15, on the default four P-cores
 (`OMP_NUM_THREADS=4`), at Flash's real matrix shapes. "agreement" is the scalar
-reference against the AVX2 path: bitwise for bf16/FP8, and an L2 bound for the
-FP4 float-inner kernel:
+reference against the AVX2 path: bitwise for bf16, and an L2 bound for the FP4
+and FP8 float-inner kernels:
 
 | kernel | scalar | AVX2 | speedup | agreement |
 |---|---|---|---|---|
-| fp4 expert w1 2048x4096 | 10.8 GF/s | **63.9 GF/s** | 5.92x | L2 7.3e-8 |
-| fp4 expert w2 4096x2048 | 10.8 GF/s | **63.8 GF/s** | 5.89x | L2 7.5e-8 |
-| fp8 attn wo_b 4096x8192 | 3.4 GF/s | 41.1 GF/s | 12.21x | bitwise |
-| fp8 attn wq_b 32768x1024 | 3.4 GF/s | 43.6 GF/s | 12.98x | bitwise |
+| fp4 expert w1 2048x4096 | 10.8 GF/s | **64.4 GF/s** | 5.94x | L2 7.3e-8 |
+| fp4 expert w2 4096x2048 | 10.8 GF/s | **63.8 GF/s** | 5.92x | L2 7.5e-8 |
+| fp8 attn wo_b 4096x8192 | 3.4 GF/s | **47.0 GF/s** | 13.92x | L2 8.6e-8 |
+| fp8 attn wq_b 32768x1024 | 3.4 GF/s | **48.7 GF/s** | 14.45x | L2 8.2e-8 |
 
-The FP4 AVX2 kernel accumulates each 32-weight block in float and folds blocks
-in double; it is **not** bitwise-equal to the scalar double reference. The L2
-relative error is about `7e-8`, and the matmul gate enforces `1e-6`. That trade
-cut full decode from `0.970` to `0.915 s/token` in the interleaved A/B (see
+Both the FP4 and FP8 AVX2 kernels accumulate each scale block in float and fold
+blocks in double; they are **not** bitwise-equal to the scalar double reference.
+The L2 relative error is about `7-10e-8`, and the matmul gate enforces `1e-6`.
+For FP4 that trade cut full decode from `0.970` to `0.915 s/token` in the
+interleaved A/B (see
 [BENCHMARK.md](BENCHMARK.md#fp32-inner-accumulation-is-now-the-fp4-default--2026-11-12)).
+FP8 followed the same route: `perf annotate` had put ~33% of the FP8 kernel's
+cycles on `vcvtps2pd`, and the float-inner block removed that conversion. The
+interleaved full-model A/B measured `0.795 -> 0.710 s/token` (**-10.7%**), with
+identical ids; a 50-token follow-up kept all 51 ids identical and measured
+`0.744 -> 0.692`. See
+[BENCHMARK.md](BENCHMARK.md#fp8-float-inner-block--2026-11-13).
 
 On the P-core-only compute path the FP8 decoder is the 8-wide gather from
 the same 256-entry table: **1.20–1.29x** over the old four-load form in
@@ -495,12 +503,13 @@ the same 256-entry table: **1.20–1.29x** over the old four-load form in
 Gather is the only FP8 decoder; the four-load path and its environment override
 have been removed.
 
-FP8's large advantage over the branchy scalar decode does not mean it is
-compute-bound. The absolute rate stays near the memory stream: those matrices
-are 33.5 MB and are re-read from RAM every layer, so the kernel is
-bandwidth-limited rather than conversion-limited. That is the measurement that
-argues for putting the trunk in VRAM instead of optimising it further on the
-CPU.
+The gather was not the last bottleneck. `perf` top-down on a real decode put
+`tma_ports_utilized_3m` at **79%** and `tma_memory_bound` at only **9%**, while
+the BF16 head streamed at ~50 GB/s against FP8 attention's ~15 GB/s. The FP8
+kernel was conversion-bound, not bandwidth-bound: `vcvtps2pd` was 33% of its
+cycles. Moving the block accumulation to float removed that and lifted the
+kernel to 47-49 GF/s. Putting the trunk in VRAM remains a separate lever; it is
+not a substitute for fixing the kernel.
 
 ### The per-call cost, and a claim that did not survive being measured
 

@@ -709,6 +709,67 @@ contention costs, which is the whole trade.
 passes; the cache and trunk-bind gates still pass. The model/layer oracle
 fixtures are not installed on this machine, so those were not run.
 
+## FP8 float-inner block — 2026-11-13
+
+**Change:** the production AVX2 FP8 GEMV now forms each 128-wide scale block's
+dot product with 8-lane float FMAs and folds the block once in double — the same
+shape FP4 adopted on 2026-11-12. The old double kernel stays in the build as
+`dsv4_matmul_fp8_avx2` so `bench/matmul_variants` can A/B the two; the public
+`dsv4_matmul_fp8` is the new path. It is **not** bitwise-equal to the scalar
+double reference; `test_matmul` now bounds the L2 relative error at `1e-6`
+(measured `8–10e-8`), exactly as it already did for FP4.
+
+**Why:** `perf` on a real decode put **52% of all decode compute cycles in the
+FP8 kernel** and 37–40% in FP4. Top-down over the decode window was
+`tma_ports_utilized_3m` **79%** and `tma_memory_bound` only **9%**, so the
+kernel was execution-port/conversion-bound, not DRAM-bound. `perf annotate`
+attributed **33% of the FP8 kernel's cycles to `vcvtps2pd`/`vextractf128`**
+(the per-weight f32→f64 widening), 18% to `vpgatherdd`, and 7% to the double
+fold. The BF16 head streamed at ~50 GB/s while FP8 attention sat at ~15 GB/s,
+which is what ruled out a memory ceiling.
+
+**Kernel**, `bench/matmul_variants`, 4 P-cores, 10 interleaved reps, best of
+run. The 128-wide specialisation removes the generic block loop and its tail:
+
+| shape | double | float-inner | speedup |
+|---|---:|---:|---:|
+| fp8 attn wo_b 4096x8192 | 42.8 GF/s | **50.5 GF/s** | **1.18x** |
+| fp8 attn wq_b 32768x1024 | 44.5 GF/s | **51.4 GF/s** | **1.16x** |
+
+`matmul_bw` best of 15 on the same machine then reports 47.0/48.7 GF/s at L2
+`8.6e-8`/`8.2e-8`; the absolute numbers move with the thermal state, the
+direction does not.
+
+**Full decode**, three interleaved pairs, same prompt, `--budget 16 --gen 20`.
+Decode rate is `(wall - TTFT) / 20`, not the printed `s/token`:
+
+| arm | runs (s/token) | median |
+|---|---|---:|
+| double | 0.755 / 0.870 / 0.795 | 0.795 |
+| **float-inner** | 0.710 / 0.705 / 0.735 | **0.710** |
+
+That is **−10.7%**, with identical ids across all six runs. A 50-token
+follow-up pair also kept all 51 ids identical (`0.744 -> 0.692 s/token`,
+−7.0%). Components from the profile, medians of the three 20-token runs:
+
+| | double | float-inner | delta |
+|---|---:|---:|---:|
+| attention | 294.9 ms/pass | 246.6 ms/pass | **−16.4%** |
+| shared expert | 69.2 ms/pass | 58.5 ms/pass | **−15.5%** |
+| routed-expert matmul | 293.7 ms/pass | 287.8 ms/pass | −2.0% (noise) |
+| exposed expert disk | 225.2 ms/pass | 223.7 ms/pass | flat |
+| lm head + final norm | 21.3 ms/pass | 21.1 ms/pass | flat |
+
+**Verified:** `bin/test_matmul` passes, including the all-256-E4M3-code gate
+that is still bitwise (one non-zero term per row); every gate in `make test`
+passes. The oracle test files and their fixture targets have been removed from
+the tree, so there is no oracle gate to skip.
+
+**Decision:** adopted as the production FP8 path. The FP8 kernel no longer
+carries the bit-exact claim; the old double kernel remains available for a
+direct A/B. If a longer real-checkpoint run shows id drift, reverting is one
+dispatch change.
+
 ## Measurement rules this machine earned
 
 - **Do not A/B two 60 s runs back to back and believe a 10% difference.** The
@@ -735,10 +796,10 @@ fixtures are not installed on this machine, so those were not run.
 ## What to watch when changing code
 
 - Decode s/token (the number above) is the primary metric.
-- After the FP8 table change, the **routed-expert FP4 matmul is the largest
-  single component** (11.6 s of the 31.7 s median run), followed by attention
-  (7.6 s) and exposed expert disk (6.7 s). That is where the next change should
-  be aimed.
+- After the FP8 float-inner change, the **routed-expert FP4 matmul is still the
+  largest single compute component**; attention and the shared expert both fell
+  ~16% in the A/B. Exposed expert disk is next. That is where the next change
+  should be aimed.
 - The routed-expert disk and matmul rows overlap, so a change that serialises
   them shows up as disk time rather than matmul time.
 - The generated ids must stay identical. If they change, the build is a
