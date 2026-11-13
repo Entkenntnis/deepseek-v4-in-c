@@ -48,6 +48,14 @@ void dsv4_matmul_fp8_scalar(float *, const float *, const uint8_t *,
 void dsv4_matmul_fp4_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
 int  dsv4_matmul_has_avx2(void);
+#if defined(__AVX2__) && defined(__FMA__)
+/* The float-inner gather reference (the production path of the previous
+ * release, still exported for A/B). The new production path must agree with it
+ * bit for bit, including on the normal-only blocks that take the closed-form
+ * decode and on the block that falls back for a subnormal or a NaN. */
+void dsv4_matmul_fp8_f32(float *, const float *, const uint8_t *,
+                         const uint8_t *, int, int, int, int);
+#endif
 
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \
@@ -405,6 +413,52 @@ int main(void)
             printf("  ok    all 256 codes identical in scalar and AVX2 paths\n");
     }
 
+
+#if defined(__AVX2__) && defined(__FMA__)
+    printf("\n-- GATE  normal-only fast decode, and the exact fallback --\n");
+    {
+        /* The random gate above uses uniform bytes, which are 6.25%
+         * subnormal, so nearly every 128-byte block takes the gather fallback.
+         * This gate deliberately fills every block with NORMAL codes first, so
+         * the closed-form decode is the path actually tested, then injects one
+         * subnormal, one NaN and one zero into a single block to exercise the
+         * fallback. Both must agree with the gather kernel bit for bit. */
+        enum { IN = 512, OUT = 256 };
+        static uint8_t W[(size_t)OUT * IN], S[(OUT / 128) * (IN / 128)];
+        static float x[IN], ya[OUT], yb[OUT];
+        unsigned r = 987654321u;
+        for (int i = 0; i < IN; i++) {
+            r = r * 1103515245u + 12345u;
+            x[i] = (float)((int)((r >> 16) & 0xff) - 128) * 0.01f;
+        }
+        for (size_t i = 0; i < sizeof W; i++) {
+            r = r * 1103515245u + 12345u;
+            unsigned e = 1 + ((r >> 16) % 14);       /* 1..14, never 0 or 15 */
+            unsigned m = (r >> 20) & 7u;
+            unsigned s = (r >> 24) & 1u;
+            W[i] = (uint8_t)((s << 7) | (e << 3) | m);
+        }
+        memset(S, 127, sizeof S);
+
+        dsv4_matmul_fp8_f32(ya, x, W, S, IN, OUT, 128, 128);
+        dsv4_matmul_fp8(yb, x, W, S, IN, OUT, 128, 128);
+        CHECK(memcmp(ya, yb, sizeof ya) == 0,
+              "normal-only blocks differ from the gather kernel");
+
+        W[0] = 0x01;    /* subnormal */
+        W[1] = 0x7F;    /* +NaN */
+        W[2] = 0xFF;    /* -NaN */
+        W[3] = 0x00;    /* +0 */
+        dsv4_matmul_fp8_f32(ya, x, W, S, IN, OUT, 128, 128);
+        dsv4_matmul_fp8(yb, x, W, S, IN, OUT, 128, 128);
+        CHECK(memcmp(ya, yb, sizeof ya) == 0,
+              "the fallback block differs from the gather kernel");
+
+        if (!fails)
+            printf("  ok    %d normal-only rows bitwise, and the injected "
+                   "subnormal/NaN/zero block falls back exactly\n", OUT);
+    }
+#endif
 
     if (fails) { printf("MATMUL GATE FAILED: %d check(s)\n", fails); return 1; }
     printf("MATMUL GATE PASSED\n");

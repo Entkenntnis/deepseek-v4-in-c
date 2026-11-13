@@ -496,12 +496,23 @@ identical ids; a 50-token follow-up kept all 51 ids identical and measured
 `0.744 -> 0.692`. See
 [BENCHMARK.md](BENCHMARK.md#fp8-float-inner-block--2026-11-13).
 
-On the P-core-only compute path the FP8 decoder is the 8-wide gather from
-the same 256-entry table: **1.20–1.29x** over the old four-load form in
-`bench/fp8_decode`, and **1.04 → 0.95 s/token** end to end (see
+The table above is the historical `bench/matmul_bw` harness, which fills weights
+with **uniform random bytes**. That is no longer representative of the
+production FP8 path: uniform bytes are 6.25% subnormal, while the checkpoint's
+own `wo_b` tensor is 0.0145%. `bench/matmul_variants --realistic` uses the
+measured E4M3 histogram, and the production kernel measures **81.2 GF/s** at
+both FP8 shapes against 49.8/51.2 for the gather kernel (**1.63x/1.59x**),
+bitwise identical. See
+[BENCHMARK.md](BENCHMARK.md#fp8-hybrid-decode-and-fp4-mask-removal--2026-11-13).
+
+The 8-wide gather from the 256-entry table was itself a win over the old
+four-load form (**1.20-1.29x** in `bench/fp8_decode`, **1.04 → 0.95 s/token**
+end to end, see
 [BENCHMARK.md](BENCHMARK.md#p-core-fp8-decode-gather8-is-now-the-default--2026-11-12)).
-Gather is the only FP8 decoder; the four-load path and its environment override
-have been removed.
+It is now the **exactness fallback**, not the hot path: 98.2% of 128-byte
+blocks contain neither a subnormal nor a NaN, and those use the closed-form
+decode. The general four-load form and its environment override have been
+removed.
 
 The gather was not the last bottleneck. `perf` top-down on a real decode put
 `tma_ports_utilized_3m` at **79%** and `tma_memory_bound` at only **9%**, while

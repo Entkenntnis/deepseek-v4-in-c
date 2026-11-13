@@ -195,9 +195,9 @@ $(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
 
-$(BIN)/matmul_variants: bench/matmul_variants.c src/core/dsv4_matmul.c
+$(BIN)/matmul_variants: bench/matmul_variants.c bench/matmul_experiments.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) -DDSV4_MATMUL_EXPERIMENTS bench/matmul_variants.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) -DDSV4_MATMUL_EXPERIMENTS bench/matmul_variants.c bench/matmul_experiments.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
 $(BIN)/fp4_f32: bench/fp4_f32.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)

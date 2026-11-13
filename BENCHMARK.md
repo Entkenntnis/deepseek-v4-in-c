@@ -770,6 +770,164 @@ carries the bit-exact claim; the old double kernel remains available for a
 direct A/B. If a longer real-checkpoint run shows id drift, reverting is one
 dispatch change.
 
+## FP8 hybrid decode and FP4 mask removal — 2026-11-13
+
+**Question.** After the float-inner change, what is the FP8 kernel actually
+waiting on? `perf` answered that before any code changed.
+
+**Where the cycles were.** `perf record -F 1999` over a
+`--synthetic-kv 1024 --synthetic-experts --cpu-pin p --threads 4` decode
+attributes the compute time to three kernels, not to the model loop:
+
+| symbol | cycles |
+|---|---:|
+| `dsv4_matmul_fp8_f32._omp_fn.0` | **48.6%** |
+| `dsv4_matmul_fp4_avx2._omp_fn.0` | **40.6%** |
+| `dsv4_matmul_bf16_avx2._omp_fn.0` | 6.5% |
+| `dsv4_sparse_attn._omp_fn.0` | 2.9% |
+
+Top-down on the same window put the FP8 kernel at **53.5% core-bound and 3.1%
+memory-bound** (`TopdownL2`); FP4 was **40.1% core-bound and 0.9% memory-bound**.
+Neither kernel is limited by DRAM. `perf annotate` then named the FP8 cost:
+
+| instruction in `dsv4_matmul_fp8_f32` | cycles |
+|---|---:|
+| `vpgatherdd` (16 per 128-weight block) | **42.7%** |
+| `vpmovzxbd` (the eight-byte load feeding each gather) | **19.7%** |
+| the two `vhaddps` + `vcvtss2sd` horizontal reduction | ~16% |
+
+The gather reads a 1 KB L1 table, so this was not a cache miss. The decisive
+counter was `uops_dispatched.load`: **12.7 billion load uops for 300 calls**,
+against 2.9 billion for an arithmetic-decode prototype. That is **1.33 load
+uops per weight** — the kernel was saturating the load ports.
+
+### FP8: a closed-form decode with an exact fallback
+
+E4M3 has 256 codes, but only 18 of them need a table: the eight subnormal
+magnitudes and the two NaNs (times sign). For every normal code the f32 bits are
+
+    0x3C000000 + ((byte & 0x7F) << 20) | sign
+
+so the common case is five integer ops and one load per eight weights, against
+one eight-way gather per eight weights.
+
+The model's weights almost never take the exception: in
+`layers.0.attn.wo_b.weight`, **0.0145% of bytes are subnormal and none are
+NaN**, so a 128-byte block is special-free **98.2%** of the time. The kernel
+scans each block with four `vpcmpeqb` tests and takes the old gather path for
+the other 1.8%. That makes the new path **bitwise identical** to the old one,
+not merely inside its L2 bound.
+
+| `matmul_variants 5 --realistic`, 4 P-cores | wo_b 4096x8192 | wq_b 32768x1024 |
+|---|---:|---:|
+| gather kernel (`f32inner`) | 49.8 GF/s | 51.2 GF/s |
+| **hybrid decode** | **77.9 GF/s** | **78.7 GF/s** |
+| **+ row-block scale precompute** | **81.2 GF/s** | **81.2 GF/s** |
+| speedup | **1.63x** | **1.59x** |
+
+Both hybrid variants compare **bitwise** against `f32inner` in the harness. The
+row-block variant is also bitwise: FP8's scale grid is 128x128, so the same 64
+scale bytes are reused by 128 output rows. Decoding them once per row block
+rather than 128 times removes the `movzbl` that `perf annotate` had put at 15%
+of the kernel's cycles.
+
+**The fallback must not be inlined.** The first hybrid build measured
+**74.4 GF/s**, not 83.5. `perf annotate` showed why: because the rare gather
+body was `static inline`, GCC hoisted its `vpmovzxbd` loads and spilled eight
+YMM registers to the stack *before* the special/not-special branch, so the
+98.2% path paid for the 1.8% path on every block. Marking the fallback
+`__attribute__((noinline))` raised the same kernel from **74.4 to 83.5 GF/s**
+(real tensor, best of 300). The benchmark's committed `--realistic` numbers are
+81.2 because that harness uses synthetic activations and scales; the direction
+and the bitwise check are the same.
+
+`--realistic` is a new mode in `bench/matmul_variants`. Uniform random bytes
+have **6.25% subnormals**, so almost every block would take the fallback and the
+benchmark would measure the wrong path. The mode reproduces the exponent
+histogram measured from the checkpoint (33,554,432 bytes of `wo_b`).
+
+### FP4: two masks that were never needed
+
+`fp4_8` shifted the nibble into a 32-bit lane and then masked with `0x0F`, then
+masked again with `7` before `vpermps`. Neither mask can change a result:
+`vpermps` indexes with the low three bits, and the sign test reads bit 3, which
+the `0x0F` mask left untouched. Removing both is two fewer vector ops per eight
+weights and leaves every output bitwise identical.
+
+| FP4 w2 4096x2048, best of 400 | GF/s |
+|---|---:|
+| before | 65.5 |
+| **after** | **68.5** |
+
+### Full decode, interleaved
+
+`bench/ab.py`, `--gen 30 --budget 8 --synthetic-kv 1024 --synthetic-experts
+--cpu-pin p --threads 4 --readers 6`, four rounds, random order, paired against
+the baseline within each round:
+
+| arm | median s/token | paired delta | ids |
+|---|---:|---:|---|
+| baseline | 0.5414 | — | — |
+| hybrid FP8 | 0.4609 | **−16.15%** | same |
+| **hybrid + row scales** | **0.4441** | **−19.49%** | **same** |
+
+Component medians from the same runs (`ms/pass`):
+
+| | baseline | hybrid | hybrid + row scales |
+|---|---:|---:|---:|
+| attention (FP8) | 244.7 | 190.2 | **169.5** (−30.7%) |
+| shared expert (FP8) | 49.4 | 37.9 | **31.9** (−35.4%) |
+| routed experts (FP4) | 219.8 | 221.2 | **213.8** (−2.7%) |
+| lm head (BF16) | 21.5 | 22.2 | 22.1 |
+| mHC + norms | 7.8 | 7.5 | 7.4 |
+
+With the real expert cache (`--gen 20 --budget 16`, three rounds, random order):
+
+| arm | median s/token | paired delta | ids |
+|---|---:|---:|---|
+| baseline | 0.7150 | — | — |
+| **hybrid + row scales** | **0.6350** | **−10.27%** | **same** |
+
+Attention fell **248.4 → 166.1 ms/pass** and the shared expert **59.3 → 40.0**
+in that run. Exposed expert disk rose from 221.2 to 240.4 ms/pass because there
+is less compute left to overlap it with; total time still fell.
+
+**Verified:** `make test` — every gate passes, including the all-256-E4M3-code
+gate, the 1-thread/8-thread bit-equality gate, and the L2 bound. The new kernel
+is bitwise-identical to the previous production kernel on real weights, so the
+A/B ids are the same for the right reason, not by luck.
+
+### Measured and rejected
+
+| idea | result | why not |
+|---|---:|---|
+| branchless arithmetic decode (no gather at all) | 48.3 vs 51.9 GF/s (**−7%**) | removes 4.3x the load uops but costs 2.7x the instructions (20.4B vs 7.6B for 300 calls); it becomes ALU-bound |
+| `hsum_fast` (add/shuffle instead of two `vhaddps`) | +0.5–1.5% FP8; +1.8% FP4 | changes the summation order (L2 6e-8); not taken since the gain is small and the current path stays bitwise |
+| `#pragma GCC unroll 2` on the 128-wide block loop | 85.1 vs 86.0 GF/s | no gain; the reduction latency is already hidden |
+
+### Where the next change should look
+
+The new profiles, not guesses:
+
+- **FP8 is still 50% backend-bound** (`TopdownL2`: 46.4% retiring, 3.2%
+  memory-bound). `perf annotate` now attributes ~16.5% to the two `vhaddps`
+  and ~12% to the dependent `vcvtss2sd`. The `hsum_fast` experiment shows that
+  replacing the instructions alone is worth little, so the next lever is
+  **interleaving two output rows per block pass**: it would halve the activation
+  loads and give the scheduler a second independent reduction chain. It has not
+  been built, so no number is claimed for it.
+- **FP4 is ALU-bound, not load-bound** (55.9% retiring, 42.6% backend, 1.3%
+  memory). Its decode is already eight ops per eight weights. Further gains
+  need fewer ops or a different representation; more readers or row blocking
+  will not help a kernel with 0.28 load uops per weight.
+- **Remove the per-block special scan** with a bitmap computed at bind time
+  (one bit per 128-byte block, 256 bytes for `wo_b`). The scan itself is ~2.2%
+  of the FP8 kernel now. It needs a field in `DSV4QMat` and one pass over the
+  matrix when it is bound; not built.
+- **BF16 head**: 6.5% of decode cycles, and `widen_x()` still mallocs per call.
+  A thread-local widen buffer is a small, unmeasured candidate; the head is not
+  hot enough to justify changing it without an A/B.
+
 ## Measurement rules this machine earned
 
 - **Do not A/B two 60 s runs back to back and believe a 10% difference.** The
