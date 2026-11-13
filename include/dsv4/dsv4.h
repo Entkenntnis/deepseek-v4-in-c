@@ -205,15 +205,6 @@ typedef struct {
     int         wdt;        /* DSV4_WF32 | DSV4_WBF16 | DSV4_WFP8 | DSV4_WFP4 */
     int         rows, cols; /* LOGICAL element dims                          */
     int         blk_r, blk_c;
-    /* FP8 only, one byte per 128-byte block of `w` -- block (o, b) lives at
-     * special[o * (cols/128) + b]. 1 means that block contains a subnormal,
-     * a zero or a NaN and must take the exact gather decode; 0 means the
-     * closed-form normal decode is valid. NULL means no mask was built and
-     * the kernel falls back to scanning each block.
-     *
-     * NOT OWNED BY THIS STRUCT. A shard bind keeps it inside its blob; a
-     * trunk bind points at the per-layer mask owned by DSV4TrunkLayer. */
-    const uint8_t *special;
 } DSV4QMat;
 
 /* HCA compressor. Present only where compress_ratio != 0 (model.py:466).

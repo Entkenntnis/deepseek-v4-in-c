@@ -174,7 +174,7 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/mask_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants $(BIN)/ctx_kernels $(BIN)/bind_resolve
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants $(BIN)/ctx_kernels $(BIN)/bind_resolve
 bench: $(BENCHBIN)
 
 # Context-scaling kernels: top-k, indexer, sparse attention and mHC, old vs new,
@@ -197,12 +197,6 @@ $(BIN)/matmul_bw: bench/matmul_bw.c bench/matmul_reference.c src/core/dsv4_matmu
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c bench/matmul_reference.c \
 	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
-
-# The FP8 block-special mask, scan vs bind-time bytes, same dsv4_mmq call.
-$(BIN)/mask_bw: bench/mask_bw.c src/core/dsv4_matmul.c
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/mask_bw.c src/core/dsv4_matmul.c \
-	      -o $@ $(LDFLAGS)
 
 $(BIN)/matmul_variants: bench/matmul_variants.c bench/matmul_experiments.c \
                         bench/matmul_reference.c src/core/dsv4_matmul.c
@@ -243,7 +237,7 @@ help:
 	@echo "  make               build everything"
 	@echo "  make test          the gate ladder (the trunk gate needs"
 	@echo "                     DSV4_MODEL and DSV4_TRUNK)"
-	@echo "  make bench         matmul_bw, mask_bw, cache_bw, ctx_kernels"
+	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make tui           build the streaming backend and launch the Python TUI"
 	@echo "  make clean"

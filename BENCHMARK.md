@@ -191,86 +191,6 @@ or for debugging. The ceiling is the miss matmul that used to run after
 `end()`; the remaining exposed I/O is the genuine read tail and will not be
 removed by more overlap alone.
 
-### 2026-11-13 — FP8 special-block mask: one byte per 128-byte block
-
-**Question.** The FP8 row kernel scanned every 128-byte block with four
-`vpcmpeqb`/`vpand`/`vpor`/`vptest` groups before deciding between the closed
-form and the exact gather path. The weights are static, so that answer belongs
-at bind time.
-
-**The earlier size claim in this file was wrong.** "One bit per 128-byte block,
-256 bytes for `wo_b`" confused two different grids. `256 B` is a bit-packed
-mask over 128x128 *tiles* (33.5 MB / 16 KiB / 8). The mask this kernel needs is
-per 128-byte row block: **32 KiB for `wo_b`** when bit-packed, and **256 KiB**
-as the byte-per-block array implemented here. The tile mask is useless because
-a 16 KiB tile contains ~2.4 specials on average, so almost every tile would
-take the slow path.
-
-**What was built.** `DSV4QMat.special` points at one byte per 128-byte block,
-row-major. A shard bind keeps the bytes at the tail of its blob; the trunk
-allocates one array per layer at open and fills it on the first read, so ring
-layers reuse it after eviction. The builder is an eight-byte SWAR test for
-`(b & 0x78) == 0` or `(b & 0x7F) == 0x7F`, i.e. the scalar form of the AVX2
-predicate. `dsv4_mmq` passes the mask to `fp8_rows_impl`; the public
-`dsv4_matmul_fp8` still passes NULL and scans, so the reference path is
-unchanged.
-
-`wo_a` is sliced into `o_groups` row blocks. Its mask is offset by
-`g * gr * (gw / 128)`, not copied unchanged. Copying it was a real bug: groups
-1..7 would have asked group 0's mask, and a block that needed the gather decode
-would have been decoded by the closed form.
-
-**Size, from the real trunk.** 5,857,345,536 B of FP8 weights = 45,760,512
-blocks. 1,178,736 blocks (**2.58 %**) contain a special. None of the 365 FP8
-tensors is all-normal, so a per-matrix `all_normal` flag would never fire. The
-byte array is **45,760,512 B = 43.64 MiB**, i.e. 0.78 % of the FP8 weights and
-0.27 % of a 16 GB budget. Bit-packing would make it 5.46 MiB. In expert-slot
-terms the byte array is **3.4 slots of 12.75 MiB**, which a real-budget run
-does pay for; a bit-packed mask would be less than half a slot. That trade is
-the reason the byte-array choice is called out here rather than hidden in the
-"0.27 %" figure.
-
-**Kernel**, `bin/mask_bw` (same shape, 1.5 % special blocks, 4 P-cores, best of
-200):
-
-| shape | unmasked (scan) | masked | speedup |
-|---|---:|---:|---:|
-| 8192x4096 | 83.8 GF/s | 95.0 GF/s | **1.13x** |
-| 1024x32768 | 81.3 GF/s | 92.3 GF/s | **1.14x** |
-
-At 2.6 % and 5.4 % special blocks the microbench gains are 1.13x and 1.19x.
-The harness checks both paths bitwise on every run; a mask that disagreed with
-the scan would be reported instead of timed.
-
-**Full decode**, five interleaved rounds on the CPU-bound control
-(`--gen 30 --budget 8 --synthetic-kv 1024 --synthetic-experts --pin p
---threads 4 --readers 6`):
-
-| arm | median s/token | vs unmasked | ids |
-|---|---:|---:|---|
-| unmasked | 0.4107 | — | — |
-| **masked** | **0.4069** | **−0.93 %** | same |
-
-Components: attention 174.2 → 172.3 ms/pass, shared expert 32.3 → 31.3. The
-kernel microbench does not translate. In the full model the scan's four loads
-and its integer ops are issued in the shadow of the decode's memory latency and
-are not on the critical path; the sample attribution overstated them. The
-honest full-model gain is **~1 %**, not the 5–7 % the annotate share suggested.
-A second four-rep run measured +0.4 %, so the decode effect is at the edge of
-this machine's noise; the mask's case is the removed branch and the 43.6 MiB
-cost, not a large timing delta.
-
-**Verified:** `test_bindmem` recomputes every mask byte from the scalar
-predicate and compares the shard and trunk paths; `test_trunk` compares masks
-across the two binders; `make test` passes; generated ids are identical in
-every A/B round.
-
-**Decision:** kept for the CPU-bound control, where it is bit-exact and removes
-a branch and four loads per block. If a real-budget run shows the expert cache
-is the binding constraint, the 3.4-slot cost is the first thing to revisit;
-bit-packing the same bytes is a contained follow-up. The next FP8 lever is the
-decode itself: the 16-lane E4M3→FP16 path, not another scan optimisation.
-
 ### 2026-11-13 — FP4: four-block fold and a broadcast decode
 
 **Question.** After the FP8 float-inner and hybrid changes, `perf` put the
@@ -1132,15 +1052,16 @@ A/B ids are the same for the right reason, not by luck.
 
 The profile after the FP4 changes (same synthetic workload), not guesses:
 
-- **FP8 is now co-largest at 39.5%.** The per-block scan is gone: the
-  bind-time byte-per-block mask is implemented, but it moved the full model
-  only ~1 %, because those loads and integer ops were issued in the shadow of
-  the decode's memory latency. The next lever is the **16-lane E4M3→FP16
-  decode**: for normal bytes `bits = ((b & 0x7F) << 7) + 0x2000 | sign`,
-  sixteen weights per iteration, then two `vcvtph2ps`. That is bit-exact for
-  normal blocks and attacks the arithmetic that is actually on the critical
-  path. Interleaving two output rows is still unbuilt and should be judged
-  after it.
+- **FP8 is now co-largest at 39.5%.** It is still backend-bound, and the
+  per-block special scan is **~20% of the FP8 kernel's samples** in this
+  profile: four 32-byte loads plus `vpcmpeqb`/`vpand`/`vpor`/`vptest` for a
+  block that is special-free 98.2% of the time. The first candidate is a
+  **bind-time `all_normal` flag or one-bit-per-128-byte-block bitmap** in
+  `DSV4QMat`. It is bit-exact and removes the scan from the hot loop. The
+  second is the **16-lane E4M3→FP16 decode**: for normal bytes
+  `bits = ((b & 0x7F) << 7) + 0x2000 | sign`, sixteen weights per iteration,
+  then two `vcvtph2ps`. Also bit-exact for normal blocks. Interleaving two
+  output rows is still unbuilt and should be judged after those two.
 - **FP4 is 42.3% and now 89.7/84.9 GF/s** (was 67.3/67.1). The decode is
   seven ops per eight weights after the broadcast change. Further gains need
   fewer ops or a different representation, not more readers or row blocking
