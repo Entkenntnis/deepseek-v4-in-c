@@ -23,8 +23,6 @@ void dsv4_matmul_fp8_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
 void dsv4_matmul_fp4_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
-int  dsv4_matmul_has_avx2(void);
-
 static double now(void)
 {
     struct timespec t;
@@ -39,8 +37,7 @@ int main(int argc, char **argv)
 {
     const int reps = argc > 1 ? atoi(argv[1]) : 20;
 
-    printf("matmul throughput, Flash geometries, AVX2 %s\n",
-           dsv4_matmul_has_avx2() ? "COMPILED IN" : "not available");
+    printf("matmul throughput, Flash geometries, AVX2 COMPILED IN\n");
     printf("%-22s %10s %10s %8s  %s\n",
            "kernel", "scalar", "avx2", "speedup", "agreement");
 

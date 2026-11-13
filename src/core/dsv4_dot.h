@@ -8,21 +8,17 @@
  * double chains, folded in the same (a0+a1)+(a2+a3) tree the matmul uses, turn
  * that into throughput without dropping to f32 accuracy.
  *
- * The scalar path is the definition; the AVX2 path keeps f32 inputs exact
- * (float -> double is lossless) and only changes the order in which the double
- * partial sums are combined. */
+ * The AVX2 path keeps f32 inputs exact (float -> double is lossless) and only
+ * changes the order in which the double partial sums are combined. The build
+ * assumes AVX2+FMA; there is no scalar fallback. */
 #ifndef DSV4_DOT_H
 #define DSV4_DOT_H
 
 #include <math.h>
-
-#if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
-#endif
 
 static inline double dsv4_dot_f32d(const float *a, const float *b, int n)
 {
-#if defined(__AVX2__) && defined(__FMA__)
     __m256d a0 = _mm256_setzero_pd(), a1 = _mm256_setzero_pd();
     __m256d a2 = _mm256_setzero_pd(), a3 = _mm256_setzero_pd();
     int i = 0;
@@ -43,12 +39,6 @@ static inline double dsv4_dot_f32d(const float *a, const float *b, int n)
     for (; i < n; i++)
         acc = fma((double)a[i], (double)b[i], acc);
     return acc;
-#else
-    double acc = 0.0;
-    for (int i = 0; i < n; i++)
-        acc = fma((double)a[i], (double)b[i], acc);
-    return acc;
-#endif
 }
 
 #endif /* DSV4_DOT_H */

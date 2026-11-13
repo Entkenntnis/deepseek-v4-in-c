@@ -30,7 +30,6 @@ void dsv4_matmul_fp8_f32(float *, const float *, const uint8_t *,
 void dsv4_matmul_fp8_f32_hybrid(float *, const float *, const uint8_t *,
                                 const uint8_t *, int, int, int, int);
 
-#if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
 
 static const uint32_t dsv4_e4m3_bits[256] = {
@@ -85,11 +84,7 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
     b = _mm_shuffle_epi8(b, _mm_setr_epi8(0, 0, 1, 1, 2, 2, 3, 3,
                                           -1, -1, -1, -1, -1, -1, -1, -1));
     __m256i idx = _mm256_cvtepu8_epi32(b);
-#if DSV4_FP4_LOW_NIBBLE_FIRST
     const __m256i sh = _mm256_setr_epi32(0, 4, 0, 4, 0, 4, 0, 4);
-#else
-    const __m256i sh = _mm256_setr_epi32(4, 0, 4, 0, 4, 0, 4, 0);
-#endif
     idx = _mm256_srlv_epi32(idx, sh);
     const __m256 mag = _mm256_permutevar8x32_ps(
         _mm256_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f), idx);
@@ -504,11 +499,7 @@ static inline __m256 fp4_8_lut(const uint8_t *row, int64_t base)
     b = _mm_shuffle_epi8(b, _mm_setr_epi8(0, 0, 1, 1, 2, 2, 3, 3,
                                           -1, -1, -1, -1, -1, -1, -1, -1));
     __m256i idx = _mm256_cvtepu8_epi32(b);
-#if DSV4_FP4_LOW_NIBBLE_FIRST
     const __m256i sh = _mm256_setr_epi32(0, 4, 0, 4, 0, 4, 0, 4);
-#else
-    const __m256i sh = _mm256_setr_epi32(4, 0, 4, 0, 4, 0, 4, 0);
-#endif
     idx = _mm256_and_si256(_mm256_srlv_epi32(idx, sh),
                            _mm256_set1_epi32(0x0F));
     return _mm256_i32gather_ps(dsv4_e2m1_lut, idx, 4);
@@ -729,5 +720,3 @@ void dsv4_matmul_fp8_dt(float *y, const float *x, const uint8_t *W,
 }
 
 #endif /* DSV4_MATMUL_EXPERIMENTS */
-
-#endif /* __AVX2__ && __FMA__ */

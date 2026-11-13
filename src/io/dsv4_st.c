@@ -358,7 +358,7 @@ static int scan_shard(DSV4St *s, Build *b, int shard, const char *path)
      * falls back to fd[]. */
     if (s->dfd) {
         s->dfd[shard] = open(path, O_RDONLY | O_DIRECT);
-        dsv4_set_direct(s->dfd[shard]);   /* no-op off Darwin; advisory, failure is fine */
+        dsv4_set_direct(s->dfd[shard]);   /* no-op on Linux; advisory, failure is fine */
     }
     return ntensor;
 bad:

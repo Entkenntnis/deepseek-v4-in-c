@@ -14,13 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
-#if defined(__linux__)
 #include <sched.h>
-#endif
 
 #include "dsv4_threads.h"
 
@@ -33,10 +29,8 @@
 static DSV4ThreadOpts g_opt;
 static char g_desc[192] = "threads: inherited";
 
-#if defined(__linux__)
 static cpu_set_t g_orig;
 static int       g_have_orig;
-#endif
 
 int dsv4_threads_parse_pin(const char *s)
 {
@@ -46,8 +40,6 @@ int dsv4_threads_parse_pin(const char *s)
     if (!strcmp(s, "e") || !strcmp(s, "ecores")) return DSV4_PIN_E;
     return -1;
 }
-
-#if defined(__linux__)
 
 static const char *pin_name(int p)
 {
@@ -88,16 +80,11 @@ static void mask_str(const cpu_set_t *m, char *out, size_t cap)
             n += (size_t)snprintf(out + n, cap - n, "%s%d", n ? "," : "", c);
 }
 
-#endif /* __linux__ */
-
 int dsv4_threads_apply(const DSV4ThreadOpts *o)
 {
     g_opt = *o;
-#ifdef _OPENMP
     if (o->threads > 0) omp_set_num_threads(o->threads);
-#endif
 
-#if defined(__linux__)
     inherited_mask(&g_orig);
     g_have_orig = 1;
 
@@ -128,11 +115,7 @@ int dsv4_threads_apply(const DSV4ThreadOpts *o)
     }
 
     int nth = o->threads;
-#ifdef _OPENMP
     if (nth <= 0) nth = omp_get_max_threads();
-#else
-    if (nth <= 0) nth = 1;
-#endif
 
     snprintf(g_desc, sizeof g_desc,
              "threads: compute %d on CPUs %s%s, readers %d%s",
@@ -141,12 +124,6 @@ int dsv4_threads_apply(const DSV4ThreadOpts *o)
              o->reader_pin == DSV4_PIN_OFF ? ""
                  : (o->reader_pin == DSV4_PIN_E ? " on E-cores"
                                                 : " on their own group"));
-#else
-    snprintf(g_desc, sizeof g_desc,
-             "threads: no Linux affinity support, compute %d, readers %d",
-             o->threads > 0 ? o->threads : 1,
-             o->readers > 0 ? o->readers : 6);
-#endif
 
     fprintf(stderr, "%s\n", g_desc);
     return 0;
@@ -154,7 +131,6 @@ int dsv4_threads_apply(const DSV4ThreadOpts *o)
 
 void dsv4_threads_pin_current_reader(void)
 {
-#if defined(__linux__)
     if (!g_have_orig || g_opt.reader_pin == DSV4_PIN_OFF) return;
 
     cpu_set_t want;
@@ -167,7 +143,6 @@ void dsv4_threads_pin_current_reader(void)
     if (CPU_COUNT(&want) == 0) return;
     if (sched_setaffinity(0, sizeof want, &want) != 0)
         perror("dsv4_threads: reader sched_setaffinity");
-#endif
 }
 
 const char *dsv4_threads_desc(void)

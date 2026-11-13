@@ -74,9 +74,7 @@ void dsv4_indexer_score(float *out, const float *q, const float *kv,
      * Parallelising over t therefore changes no reduction order and cannot
      * change a result, which is why this one is unconditional above a small
      * threshold. The dot itself uses the shared 4-lane double tree. */
-#ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (n_pos > 32)
-#endif
     for (int t = 0; t < n_pos; t++) {
         const float *kt = kv + (size_t)t * head_dim;
         double total = 0.0;

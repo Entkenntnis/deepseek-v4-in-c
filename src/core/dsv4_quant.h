@@ -43,7 +43,6 @@
  *       sign/exponent/mantissa     | seem : seem
  *
  *   val0 -- the FIRST, even-indexed element -- is bits 3..0, the LOW nibble.
- *   So DSV4_FP4_LOW_NIBBLE_FIRST = 1 is correct.
  *
  *   This was worth pinning down rather than assuming. Getting it wrong swaps
  *   adjacent weights within every pair, and the value HISTOGRAM is unchanged,
@@ -64,7 +63,6 @@
 /* val0 (even element) is the LOW nibble. Established from PyTorch's own
  * Float4_e2m1fn_x2.h, which is normative here because the checkpoint was
  * written by PyTorch into that dtype. See the header note above. */
-#define DSV4_FP4_LOW_NIBBLE_FIRST 1
 
 /* ------------------------------------------------------------ E8M0 scale ---
  * 2^(b-127), exponent only. Built by bit assembly rather than by ldexp so the
@@ -155,11 +153,7 @@ static inline float dsv4_e2m1_to_f32(uint8_t nibble)
 static inline float dsv4_fp4_at(const uint8_t *row, int64_t i)
 {
     const uint8_t byte = row[i >> 1];
-#if DSV4_FP4_LOW_NIBBLE_FIRST
     const uint8_t nib = (i & 1) ? (uint8_t)(byte >> 4) : (uint8_t)(byte & 0x0Fu);
-#else
-    const uint8_t nib = (i & 1) ? (uint8_t)(byte & 0x0Fu) : (uint8_t)(byte >> 4);
-#endif
     return dsv4_e2m1_lut[nib];
 }
 

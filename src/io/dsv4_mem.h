@@ -11,15 +11,12 @@
  * memory between this call and the allocations that follow, which is why the
  * caller keeps a reserve on top of it.
  *
- * Non-Linux has no MemAvailable in a portable file; sysconf's available-page
- * count is the closest equivalent and is what this falls back to.
+ * The engine targets Linux and reads MemAvailable from /proc/meminfo.
  */
 #ifndef DSV4_MEM_H
 #define DSV4_MEM_H
 
 #include <stdint.h>
-
-#if defined(__linux__)
 #include <stdio.h>
 
 static int64_t dsv4_mem_available_bytes(void)
@@ -37,16 +34,5 @@ static int64_t dsv4_mem_available_bytes(void)
     if (kb < 0) return -1;
     return (int64_t)kb * 1024;
 }
-#else
-#include <unistd.h>
-
-static int64_t dsv4_mem_available_bytes(void)
-{
-    const long pages = sysconf(_SC_AVPHYS_PAGES);
-    const long psz   = sysconf(_SC_PAGESIZE);
-    if (pages <= 0 || psz <= 0) return -1;
-    return (int64_t)pages * (int64_t)psz;
-}
-#endif
 
 #endif /* DSV4_MEM_H */

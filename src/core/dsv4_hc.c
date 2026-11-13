@@ -38,9 +38,7 @@
 #include "dsv4.h"
 #include "dsv4_dot.h"
 
-#if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
-#endif
 
 static inline float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
 
@@ -135,7 +133,6 @@ void dsv4_hc_pre(float *y, float *post, float *comb, float *mixes,
     dsv4_hc_split_sinkhorn(pre, post, comb, mixes, w->scale, w->base,
                            hc, iters, hc_eps);
 
-#if defined(__AVX2__) && defined(__FMA__)
     __m256d pv[DSV4_MAX_HC_MULT];
     for (int j = 0; j < hc; j++) pv[j] = _mm256_set1_pd((double)pre[j]);
     int d = 0;
@@ -153,14 +150,6 @@ void dsv4_hc_pre(float *y, float *post, float *comb, float *mixes,
             acc += (double)pre[j] * (double)x[(size_t)j * hidden + d];
         y[d] = (float)acc;
     }
-#else
-    for (int d = 0; d < hidden; d++) {
-        double acc = 0.0;
-        for (int j = 0; j < hc; j++)
-            acc += (double)pre[j] * (double)x[(size_t)j * hidden + d];
-        y[d] = (float)acc;
-    }
-#endif
 }
 
 /* Expand one stream back to hc.
@@ -174,7 +163,6 @@ void dsv4_hc_post(float *y, const float *x, const float *residual,
 {
     for (int k = 0; k < hc; k++) {
         float *out = y + (size_t)k * hidden;
-#if defined(__AVX2__) && defined(__FMA__)
         const __m256d pk = _mm256_set1_pd((double)post[k]);
         __m256d cv[DSV4_MAX_HC_MULT];
         for (int j = 0; j < hc; j++)
@@ -196,14 +184,5 @@ void dsv4_hc_post(float *y, const float *x, const float *residual,
                      * (double)residual[(size_t)j * hidden + d];
             out[d] = (float)acc;
         }
-#else
-        for (int d = 0; d < hidden; d++) {
-            double acc = (double)post[k] * (double)x[d];
-            for (int j = 0; j < hc; j++)
-                acc += (double)comb[j * hc + k]
-                     * (double)residual[(size_t)j * hidden + d];
-            out[d] = (float)acc;
-        }
-#endif
     }
 }

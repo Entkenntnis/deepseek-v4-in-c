@@ -33,8 +33,6 @@ void dsv4_matmul_fp4(float *, const float *, const uint8_t *, const uint8_t *,
                      int, int, int, int);
 void dsv4_matmul_fp4_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
-int  dsv4_matmul_has_avx2(void);
-
 static double now(void)
 {
     struct timespec t;
@@ -219,10 +217,6 @@ int main(int argc, char **argv)
            "ratio %.2fx\n", p32, p64, p32 / p64);
 
 #if defined(__AVX2__) && defined(__FMA__)
-    if (!dsv4_matmul_has_avx2()) {
-        printf("  AVX2 not available at runtime; cannot run the kernel test\n");
-        return 0;
-    }
     printf("\nFP4 expert matmul, production float-inner kernel\n");
     run_shape("fp4 expert w1 2048x4096", 4096, 2048, reps);
     run_shape("fp4 expert w2 4096x2048", 2048, 4096, reps);

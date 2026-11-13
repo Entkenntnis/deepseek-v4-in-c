@@ -62,9 +62,11 @@ $(BIN)/test_quant: tests/unit/test_quant.c src/core/dsv4_quant.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_quant.c -o $@ $(LDFLAGS)
 
-$(BIN)/test_matmul: tests/unit/test_matmul.c src/core/dsv4_matmul.c                     src/core/dsv4_quant.h include/dsv4/dsv4.h
+$(BIN)/test_matmul: tests/unit/test_matmul.c src/core/dsv4_matmul.c \
+                    bench/matmul_reference.c src/core/dsv4_quant.h include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) tests/unit/test_matmul.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) tests/unit/test_matmul.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
 $(BIN)/test_ops: tests/unit/test_ops.c src/core/dsv4_ops.c include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
@@ -191,25 +193,31 @@ $(BIN)/bind_resolve: bench/bind_resolve.c src/io/dsv4_trunk.c src/io/dsv4_st.c \
 	$(CC) $(CFLAGS) $(INCS) bench/bind_resolve.c src/io/dsv4_trunk.c \
 	      src/io/dsv4_st.c src/model/dsv4_bind.c -o $@ $(LDFLAGS)
 
-$(BIN)/matmul_bw: bench/matmul_bw.c src/core/dsv4_matmul.c
+$(BIN)/matmul_bw: bench/matmul_bw.c bench/matmul_reference.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) bench/matmul_bw.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
-$(BIN)/matmul_variants: bench/matmul_variants.c bench/matmul_experiments.c src/core/dsv4_matmul.c
+$(BIN)/matmul_variants: bench/matmul_variants.c bench/matmul_experiments.c \
+                        bench/matmul_reference.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) -DDSV4_MATMUL_EXPERIMENTS bench/matmul_variants.c bench/matmul_experiments.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) -DDSV4_MATMUL_EXPERIMENTS bench/matmul_variants.c \
+	      bench/matmul_experiments.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
-$(BIN)/fp4_f32: bench/fp4_f32.c src/core/dsv4_matmul.c
+$(BIN)/fp4_f32: bench/fp4_f32.c bench/matmul_reference.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/fp4_f32.c src/core/dsv4_matmul.c 	      -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) bench/fp4_f32.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
 $(BIN)/cache_bw: bench/cache_bw.c src/cache/dsv4_cache.c src/io/dsv4_st.c src/core/dsv4_threads.c
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) bench/cache_bw.c src/cache/dsv4_cache.c 	      src/io/dsv4_st.c src/core/dsv4_threads.c -o $@ $(LDFLAGS)
 
-$(BIN)/fp8_decode: bench/fp8_decode.c src/core/dsv4_matmul.c
+$(BIN)/fp8_decode: bench/fp8_decode.c bench/matmul_reference.c src/core/dsv4_matmul.c
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) bench/fp8_decode.c src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) bench/fp8_decode.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
 # The decode-rate baseline from BENCHMARK.md. Three runs at ~60 s each is the
 # price of a number this machine can be held to.

@@ -47,7 +47,6 @@ void dsv4_matmul_fp8_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
 void dsv4_matmul_fp4_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
-int  dsv4_matmul_has_avx2(void);
 #if defined(__AVX2__) && defined(__FMA__)
 /* The float-inner gather reference (the production path of the previous
  * release, still exported for A/B). The new production path must agree with it
@@ -152,7 +151,7 @@ int main(void)
         static float x[IN], y[OUT];
 
         /* Every nibble = code 2 = 1.0, so both nibble orders agree here and this
-         * gate is independent of DSV4_FP4_LOW_NIBBLE_FIRST. */
+         * gate is independent of the nibble order. */
         memset(W, 0x22, sizeof W);
         S[0] = 127; S[1] = 128;              /* row 0: scales 1, 2 */
         S[2] = 127; S[3] = 127;              /* row 1: scales 1, 1 */
@@ -312,8 +311,7 @@ int main(void)
         for (size_t i = 0; i < sizeof S8; i++) S8[i] = 127;
         for (size_t i = 0; i < sizeof S4; i++) S4[i] = 127;
 
-        printf("  build has AVX2+FMA: %s\n",
-               dsv4_matmul_has_avx2() ? "yes" : "no (paths are the same code)");
+        printf("  build has AVX2+FMA: yes\n");
 
         dsv4_matmul_bf16_scalar(ys, x, Wb, IN, OUT);
         dsv4_matmul_bf16(yv, x, Wb, IN, OUT);

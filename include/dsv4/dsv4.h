@@ -66,6 +66,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* The engine assumes AVX2+FMA and no longer carries scalar fallbacks. Fail at
+ * the first include rather than compile a kernel that cannot run. */
+#if !defined(__AVX2__) || !defined(__FMA__)
+#error "dsv4 requires AVX2 and FMA; build with -mavx2 -mfma or -march=native on a capable CPU"
+#endif
+
 /* Bounds the fixed-size routing arrays. Both released models use top-6. */
 #define DSV4_MAX_TOPK      16
 

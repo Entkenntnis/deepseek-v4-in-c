@@ -36,10 +36,6 @@
 
 #include "dsv4.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
 /* YaRN correction range, verbatim from find_correction_dim/find_correction_range.
  * NOTE the argument order at the call site: beta_fast is passed as low_rot and
  * beta_slow as high_rot. find_correction_dim decreases in num_rotations, so with

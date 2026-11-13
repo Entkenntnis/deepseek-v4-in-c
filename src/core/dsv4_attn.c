@@ -61,9 +61,7 @@ void dsv4_sparse_attn(float *o, const float *q, const float *kv,
                       const float *sink, const int *idxs,
                       int h, int d, int topk, float scale, float *scratch)
 {
-#ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (h > 4)
-#endif
     for (int i = 0; i < h; i++) {
         float *s = scratch + (size_t)i * topk;
         const float *qi = q + (size_t)i * d;

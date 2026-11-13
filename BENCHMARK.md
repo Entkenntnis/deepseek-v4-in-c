@@ -713,9 +713,10 @@ fixtures are not installed on this machine, so those were not run.
 
 **Change:** the production AVX2 FP8 GEMV now forms each 128-wide scale block's
 dot product with 8-lane float FMAs and folds the block once in double — the same
-shape FP4 adopted on 2026-11-12. The old double kernel stays in the build as
-`dsv4_matmul_fp8_avx2` so `bench/matmul_variants` can A/B the two; the public
-`dsv4_matmul_fp8` is the new path. It is **not** bitwise-equal to the scalar
+shape FP4 adopted on 2026-11-12. The old double kernel now lives in
+`bench/matmul_reference.c` as `dsv4_matmul_fp8_avx2`, so `bench/matmul_variants`
+can A/B the two; the public `dsv4_matmul_fp8` is the new path. It is **not**
+bitwise-equal to the scalar
 double reference; `test_matmul` now bounds the L2 relative error at `1e-6`
 (measured `8–10e-8`), exactly as it already did for FP4.
 
