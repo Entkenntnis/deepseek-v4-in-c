@@ -1,12 +1,12 @@
 # dsv4 TUI
 
 A dependency-free Python TUI for `deepseek-v4-in-c`. It keeps the engine
-resident and shows the conversation next to a live throughput timeline. The
-panel is currently being reworked: it keeps one unified prefill/decode tok/s
-graph with tok/s and seconds-per-token numbers in its header, plus live RSS,
-available memory, cache-hit rate, disk-read, CPU-inflow, per-core CPU use and
-temperature stats below it. The profiler split and top-k counters are still sent
-by the engine but are not drawn yet.
+resident and shows the conversation next to a live decode tok/s graph. The
+graph appears only while tokens are decoding and carries tok/s and
+seconds-per-token numbers in its header; live RSS, available memory, cache-hit
+rate, disk-read, CPU-inflow, per-core CPU use and temperature stats sit below
+it, and prefill progress is shown separately. The profiler split and top-k
+counters are still sent by the engine but are not drawn yet.
 
 ```
 make tui               # builds bin/dsv4-serve, then launches the TUI
@@ -89,10 +89,12 @@ Batched prefill is layer-major, so it does not emit one `layer` event per
 prompt token. Instead the engine emits `prefill` progress events carrying the
 stage (`chunk`, `layer`, `chunk_done`, `head`), chunk/layer counters, an
 estimated progress fraction and the same live `sys`/`cache`/`trunk` blocks as
-a layer event. The panel puts a **PREFILL** section above THROUGHPUT with the
-current stage and a progress bar; MEMORY keeps updating from the same events,
-so cache-hit and disk readout move during the prompt. The prompt-only timer
-also arrives on the first `token` event, and the transcript gets a
+a layer event. While the prompt runs, the panel shows a **PREFILL** section with
+the current stage, a progress bar on its own line and the percentage, elapsed
+time and rate on the next line; MEMORY keeps updating from the same events, so
+cache-hit and disk readout move during the prompt. The DECODE section appears
+only once the first token has been decoded. The prompt-only timer also arrives on
+the first `token` event, and the transcript gets a
 `prefill: N tokens in T s (tok/s, s/token; batch N|per-token)` line before the
 assistant bubble.
 
@@ -166,21 +168,19 @@ prompt in the KV state.
 
 ## Reading the panel
 
-The right-hand panel currently starts with a throughput timeline and keeps the
-live resource numbers that are useful while the model runs:
+The right-hand panel keeps the live resource numbers that are useful while the
+model runs, plus a decode graph while a turn is generating tokens:
 
-* **THROUGHPUT** — one graph of **tok/s**, shared by prompt prefill (cyan) and
-  decode (green). Prompt tokens are placed before generated tokens, so the
-  hand-off from prefill to decode is visible instead of being two unrelated
-  charts. The graph is right-aligned and scrolls left as new tokens arrive, and
-  uses a linear axis with round labels (0, 0.25, 0.5, 0.75, 1.0, 1.25, …). The
-  colour legend is right-aligned below the graph.
-* **readout** — the latest speed sits on the `THROUGHPUT` line as
-  `xx tok/s (xx s/tok)`. There are no prefill/decode sample counts.
+* **DECODE** — a graph of **tok/s** for generated tokens only. It appears while
+  the turn is decoding and disappears during prefill and while idle. The graph
+  is right-aligned and scrolls left as new tokens arrive, and uses a linear axis
+  with round labels (0, 0.25, 0.5, 0.75, 1.0, 1.25, …).
+* **readout** — the latest decode speed sits on the `DECODE` line as
+  `xx tok/s (xx s/tok)`.
 * **decode-avg** — the mean of every decode sample in the current turn, shown
-  directly under `THROUGHPUT` in the same `xx tok/s (xx s/tok)` form. The
+  directly under `DECODE` in the same `xx tok/s (xx s/tok)` form. The
   `tok/s` value is highlighted in pink because it is the number to watch.
-* **MEMORY** — below the graph:
+* **MEMORY** — below the PREFILL/DECODE area:
   * **RSS / avail** — current resident set size and `MemAvailable` from
     `/proc/meminfo`, on the same line. Peak RSS is omitted because it barely
     moves after the checkpoint loads.
@@ -195,15 +195,11 @@ live resource numbers that are useful while the model runs:
   `Package`, `Tctl`/`Tdie`, then `x86_pkg_temp`). Temperature shows `n/a` when
   no CPU sensor is exposed by sysfs.
 
-Prefill timings come from the per-layer events: every prompt position is one
-forward, so the difference between consecutive prompt-position timestamps is
-that token's latency. With `/layers off` the graph still shows decode, and the
-readout falls back to the aggregate `ttft / prompt_tokens`.
-
 The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
-graph update on each token event. The trunk hit rate, profiler split and top-k
-counters are still collected and sent by `bin/dsv4-serve`, but are not drawn
-while this panel is being reworked.
+graph update on each token event. While prefill runs, the PREFILL progress
+lines update; the DECODE section appears once the first token is decoded. The
+trunk hit rate, profiler split and top-k counters are still collected and sent
+by `bin/dsv4-serve`, but are not drawn while this panel is being reworked.
 
 ## Caveats
 

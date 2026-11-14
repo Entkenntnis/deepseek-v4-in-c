@@ -5,7 +5,7 @@
 The engine is 1.6-2.2 s/token on the reference machine, so the interesting part
 of a chat turn is not only the text: it is how fast prefill hands over to
 decode. This script keeps bin/dsv4-serve resident, streams its JSON events, and
-paints the conversation next to a unified tok/s timeline and the live memory,
+paints the conversation next to a decode tok/s timeline and the live memory,
 expert-cache and disk rates while the model runs. The panel is still being
 reworked: the engine's profiler split and top-k counters are not drawn yet.
 
@@ -46,6 +46,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    from markdown_render import RICH_AVAILABLE, RICH_ERROR, Span, render_markdown
+except ImportError:  # running as `python3 -m tui.dsv4_tui`
+    from .markdown_render import (RICH_AVAILABLE, RICH_ERROR, Span,
+                                  render_markdown)
 
 # ----------------------------------------------------------------- defaults --
 
@@ -117,6 +123,43 @@ def axis_label(value: float, step: float) -> str:
     if step < 1.0 and abs(value - round(value)) < 1e-9:
         return "0" if abs(value) < 1e-9 else f"{value:.1f}"
     return f"{value:g}"
+
+
+# xterm's first 16 colours. Rich downgrades named/true colours to an xterm-256
+# index, but a terminal with only 8 or 16 colours needs one more step down.
+_XTERM_STD = (
+    (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+    (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+    (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+    (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+)
+
+
+def _xterm_rgb(n: int) -> tuple[int, int, int]:
+    n = int(n)
+    if 0 <= n < 16:
+        return _XTERM_STD[n]
+    if 16 <= n < 232:
+        n -= 16
+        levels = (0, 95, 135, 175, 215, 255)
+        return levels[(n // 36) % 6], levels[(n // 6) % 6], levels[n % 6]
+    if 232 <= n < 256:
+        v = 8 + (n - 232) * 10
+        return v, v, v
+    return 0, 0, 0
+
+
+def _dist2(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+            + (a[2] - b[2]) ** 2)
+
+
+def _nearest_basic(rgb: tuple[int, int, int], n: int) -> int:
+    return min(range(max(1, min(n, 16))), key=lambda i: _dist2(rgb, _XTERM_STD[i]))
+
+
+def _rgb_to_xterm(rgb: tuple[int, int, int]) -> int:
+    return min(range(256), key=lambda i: _dist2(rgb, _xterm_rgb(i)))
 
 
 # ------------------------------------------------------------------ backend --
@@ -514,6 +557,8 @@ class Message:
     text: str = ""
     think: bool = False
     meta: dict = field(default_factory=dict)
+    md_cache_key: tuple = ()
+    md_cache_lines: list[list[Span]] = field(default_factory=list)
 
 
 class App:
@@ -561,17 +606,9 @@ class App:
         self.context_used = 0
         self.context_cap = args.ctx
         self.turn_start = 0.0
-        self.gen_t = 0.0
         self.last_token_t = 0.0
-        # One duration per token, in turns. Prefill samples are measured from
-        # the prompt layer events; decode samples from token event deltas.
-        self.prefill_spt: deque[float] = deque(maxlen=4096)
+        # One duration per decoded token, in turns.
         self.decode_spt: deque[float] = deque(maxlen=4096)
-        self.prefill_pos: Optional[int] = None
-        self.prefill_prev_t = 0.0
-        self.prefill_done = False
-        self.prefill_total_s = 0.0
-        self.prefill_tokens = 0
         self.prefill_batch = int(getattr(args, "prefill_batch_size", 0) or 0)
         self.prefill_progress: dict = {}
         self.prefill_active = False
@@ -597,6 +634,11 @@ class App:
         self.last_render = 0.0
         self.demo = bool(args.demo)
         self.pairs: dict[str, int] = {}
+        self.markdown_enabled = not args.no_markdown
+        self.md_warned = False
+        self._pair_cache: dict[tuple[int, int], int] = {}
+        self._color_cache: dict[Any, int] = {}
+        self._next_pair = 1
 
     # -- backend lifecycle -------------------------------------------------
     def start_backend(self) -> None:
@@ -868,6 +910,12 @@ class App:
                     f"({cache.get('resident_gb', 0):+.2f} GB), "
                     f"trunk {trunk.get('pinned', '?')} pinned. "
                     f"Context {self.context_cap} tokens."))
+                if self.markdown_enabled and not RICH_AVAILABLE and not self.md_warned:
+                    self.md_warned = True
+                    self.add_system(
+                        "Markdown rendering is off because rich is not installed. "
+                        "Install it with: python3 -m pip install -r "
+                        "tui/requirements.txt  (or run /markdown off to hide this)")
             if self.status in ("starting", "waiting"):
                 self.status = "ready"
             self.dirty = True
@@ -882,17 +930,9 @@ class App:
             self.context_cap = int(ev.get("context_cap") or self.context_cap)
             self.context_used = int(ev.get("pos") or 0) + self.prompt_tokens
             self.turn_start = time.monotonic()
-            self.gen_t = 0.0
             self.last_token_t = 0.0
-            self.prefill_spt.clear()
-            # decode_spt is cleared on the first decoded token, not here: the
-            # DECODE numbers should stay on the last turn's value while the
-            # prompt is prefilling.
-            self.prefill_pos = None
-            self.prefill_prev_t = 0.0
-            self.prefill_done = False
-            self.prefill_total_s = 0.0
-            self.prefill_tokens = self.prompt_tokens
+            # decode_spt is cleared on the first decoded token, so the graph
+            # only ever covers the current turn's decode.
             self.prefill_batch = int(ev.get("prefill_batch") or 0)
             self.prefill_progress = {}
             self.prefill_active = self.prefill_batch > 1
@@ -913,27 +953,12 @@ class App:
         elif name == "layer":
             self.current_layer = int(ev.get("layer") or 0) + 1
             self.phase = ev.get("phase", "")
-            self.gen_t = float(ev.get("t") or 0.0)
-            # A prompt position's first layer carries the forward's start time.
-            # When the next position starts, the difference is that prompt
-            # token's latency, which is what the prefill graph plots.
-            if self.phase == "prompt":
-                pos = int(ev.get("pos") or 0)
-                if pos != self.prefill_pos:
-                    if self.prefill_pos is not None:
-                        dt = self.gen_t - self.prefill_prev_t
-                        if dt > 1e-6:
-                            self.prefill_spt.append(dt)
-                    self.prefill_pos = pos
-                    self.prefill_prev_t = self.gen_t
             self.dirty = True
 
         elif name == "prefill":
             self.prefill_progress = ev
             self.prefill_active = True
             self.prefill_batch = int(ev.get("batch") or self.prefill_batch or 0)
-            self.prefill_tokens = int(ev.get("tokens_total") or self.prompt_tokens or 0)
-            self.prefill_total_s = float(ev.get("elapsed") or self.prefill_total_s)
             self.current_layer = int(ev.get("layer") or self.current_layer)
             self.phase = "prompt"
             self.stats_force = True
@@ -950,15 +975,10 @@ class App:
             t = float(ev.get("t") or 0.0)
             ttft = float(ev.get("ttft") or self.ttft)
             if index == 0:
-                # Start the decode average fresh now that prompt work is done.
+                # The first decoded token switches the panel from PREFILL to
+                # DECODE; start the decode average fresh.
+                self.phase = "gen"
                 self.decode_spt.clear()
-                # The last prompt token completes at ttft; the previous
-                # positions were closed when the next position started.
-                if (self.prefill_pos is not None and not self.prefill_done
-                        and ttft > self.prefill_prev_t):
-                    self.prefill_spt.append(ttft - self.prefill_prev_t)
-                self.prefill_done = True
-                self.prefill_total_s = ttft
                 ps = float(ev.get("prefill_s") or 0.0)
                 pt = int(ev.get("prefill_tokens") or self.prompt_tokens or 0)
                 if ps > 0.0 and pt > 0:
@@ -1000,10 +1020,7 @@ class App:
             self.status = "ready"
             self.context_used = 0
             self.current_msg = None
-            self.prefill_spt.clear()
             self.decode_spt.clear()
-            self.prefill_done = False
-            self.prefill_total_s = 0.0
             self.prefill_active = False
             self.prefill_progress = {}
             self.stats_force = True
@@ -1130,6 +1147,7 @@ class App:
                 "  /think [on|off]       toggle thinking mode for the next turn\n"
                 "  /gen N                max tokens per turn\n"
                 "  /layers [on|off]      stream per-layer progress events\n"
+                "  /markdown [on|off]    Markdown rendering (rich, optional)\n"
                 "  /stats                ask the engine for a fresh snapshot\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
@@ -1143,10 +1161,7 @@ class App:
             self.generating = False
             self.status = "ready"
             self.context_used = 0
-            self.prefill_spt.clear()
             self.decode_spt.clear()
-            self.prefill_done = False
-            self.prefill_total_s = 0.0
             self.stats_force = True
             self.add_system("context reset; expert cache stays warm")
         elif cmd == "/clear":
@@ -1189,6 +1204,19 @@ class App:
             else:
                 self.show_layers = not self.show_layers
             self.add_system(f"layer events {'on' if self.show_layers else 'off'}")
+        elif cmd == "/markdown":
+            if arg.lower() in ("on", "1", "true", "yes"):
+                self.markdown_enabled = True
+            elif arg.lower() in ("off", "0", "false", "no"):
+                self.markdown_enabled = False
+            else:
+                self.markdown_enabled = not self.markdown_enabled
+            if self.markdown_enabled and not RICH_AVAILABLE:
+                self.add_system("Markdown needs rich: python3 -m pip install -r "
+                                "tui/requirements.txt")
+            else:
+                self.add_system(f"Markdown rendering "
+                                f"{'on' if self.markdown_enabled else 'off'}")
         elif cmd == "/stats":
             if self.backend_alive:
                 self.backend.send({"cmd": "stats"})
@@ -1400,9 +1428,15 @@ class App:
             out.append(raw)
         return out
 
-    def chat_lines(self, width: int) -> list[list[tuple[str, str]]]:
-        """Build the transcript as lines of (text, colour) segments."""
-        lines: list[list[tuple[str, str]]] = []
+    def chat_lines(self, width: int) -> list[list[Span]]:
+        """Build the transcript as lines of styled spans.
+
+        Each line is a list because Markdown can put several styles on one line
+        (e.g. a paragraph containing *italic* and **bold**). The speaker prefix
+        is a named span so it keeps the role colour even when the body is
+        Markdown.
+        """
+        lines: list[list[Span]] = []
         for msg in self.messages:
             if msg.role == "user":
                 label, color = "you", "user"
@@ -1424,12 +1458,31 @@ class App:
                 reasoning = reasoning.strip()
                 if reasoning:
                     for ln in self._wrap(reasoning, width - 4):
-                        lines.append([("    " + ln, "reasoning")])
+                        lines.append([Span("    " + ln, named="reasoning")])
                     lines.append([])
 
-            for i, ln in enumerate(self._wrap(body, width - 4)):
-                prefix = f"{label} › " if i == 0 else "    "
-                lines.append([(prefix + ln, color)])
+            use_md = (msg.role == "assistant" and self.markdown_enabled
+                      and RICH_AVAILABLE)
+            if use_md:
+                md_width = max(10, width - 4)
+                # The body only grows while streaming, so (length, width) is a
+                # sufficient cache key for this prototype.
+                key = (len(body), md_width)
+                if msg.md_cache_key != key:
+                    rendered = render_markdown(body, md_width) if body else None
+                    if rendered is None:
+                        rendered = [[Span(ln)] for ln in self._wrap(body, md_width)]
+                    msg.md_cache_lines = rendered
+                    msg.md_cache_key = key
+                md_lines = msg.md_cache_lines or [[]]
+                for i, spans in enumerate(md_lines):
+                    prefix = Span(f"{label} › " if i == 0 else "    ",
+                                  named=color)
+                    lines.append([prefix] + list(spans))
+            else:
+                for i, ln in enumerate(self._wrap(body, width - 4)):
+                    prefix = f"{label} › " if i == 0 else "    "
+                    lines.append([Span(prefix + ln, named=color)])
 
             if msg.meta:
                 m = msg.meta
@@ -1438,7 +1491,7 @@ class App:
                         f"{float(m.get('s_per_token') or 0):.2f} s/tok · "
                         f"ttft {float(m.get('ttft') or 0):.1f}s · "
                         f"{m.get('stop', '')}")
-                lines.append([("    " + meta, "dim")])
+                lines.append([Span("    " + meta, named="dim")])
             lines.append([])
         return lines
 
@@ -1455,19 +1508,19 @@ class App:
         # Right-align the transcript to the bottom while it fits, so a new chat
         # starts at the bottom edge rather than floating at the top.
         pad = max(0, view_h - len(visible))
-        for i, segments in enumerate(visible):
+        for i, spans in enumerate(visible):
             row = top + pad + i
             if row > bottom:
                 break
             x = 0
-            for text, color in segments:
+            for span in spans:
                 if x >= width:
                     break
-                text = text.replace("\t", "    ")
+                text = span.text.replace("\t", "    ")
                 text = "".join(c if c.isprintable() else "?" for c in text)
                 if not text:
                     continue
-                self._add(scr, row, x, text, width - x, self.attr(color))
+                self._add(scr, row, x, text, width - x, self.span_attr(span))
                 x += len(text)
 
     def _draw_separator(self, scr: "curses.window", top: int, bottom: int,
@@ -1513,6 +1566,8 @@ class App:
             out.append(list(segments))
 
         in_prefill = self.prefill_active
+        in_decode = (self.generating and not in_prefill
+                     and self.phase not in ("prompt", "resume"))
 
         def emit_prefill() -> None:
             p = self.prefill_progress or {}
@@ -1552,9 +1607,9 @@ class App:
             filled = int(round(prog * bar_w))
             bar = "█" * filled + "░" * (bar_w - filled)
             rate = (prog * total / elapsed) if elapsed > 0.05 else 0.0
-            emit((" [", "dim"), (bar, "prefill"), ("] ", "dim"),
-                 (f"{prog * 100:3.0f}%", "value"))
-            emit((" ", "dim"), (f"{elapsed:5.1f}s", "dim"),
+            emit((" [", "dim"), (bar, "prefill"), ("]", "dim"))
+            emit((" ", "dim"), (f"{prog * 100:3.0f}%", "value"),
+                 (f"  {elapsed:5.1f}s", "dim"),
                  ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
                   else ("  -", "dim")))
             emit()
@@ -1573,19 +1628,6 @@ class App:
         cur_rate = 1.0 / cur_spt if cur_spt > 0 else 0.0
         rate_txt = self._short(cur_rate) if cur_rate else "-"
         spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
-
-        emit((" DECODE", "section"),
-             (f" {rate_txt} tok/s", "dim"),
-             (f" ({spt_txt} s/tok)", "dim"))
-
-        if self.decode_spt:
-            avg_spt = sum(self.decode_spt) / len(self.decode_spt)
-            avg_rate = 1.0 / avg_spt if avg_spt > 0 else 0.0
-            emit((" decode-avg ", "dim"),
-                 (f"{self._short(avg_rate)} tok/s", "active"),
-                 (f" ({self._short_spt(avg_spt)} s/tok)", "value"))
-        else:
-            emit((" decode-avg ", "dim"), ("-", "value"))
 
         def emit_memory() -> None:
             sysd = self.last.get("sys") or self.ready.get("sys") or {}
@@ -1631,70 +1673,87 @@ class App:
             emit((" temp ", "dim"), (temp, "value"))
 
         def emit_bottom() -> None:
-            legend = [(" tok/s ", "dim"), ("● decode", "decode")]
-            legend_len = sum(len(text) for text, _ in legend)
-            emit((" " * max(0, width - legend_len), "dim"), *legend)
-            emit()
+            if out and out[-1]:
+                emit()
             emit_memory()
             emit()
             emit_cpu()
 
-        if not samples:
-            if self.generating and self.phase == "prompt" and not in_prefill:
-                emit(("  prefill in progress...", "dim"))
-            elif not self.generating:
-                emit(("  waiting for a turn...", "dim"))
-            emit_bottom()
-            return out
+        if in_decode:
+            emit((" DECODE", "section"),
+                 (f" {rate_txt} tok/s", "dim"),
+                 (f" ({spt_txt} s/tok)", "dim"))
 
-        graph_w = max(6, width - 8)
-        visible = samples[-graph_w:]
-        cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
+            if self.decode_spt:
+                avg_spt = sum(self.decode_spt) / len(self.decode_spt)
+                avg_rate = 1.0 / avg_spt if avg_spt > 0 else 0.0
+                emit((" decode-avg ", "dim"),
+                     (f"{self._short(avg_rate)} tok/s", "active"),
+                     (f" ({self._short_spt(avg_spt)} s/tok)", "value"))
+            else:
+                emit((" decode-avg ", "dim"), ("-", "value"))
 
-        graph_h = max(3, min(10, height - 13 - (4 if in_prefill else 0)))
-        target = 5 if graph_h >= 6 else 2
-        peak = max(rate for _, rate in visible)
-        step = nice_step(peak, target)
-        axis_max = math.ceil(peak / step - 1e-9) * step
+            if samples:
+                graph_w = max(6, width - 8)
+                visible = samples[-graph_w:]
+                cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
 
-        row_labels: dict[int, str] = {}
-        for i in range(int(round(axis_max / step)) + 1):
-            value = i * step
-            row = graph_h - 1 - int(round((value / axis_max) * (graph_h - 1)))
-            row = int(clamp(row, 0, graph_h - 1))
-            row_labels.setdefault(row, axis_label(value, step))
+                graph_h = max(3, min(10, height - 12))
+                target = 5 if graph_h >= 6 else 2
+                peak = max(rate for _, rate in visible)
+                step = nice_step(peak, target)
+                axis_max = math.ceil(peak / step - 1e-9) * step
 
-        blocks = " ▁▂▃▄▅▆▇█"
-        sub = 8
+                row_labels: dict[int, str] = {}
+                for i in range(int(round(axis_max / step)) + 1):
+                    value = i * step
+                    row = graph_h - 1 - int(round(
+                        (value / axis_max) * (graph_h - 1)))
+                    row = int(clamp(row, 0, graph_h - 1))
+                    row_labels.setdefault(row, axis_label(value, step))
 
-        for r in range(graph_h):
-            label = f"{row_labels.get(r, ''):>7}"
-            segments: list[tuple[str, str]] = []
-            cur_color: Optional[str] = None
-            cur_text = ""
-            for _, rate in cols:
-                frac = clamp(rate / axis_max, 0.0, 1.0) if axis_max > 0 else 0.0
-                filled = (max(1, int(round(frac * graph_h * sub)))
-                          if rate > 1e-9 else 0)
-                n = filled - (graph_h - 1 - r) * sub
-                if n >= sub:
-                    ch = "█"
-                elif n > 0:
-                    ch = blocks[n]
-                else:
-                    ch = " "
-                color = "decode" if ch != " " else "dim"
-                if color != cur_color:
+                blocks = " ▁▂▃▄▅▆▇█"
+                sub = 8
+
+                for r in range(graph_h):
+                    label = f"{row_labels.get(r, ''):>7}"
+                    segments: list[tuple[str, str]] = []
+                    cur_color: Optional[str] = None
+                    cur_text = ""
+                    for _, rate in cols:
+                        frac = (clamp(rate / axis_max, 0.0, 1.0)
+                                if axis_max > 0 else 0.0)
+                        filled = (max(1, int(round(frac * graph_h * sub)))
+                                  if rate > 1e-9 else 0)
+                        n = filled - (graph_h - 1 - r) * sub
+                        if n >= sub:
+                            ch = "█"
+                        elif n > 0:
+                            ch = blocks[n]
+                        else:
+                            ch = " "
+                        color = "decode" if ch != " " else "dim"
+                        if color != cur_color:
+                            if cur_text:
+                                segments.append((cur_text, cur_color or "dim"))
+                            cur_text = ""
+                            cur_color = color
+                        cur_text += ch
                     if cur_text:
                         segments.append((cur_text, cur_color or "dim"))
-                    cur_text = ""
-                    cur_color = color
-                cur_text += ch
-            if cur_text:
-                segments.append((cur_text, cur_color or "dim"))
-            emit((label + "┤", "dim"), *segments)
+                    emit((label + "┤", "dim"), *segments)
 
-        emit((" " * 7 + "└", "dim"), ("─" * graph_w, "dim"))
+                emit((" " * 7 + "└", "dim"), ("─" * graph_w, "dim"))
+            else:
+                emit(("  waiting for the first token...", "dim"))
+        elif not in_prefill:
+            if not self.generating:
+                emit(("  waiting for a turn...", "dim"))
+            elif self.phase == "resume":
+                emit(("  closing previous turn...", "dim"))
+            else:
+                emit(("  prefill in progress...", "dim"))
+
         emit_bottom()
         return out
 
@@ -1765,6 +1824,74 @@ class App:
     def attr(self, name: str) -> int:
         return self.pairs.get(name, 0)
 
+    def _color_index(self, spec: Any) -> int:
+        """RGB/xterm-256 -> an index this terminal can actually init_pair()."""
+        if spec is None:
+            return -1
+        if isinstance(spec, tuple):
+            rgb = (int(spec[0]), int(spec[1]), int(spec[2]))
+        else:
+            idx = int(spec)
+            if curses.COLORS >= 256 and 0 <= idx < curses.COLORS:
+                return idx
+            rgb = _xterm_rgb(idx)
+        key = (rgb, curses.COLORS)
+        if key in self._color_cache:
+            return self._color_cache[key]
+        if curses.COLORS >= 256:
+            out = _rgb_to_xterm(rgb)
+        elif curses.COLORS >= 16:
+            out = _nearest_basic(rgb, 16)
+        elif curses.COLORS >= 8:
+            out = _nearest_basic(rgb, 8)
+        else:
+            out = -1
+        self._color_cache[key] = out
+        return out
+
+    def pair_for(self, fg: Any, bg: Any) -> int:
+        """Lazily allocate a curses colour pair for one Markdown span."""
+        if not curses.has_colors():
+            return 0
+        f = self._color_index(fg)
+        b = self._color_index(bg)
+        if f < 0 and b < 0:
+            return 0
+        key = (f, b)
+        if key in self._pair_cache:
+            return self._pair_cache[key]
+        try:
+            limit = curses.COLOR_PAIRS
+        except Exception:
+            limit = 64
+        if self._next_pair >= limit:
+            return 0
+        pid = self._next_pair
+        self._next_pair += 1
+        try:
+            curses.init_pair(pid, f, b)
+        except curses.error:
+            return 0
+        attr = curses.color_pair(pid)
+        self._pair_cache[key] = attr
+        return attr
+
+    def span_attr(self, span: Span) -> int:
+        if span.named:
+            return self.attr(span.named)
+        attr = self.pair_for(span.fg, span.bg)
+        if span.bold:
+            attr |= curses.A_BOLD
+        if span.italic:
+            attr |= getattr(curses, "A_ITALIC", 0)
+        if span.underline:
+            attr |= curses.A_UNDERLINE
+        if span.dim:
+            attr |= curses.A_DIM
+        if span.reverse:
+            attr |= curses.A_REVERSE
+        return attr
+
     def _add(self, scr: "curses.window", row: int, col: int, text: str,
              width: int, attr: int = 0) -> None:
         if not text or width <= 0 or row < 0 or col < 0:
@@ -1775,6 +1902,9 @@ class App:
             pass
 
     def init_colors(self) -> None:
+        self._pair_cache = {}
+        self._color_cache = {}
+        self._next_pair = 1
         self.pairs: dict[str, int] = {
             "default": 0, "value": 0, "dim": curses.A_DIM,
             "title": curses.A_BOLD, "status": 0, "active": curses.A_BOLD,
@@ -1812,6 +1942,7 @@ class App:
                 if name in ("title", "active", "error", "section"):
                     extra = curses.A_BOLD
                 self.pairs[name] = curses.color_pair(i) | extra
+            self._next_pair = len(specs) + 1
         except curses.error:
             pass
 
@@ -1916,6 +2047,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start in thinking mode")
     p.add_argument("--no-layers", action="store_true",
                    help="do not stream per-layer events (less chatter)")
+    p.add_argument("--no-markdown", action="store_true",
+                   help="render assistant output as plain text, not Markdown")
     p.add_argument("--demo", action="store_true",
                    help="synthetic backend; no checkpoint required")
     return p
