@@ -614,6 +614,12 @@ class App:
         self.prefill_active = False
         self.prefill_s = 0.0
         self.prefill_tokens = 0
+        # The prompt's elapsed time and rate are 1 Hz samples: the bar and its
+        # counters repaint on every prefill event, but a clock or tok/s figure
+        # recomputed from sub-second progress windows is noise.
+        self.prefill_elapsed = 0.0
+        self.prefill_rate = 0.0
+        self.prefill_sample_ts = 0.0
         self.ttft = 0.0
         self.current_layer = 0
         self.phase = ""
@@ -891,11 +897,11 @@ class App:
         # Token text and layer progress below are NOT throttled.
         now = time.monotonic()
         force_stats = name in ("ready", "stats", "done")
-        # Prefill emits far more progress events than the panel needs. Treat
-        # them like any other event: the stats panel is a 1 Hz instrument, and
-        # the PREFILL bar in the status line already updates live from every
-        # event. Ingesting here too would repaint the MEMORY block many times a
-        # second during the prompt.
+        # Prefill emits far more progress events than the stats panel needs.
+        # Treat them like any other event: MEMORY/CPU and the rate figures are
+        # a 1 Hz instrument. The PREFILL bar is drawn separately on every
+        # render (see prefill_lines), so the bar and counters still move live
+        # without repainting the rest of the panel many times a second.
         if force_stats or now - self.last_stats_ingest >= self.stats_interval:
             self.ingest_stats(ev)
             self.last_stats_ingest = now
@@ -947,6 +953,9 @@ class App:
             self.prefill_active = self.prefill_batch > 1
             self.prefill_s = 0.0
             self.prefill_tokens = 0
+            self.prefill_elapsed = 0.0
+            self.prefill_rate = 0.0
+            self.prefill_sample_ts = 0.0
             self.ttft = 0.0
             self.current_layer = 0
             self.phase = "prompt"
@@ -969,7 +978,12 @@ class App:
         elif name == "prefill":
             self.prefill_progress = ev
             self.prefill_active = True
-            self.prefill_batch = int(ev.get("batch") or self.prefill_batch or 0)
+            # `chunk_tokens` is the chunk that just ran; `batch` carries the
+            # same actual value. Prefer the former so an older backend that
+            # only reports the configured cap still shows the shrunken chunk.
+            batch = int(ev.get("chunk_tokens") or ev.get("batch") or 0)
+            if batch:
+                self.prefill_batch = batch
             self.current_layer = int(ev.get("layer") or self.current_layer)
             self.phase = "prompt"
             self.dirty = True
@@ -1036,6 +1050,9 @@ class App:
             self.prefill_progress = {}
             self.prefill_s = 0.0
             self.prefill_tokens = 0
+            self.prefill_elapsed = 0.0
+            self.prefill_rate = 0.0
+            self.prefill_sample_ts = 0.0
             self.stats_force = True
             self.dirty = True
 
@@ -1537,6 +1554,97 @@ class App:
             return f"{value:.2f}"
         return f"{value:.3f}"
 
+    def prefill_lines(self, width: int) -> list[list[tuple[str, str]]]:
+        """Build the PREFILL section: bar, percentage, layer/token counters.
+
+        This is rebuilt on every render while a prompt runs, so progress
+        follows the engine's prefill events instead of the 1 Hz stats cache.
+        The elapsed clock and estimated tok/s are the exceptions: they are
+        resampled at most once per `stats_interval`, because values recomputed
+        from a sub-second window jitter without telling the reader anything.
+        """
+        out: list[list[tuple[str, str]]] = []
+
+        def emit(*segments: tuple[str, str]) -> None:
+            out.append(list(segments))
+
+        p = self.prefill_progress or {}
+        stage = p.get("stage") or "start"
+        # Show the chunk that actually ran. The configured batch is only
+        # a cap: a 3-token prompt reports 3, and a long prompt's last
+        # chunk reports its remainder rather than the cap.
+        batch = int(p.get("chunk_tokens") or p.get("batch")
+                    or self.prefill_batch or 0)
+        chunk = int(p.get("chunk") or 0)
+        chunks = int(p.get("chunks") or 0)
+        layer = int(p.get("layer") or 0)
+        layers = int(p.get("layers") or 0)
+
+        final = self.prefill_tokens > 0 and self.prefill_s > 0.0
+        if final:
+            # The engine's own prompt timer, measured without the head.
+            tokens = self.prefill_tokens
+            seconds = self.prefill_s
+            total = done = tokens
+            status = "done"
+        else:
+            tokens = int(p.get("tokens_done") or 0)
+            seconds = float(p.get("elapsed") or 0.0)
+            total = int(p.get("tokens_total") or self.prompt_tokens or 0)
+            done = tokens
+            if stage == "layer":
+                status = f"layers {layer}/{layers}"
+            elif stage == "chunk":
+                status = f"chunk {chunk}/{chunks}"
+            elif stage == "chunk_done":
+                status = f"chunk {chunk}/{chunks} done"
+            elif stage == "head":
+                status = "output head"
+            elif stage == "done":
+                status = "prompt done"
+            else:
+                status = "preparing"
+
+        seg: list[tuple[str, str]] = [
+            (" PREFILL", "section"),
+            (f" {status}", "muted" if status == "done" else "active")]
+        if total:
+            seg.append((f"  {done}/{total} tok", "value"))
+        if batch > 1:
+            seg.append((f"  batch {batch}", "dim"))
+        emit(*seg)
+
+        if final:
+            spt = seconds / tokens
+            tps = tokens / seconds
+            # The header already carries the batch size when it is > 1.
+            mode = "; per-token" if batch <= 1 else ""
+            emit((" ", "dim"),
+                 (f"{tokens} tokens in {seconds:.2f} s "
+                  f"({tps:.2f} tok/s, {spt:.3f} s/tok)",
+                  "value"))
+        else:
+            prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
+            elapsed = float(p.get("elapsed") or 0.0)
+            bar_w = max(8, min(28, width - 18))
+            filled = int(round(prog * bar_w))
+            bar = "█" * filled + "░" * (bar_w - filled)
+            now = time.monotonic()
+            if now - self.prefill_sample_ts >= self.stats_interval:
+                self.prefill_elapsed = elapsed
+                self.prefill_sample_ts = now
+                if elapsed > 0.05:
+                    self.prefill_rate = prog * total / elapsed
+            rate = self.prefill_rate
+            elapsed = self.prefill_elapsed
+            emit((" [", "dim"), (bar, "prefill"), ("]", "dim"))
+            emit((" ", "dim"), (f"{prog * 100:3.0f}%", "value"),
+                 (f"  {elapsed:5.0f}s", "dim"),
+                 ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
+                  else ("  -", "dim")))
+        emit()
+        return out
+
     def stats_lines(self, width: int,
                     height: int) -> list[list[tuple[str, str]]]:
         """Decode tok/s graph plus live memory and CPU numbers.
@@ -1545,7 +1653,8 @@ class App:
         right edge and older ones move out to the left. The header carries the
         current tok/s and s/tok; the axis uses round, linear tick labels. A
         compact MEMORY block below it shows RSS, the expert cache, disk reads
-        and the approximate byte inflow to the CPU.
+        and the approximate byte inflow to the CPU. The PREFILL section is
+        built separately by `prefill_lines` so it can repaint faster.
         """
         out: list[list[tuple[str, str]]] = []
 
@@ -1560,74 +1669,6 @@ class App:
         in_decode = (not in_prefill
                      and self.phase not in ("prompt", "resume")
                      and (self.generating or has_decode))
-
-        def emit_prefill() -> None:
-            p = self.prefill_progress or {}
-            stage = p.get("stage") or "start"
-            batch = int(p.get("batch") or self.prefill_batch or 0)
-            chunk = int(p.get("chunk") or 0)
-            chunks = int(p.get("chunks") or 0)
-            layer = int(p.get("layer") or 0)
-            layers = int(p.get("layers") or 0)
-
-            final = self.prefill_tokens > 0 and self.prefill_s > 0.0
-            if final:
-                # The engine's own prompt timer, measured without the head.
-                tokens = self.prefill_tokens
-                seconds = self.prefill_s
-                total = done = tokens
-                status = "done"
-            else:
-                tokens = int(p.get("tokens_done") or 0)
-                seconds = float(p.get("elapsed") or 0.0)
-                total = int(p.get("tokens_total") or self.prompt_tokens or 0)
-                done = tokens
-                if stage == "layer":
-                    status = f"layers {layer}/{layers}"
-                elif stage == "chunk":
-                    status = f"chunk {chunk}/{chunks}"
-                elif stage == "chunk_done":
-                    status = f"chunk {chunk}/{chunks} done"
-                elif stage == "head":
-                    status = "output head"
-                elif stage == "done":
-                    status = "prompt done"
-                else:
-                    status = "preparing"
-
-            seg: list[tuple[str, str]] = [
-                (" PREFILL", "section"), (f" {status}", "muted" if status == "done" else "active")]
-            if total:
-                seg.append((f"  {done}/{total} tok", "value"))
-            if batch > 1:
-                seg.append((f"  batch {batch}", "dim"))
-            emit(*seg)
-
-            if final:
-                spt = seconds / tokens
-                tps = tokens / seconds
-                # The header already carries the batch size when it is > 1.
-                mode = "; per-token" if batch <= 1 else ""
-                emit((" ", "dim"),
-                     (f"{tokens} tokens in {seconds:.2f} s "
-                      f"({tps:.2f} tok/s, {spt:.3f} s/tok)",
-                      "value"))
-            else:
-                prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
-                elapsed = float(p.get("elapsed") or 0.0)
-                bar_w = max(8, min(28, width - 18))
-                filled = int(round(prog * bar_w))
-                bar = "█" * filled + "░" * (bar_w - filled)
-                rate = (prog * total / elapsed) if elapsed > 0.05 else 0.0
-                emit((" [", "dim"), (bar, "prefill"), ("]", "dim"))
-                emit((" ", "dim"), (f"{prog * 100:3.0f}%", "value"),
-                     (f"  {elapsed:5.1f}s", "dim"),
-                     ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
-                      else ("  -", "dim")))
-            emit()
-
-        if show_prefill:
-            emit_prefill()
 
         samples = [("decode", 1.0 / dt) for dt in self.decode_spt
                    if dt > 1e-9]
@@ -1789,10 +1830,11 @@ class App:
                     col: int, width: int) -> None:
         if width <= 4:
             return
-        # The panel is a 1 Hz instrument. The status line above it stays live
-        # for layer/token/prefill progress; repainting a graph on every event
-        # only makes it jitter faster than the values move. Prefill is no
-        # exception: its progress bar lives in the status line, not here.
+        # The decode graph, MEMORY and CPU are a 1 Hz instrument: repainting
+        # them on every layer event only makes them jitter. The PREFILL
+        # section is the exception: it is prepended fresh on every render, so
+        # its bar, percentage and layer/token counters follow the prefill
+        # events while the rate figures stay on the stats cadence.
         height = bottom - top + 1
         now = time.monotonic()
         if (self.stats_force or not self.stats_cache
@@ -1806,7 +1848,10 @@ class App:
             self.stats_cache_width = width
             self.stats_cache_height = height
             self.stats_force = False
-        for i, segments in enumerate(self.stats_cache):
+        lines = self.stats_cache
+        if self.prefill_active or self.prefill_tokens > 0:
+            lines = self.prefill_lines(width) + lines
+        for i, segments in enumerate(lines):
             row = top + i
             if row > bottom:
                 break
@@ -2061,7 +2106,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pin", choices=["off", "all", "p", "e"], default=None,
                    help="compute affinity: off, all, P-cores (p) or E-cores (e); "
                         "default: engine policy")
-    p.add_argument("--prefill-batch-size", type=int, default=16,
+    p.add_argument("--prefill-batch-size", type=int, default=128,
                    metavar="N",
                    help="dense prefill chunk size handed to dsv4-serve "
                         "(default: 16; 0 = per-token decode path)")

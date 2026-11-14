@@ -91,9 +91,11 @@ prompt token. Instead the engine emits `prefill` progress events carrying the
 stage (`chunk`, `layer`, `chunk_done`, `head`), chunk/layer counters, an
 estimated progress fraction and the same live `sys`/`cache`/`trunk` blocks as
 a layer event. While the prompt runs, the panel shows a **PREFILL** section with
-the current stage, token counts, batch size and a progress bar with the
-estimated percentage, elapsed time and rate; MEMORY keeps updating from the same
-events, so cache-hit and disk readout move during the prompt. When the prompt
+the current stage, token counts, the actual batch size of the current chunk and
+a progress bar with the estimated percentage and elapsed time. The bar,
+percentage and layer/token counters repaint on every prefill event; the elapsed
+clock, rate readout and MEMORY stay on the 1 Hz cadence, so cache-hit and disk
+readout move during the prompt without the numbers jittering. When the prompt
 completes, the progress bar is replaced by the engine's final timing line
 (`N tokens in T s (tok/s, s/token)`), and the section stays visible while the
 response decodes. The DECODE section appears once the first token is decoded.
@@ -173,10 +175,12 @@ prompt in the KV state.
 The right-hand panel keeps the live resource numbers that are useful while the
 model runs, plus a decode graph while a turn is generating tokens:
 
-* **PREFILL** — the prompt's stage, token progress and batch size, with a
-  progress bar while the prompt runs. After completion the bar is replaced by
-  the engine's final `N tokens in T s (tok/s, s/token)` line, and the section
-  stays visible while the response decodes.
+* **PREFILL** — the prompt's stage, token progress and the actual size of the
+  chunk being run (the configured `--prefill-batch-size` is only a cap, so a
+  short prompt shows its real size and a long prompt's last chunk shows the
+  remainder), with a progress bar while the prompt runs. After completion the
+  bar is replaced by the engine's final `N tokens in T s (tok/s, s/token)` line,
+  and the section stays visible while the response decodes.
 * **DECODE** — a graph of **tok/s** for generated tokens only. It appears while
   the turn is decoding and stays visible after the turn ends, until the next
   turn's prefill starts or the context is reset. The graph is right-aligned and
@@ -205,11 +209,12 @@ model runs, plus a decode graph while a turn is generating tokens:
   no CPU sensor is exposed by sysfs.
 
 The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
-graph update on each token event. Prefill is no exception: its stats stay on
-that 1 Hz cadence. While prefill runs, the PREFILL bar in the status line
-updates live and is replaced by the final prompt timing after the first token
-is decoded; the DECODE section appears at that point and stays after the turn
-ends. The trunk hit rate, profiler split and top-k counters are still collected
+graph update on each token event. The PREFILL bar is the exception: while a
+prompt runs it is rebuilt on every render, so the bar, percentage and
+layer/token counters update live, while its elapsed clock and estimated tok/s
+stay on the 1 Hz cadence. After the first token is decoded the bar is replaced
+by the final prompt timing; the DECODE section appears at that point and stays
+after the turn ends. The trunk hit rate, profiler split and top-k counters are still collected
 and sent by `bin/dsv4-serve`, but are not drawn while this panel is being
 reworked.
 

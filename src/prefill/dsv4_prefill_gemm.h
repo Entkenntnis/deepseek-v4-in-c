@@ -20,7 +20,7 @@
  * in the batched kernels and the per-token scratch the prefill module holds.
  * The measured kernel curve plateaus by 16-32, so 64 leaves room to test
  * without pretending an arbitrary prompt length is free. */
-#define DSV4_MAX_BATCH     64
+#define DSV4_MAX_BATCH     128
 
 /* y[t*rows + o] = sum_c x[t*cols + c] * W[o,c], for t in 0..nt-1.
  *

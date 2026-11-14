@@ -572,7 +572,11 @@ static void report_progress(DSV4Prefill *p, const char *stage,
     pr.tokens_done = tokens_done;
     pr.tokens_total = tokens_total;
     pr.chunk_tokens = chunk_tokens;
-    pr.batch = p->B;
+    /* The batch the caller actually ran, not the configured cap. A short
+     * prompt gets one shrunken chunk (3 tokens, not 16), and a long prompt's
+     * last chunk is whatever is left. The TUI prints this value, so reporting
+     * the cap here made it lie at both ends. */
+    pr.batch = chunk_tokens > 0 ? chunk_tokens : p->B;
     pr.elapsed = elapsed;
     pr.progress = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
     p->opt.on_progress(p->opt.progress_ctx, &pr);
@@ -596,9 +600,10 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     p->t_bind = p->t_hc = 0.0;
 
     const int nchunks = (n + p->B - 1) / p->B;
+    const int first_m = n < p->B ? n : p->B;
     int chunk_idx = 0;
     report_progress(p, "start", 0, nchunks, 0, c->n_layers,
-                    0, n, 0, 0.0, 0.0);
+                    0, n, first_m, 0.0, 0.0);
 
     int off = 0;
     int last_m = 1;
@@ -646,7 +651,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         off += m;
     }
     report_progress(p, "done", nchunks, nchunks, c->n_layers, c->n_layers,
-                    n, n, 0, pnow() - t0, 1.0);
+                    n, n, last_m, pnow() - t0, 1.0);
 
     memcpy(h_out, p->H + (size_t)(last_m - 1) * hcd, hcd * sizeof(float));
     p->t_total = pnow() - t0;
@@ -668,7 +673,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     fprintf(stderr,
             "prefill: %d tokens at pos %d, %d chunk(s) of <=%d, %.2f s "
             "(%.3f s/token); attn %.2f moe %.2f io %.2f bind %.2f hc %.2f\n",
-            n, pos0, (n + p->B - 1) / p->B, p->B, p->t_total,
+            n, pos0, nchunks, first_m, p->t_total,
             p->t_total / (double)n, p->t_attn, p->t_moe, p->t_io,
             p->t_bind, p->t_hc);
     return 0;

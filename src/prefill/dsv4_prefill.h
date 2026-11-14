@@ -44,7 +44,7 @@ typedef struct {
     int tokens_done;        /* tokens whose work is complete or estimated */
     int tokens_total;
     int chunk_tokens;
-    int batch;
+    int batch;              /* actual size of this chunk, not the configured cap */
     double elapsed;         /* seconds since this prefill call began */
     double progress;        /* 0..1, estimated across the whole prompt */
 } DSV4PrefillProgress;

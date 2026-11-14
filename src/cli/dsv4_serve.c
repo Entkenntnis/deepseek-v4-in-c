@@ -894,8 +894,13 @@ static void engine_generate(Engine *e, const char *prompt, int ngen,
     }
 
     const int use_batched = (e->pf && n_added > 1);
+    /* Report the batch this turn will actually use. The configured value is
+     * a cap; a three-token turn runs as one three-token chunk, not a 16-token
+     * one, and the TUI must not claim otherwise. */
+    const int turn_batch = use_batched
+        ? (n_added < e->prefill_batch ? n_added : e->prefill_batch) : 0;
     emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat",
-               use_batched ? e->prefill_batch : 0);
+               turn_batch);
 
     TopK top;
     memset(&top, 0, sizeof top);
@@ -932,9 +937,12 @@ static void engine_generate(Engine *e, const char *prompt, int ngen,
     e->prefill_tokens = n_added;
     if (use_batched) {
         const int chunks = (n_added + e->prefill_batch - 1) / e->prefill_batch;
+        /* The last chunk is the one the head follows; it can be smaller than
+         * the configured cap (and is the whole prompt when the prompt fits). */
+        const int last_batch = n_added - (chunks - 1) * e->prefill_batch;
         const DSV4PrefillProgress hp = {
             "head", chunks, chunks, e->c.n_layers, e->c.n_layers,
-            n_added, n_added, 0, e->prefill_batch, e->prefill_s, 1.0,
+            n_added, n_added, last_batch, last_batch, e->prefill_s, 1.0,
         };
         emit_prefill_progress(e, &hp);
     }
