@@ -10,15 +10,16 @@
  *
  * WHAT IS BATCHED
  *   The dense matrices: q/kv/output projections, the shared expert and the
- *   router. Their weights are read once per chunk and used for every token in
- *   it. The routed experts stay on the per-token path -- at a 32-token prompt
- *   top-6 over 256 experts gives only ~2.9x reuse, and the expert union was
- *   measured to eat the cache hits that made the per-token path cheap.
+ *   router, read once per chunk and used for every token in it. The routed
+ *   experts are batched too, by layer-level union: every distinct expert the
+ *   chunk routes to is requested once, and each expert's whole token bucket is
+ *   run through one FP4 batch kernel. In a 64-token chunk that turns ~384
+ *   per-token expert requests into ~99 expert-major buckets.
  *
  * WHAT IS NOT BATCHED, DELIBERATELY
- *   mHC, RoPE, the compressor's sequential state, the CSA indexer, sparse
- *   attention and the routed experts. They either carry a position-ordered
- *   dependency or have no weight-reuse payoff. Only projections are GEMMs.
+ *   mHC, RoPE, the compressor's sequential state, the CSA indexer and sparse
+ *   attention. They either carry a position-ordered dependency or have no
+ *   weight-reuse payoff. Only projections are GEMMs.
  */
 #define _GNU_SOURCE
 
@@ -92,7 +93,7 @@ typedef struct {
     double attn_core, attn_deroep;
     double oproj_pack, oproj, oproj_unpack;
     double gate_mm, route, shared_mm, shared_swiglu;
-    double expert_io, expert_mm, expert_swiglu, expert_sum;
+    double expert_io, expert_mm, expert_swiglu, expert_pack, expert_sum;
     double bind, trunk_io;
 
     double f_qkv, f_oproj, f_gate, f_shared, f_expert, f_comp, f_idx, f_attn;
@@ -134,6 +135,17 @@ struct DSV4Prefill {
     float *xh;         /* [hidden] embed scratch */
     DSV4Scratch *scratch; /* [B] per-token scratch for the sequential parts */
 
+    /* Expert-union scheduling: one bucket per expert for the whole layer. */
+    int   *ex_tok, *ex_k;    /* [B*topk] request -> token and k              */
+    int   *ex_count;         /* [n_experts] requests per expert              */
+    int   *ex_order;         /* [n_experts] distinct experts, first-use order*/
+    int   *ex_off;           /* [n_experts+1] bucket start                   */
+    int   *ex_fill;          /* [n_experts] prefix-sum fill cursor           */
+    int   *ex_seen;          /* [n_experts] first-use dedup                  */
+    float *ex_x;             /* [B][hidden] gathered activations             */
+    float *ex_gate, *ex_up, *ex_mid; /* [B][moe_inter] expert working set   */
+    float *ex_out;           /* [B][hidden] expert output before scatter     */
+
     double t_total, t_attn, t_idx, t_gate, t_shared, t_moe;
     double t_io, t_trunk, t_bind, t_hc;
 
@@ -165,6 +177,8 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     const size_t qr_n = (size_t)(d > c->q_lora ? d : c->q_lora);
     const size_t hdall = (size_t)c->n_heads * c->head_dim;
     const size_t inter = (size_t)c->moe_inter * c->n_shared;
+    const size_t rinter = (size_t)c->moe_inter;
+    const size_t nreq = (size_t)B * (size_t)c->topk;
     const size_t og = (size_t)c->o_groups * c->o_lora;
 
     p->H = xcalloc((size_t)B * hcd * sizeof(float));
@@ -191,12 +205,27 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     p->out = xcalloc((size_t)B * d * sizeof(float));
     p->xh = xcalloc((size_t)d * sizeof(float));
     p->scratch = (DSV4Scratch *)xcalloc((size_t)B * sizeof(DSV4Scratch));
+    p->ex_tok = (int *)xcalloc(nreq * sizeof(int));
+    p->ex_k = (int *)xcalloc(nreq * sizeof(int));
+    p->ex_count = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
+    p->ex_order = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
+    p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
+    p->ex_fill = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
+    p->ex_seen = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
+    p->ex_x = xcalloc((size_t)B * d * sizeof(float));
+    p->ex_gate = xcalloc((size_t)B * rinter * sizeof(float));
+    p->ex_up = xcalloc((size_t)B * rinter * sizeof(float));
+    p->ex_mid = xcalloc((size_t)B * rinter * sizeof(float));
+    p->ex_out = xcalloc((size_t)B * d * sizeof(float));
 
     if (!p->H || !p->x1 || !p->resid || !p->post || !p->comb || !p->mixes ||
         !p->qr || !p->q || !p->kv || !p->o || !p->ogrp || !p->xg || !p->yg ||
         !p->gate || !p->gate_orig || !p->topk_idx || !p->topk_w ||
         !p->sh_gate || !p->sh_up || !p->sh_mid || !p->sh_out ||
-        !p->out || !p->xh || !p->scratch) {
+        !p->out || !p->xh || !p->scratch ||
+        !p->ex_tok || !p->ex_k || !p->ex_count || !p->ex_order ||
+        !p->ex_off || !p->ex_fill || !p->ex_seen ||
+        !p->ex_x || !p->ex_gate || !p->ex_up || !p->ex_mid || !p->ex_out) {
         dsv4_prefill_free(p);
         return -1;
     }
@@ -224,12 +253,16 @@ void dsv4_prefill_free(DSV4Prefill *p)
     free(p->gate_orig); free(p->topk_idx); free(p->topk_w); free(p->sh_gate);
     free(p->sh_up); free(p->sh_mid); free(p->sh_out);
     free(p->out); free(p->xh);
+    free(p->ex_tok); free(p->ex_k); free(p->ex_count); free(p->ex_order);
+    free(p->ex_off); free(p->ex_fill); free(p->ex_seen);
+    free(p->ex_x); free(p->ex_gate); free(p->ex_up); free(p->ex_mid);
+    free(p->ex_out);
     free(p);
 }
 
 /* The one batched-matmul seam. Every job is a dense matrix over `n` token
  * rows; dsv4_mmq_n dispatches to the format's batch kernel, or to the GEMV for
- * n == 1 and for formats that do not have one yet (FP4). */
+ * n == 1. */
 static int pm_n_multi(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj)
 {
     (void)p; (void)layer;
@@ -508,6 +541,198 @@ static int prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
     return 0;
 }
 
+/* One expert applied to every token that routed to it.
+ *
+ * This is the expert-major seam. count == 1 stays on the GEMV (no gather, no
+ * batch dispatch). For count > 1 the activation rows are gathered once, the
+ * three matrices run as one nt-wide batch each, and the result is scattered
+ * back into the per-(token, k) accumulators the weighted sum already expects.
+ * The final sum is still per token and in k order; only the order in which
+ * independent experts are computed changed. */
+static void expert_bucket_forward(DSV4Prefill *p, const DSV4ExpertW *ew,
+                                  int count, const int *tok, const int *ks)
+{
+    const DSV4Cfg *c = p->c;
+    const int d = c->hidden, rinter = c->moe_inter;
+    const double tm0 = pnow();
+
+    if (count == 1) {
+        const int t = tok[0], k = ks[0];
+        DSV4Scratch *s = &p->scratch[t];
+        expert_forward(p, s->expert_acc + (size_t)k * s->expert_acc_stride,
+                       p->x1 + (size_t)t * d, ew, s, d, rinter,
+                       c->swiglu_limit);
+        p->t_moe += pnow() - tm0;
+        return;
+    }
+
+    double t0 = pnow();
+    for (int j = 0; j < count; j++) {
+        const int t = tok[j];
+        memcpy(p->ex_x + (size_t)j * d, p->x1 + (size_t)t * d,
+               (size_t)d * sizeof(float));
+    }
+    p->st.expert_pack += pnow() - t0;
+
+    t0 = pnow();
+    dsv4_mmq_n(p->ex_gate, p->ex_x, &ew->w1, count);
+    dsv4_mmq_n(p->ex_up,   p->ex_x, &ew->w3, count);
+    p->st.expert_mm += pnow() - t0;
+
+    t0 = pnow();
+    for (int j = 0; j < count; j++)
+        dsv4_swiglu(p->ex_mid + (size_t)j * rinter,
+                    p->ex_gate + (size_t)j * rinter,
+                    p->ex_up + (size_t)j * rinter, rinter,
+                    c->swiglu_limit);
+    p->st.expert_swiglu += pnow() - t0;
+
+    t0 = pnow();
+    dsv4_mmq_n(p->ex_out, p->ex_mid, &ew->w2, count);
+    p->st.expert_mm += pnow() - t0;
+
+    t0 = pnow();
+    for (int j = 0; j < count; j++) {
+        const int t = tok[j], k = ks[j];
+        DSV4Scratch *s = &p->scratch[t];
+        memcpy(s->expert_acc + (size_t)k * s->expert_acc_stride,
+               p->ex_out + (size_t)j * d, (size_t)d * sizeof(float));
+    }
+    p->st.expert_pack += pnow() - t0;
+
+    p->st.f_expert += 6.0 * (double)rinter * (double)d *
+                      (double)count * 1e-9;
+    p->t_moe += pnow() - tm0;
+}
+
+/* Layer-level union scheduling.
+ *
+ * Request every distinct expert this layer's chunk needs, in first-use order,
+ * so the reader pool sees the whole layer instead of six requests at a time.
+ * The per-token end() barrier is what exposed ~24% of prefill as expert I/O;
+ * here there is one barrier per group of requests, and each expert's bucket is
+ * computed as soon as its read lands. */
+static int prefill_moe_routed_union(DSV4Prefill *p, int L, int n)
+{
+    const DSV4Cfg *c = p->c;
+    const int d = c->hidden, topk = c->topk, ne = c->n_experts;
+
+    memset(p->ex_count, 0, (size_t)ne * sizeof *p->ex_count);
+    for (int t = 0; t < n; t++)
+        for (int k = 0; k < topk; k++)
+            p->ex_count[p->topk_idx[(size_t)t * topk + k]]++;
+
+    p->ex_off[0] = 0;
+    for (int e = 0; e < ne; e++)
+        p->ex_off[e + 1] = p->ex_off[e] + p->ex_count[e];
+
+    memset(p->ex_fill, 0, (size_t)ne * sizeof *p->ex_fill);
+    for (int t = 0; t < n; t++)
+        for (int k = 0; k < topk; k++) {
+            const int e = p->topk_idx[(size_t)t * topk + k];
+            const int pos = p->ex_off[e] + p->ex_fill[e]++;
+            p->ex_tok[pos] = t;
+            p->ex_k[pos] = k;
+        }
+
+    memset(p->ex_seen, 0, (size_t)ne * sizeof *p->ex_seen);
+    int nord = 0;
+    for (int t = 0; t < n; t++)
+        for (int k = 0; k < topk; k++) {
+            const int e = p->topk_idx[(size_t)t * topk + k];
+            if (!p->ex_seen[e]) {
+                p->ex_seen[e] = 1;
+                p->ex_order[nord++] = e;
+            }
+        }
+
+    for (int base = 0; base < nord; base += DSV4_MAX_PREFETCH) {
+        int ng = nord - base;
+        if (ng > DSV4_MAX_PREFETCH) ng = DSV4_MAX_PREFETCH;
+
+        const DSV4ExpertW *ex[DSV4_MAX_PREFETCH];
+        int done[DSV4_MAX_PREFETCH];
+        for (int j = 0; j < ng; j++) { ex[j] = NULL; done[j] = 0; }
+
+        double t0 = pnow();
+        const int rc = p->src->begin(p->src->ctx, L, p->ex_order + base,
+                                     ng, ex);
+        double td = pnow() - t0;
+        p->t_io += td;
+        p->st.expert_io += td;
+        if (rc != 0) {
+            p->src->end(p->src->ctx, ex);
+            return -1;
+        }
+
+        for (int j = 0; j < ng; j++) {
+            if (!ex[j]) continue;
+            const int e = p->ex_order[base + j];
+            expert_bucket_forward(p, ex[j], p->ex_count[e],
+                                  p->ex_tok + p->ex_off[e],
+                                  p->ex_k + p->ex_off[e]);
+            done[j] = 1;
+        }
+
+        if (p->src->wait_any) {
+            for (;;) {
+                int j = -1;
+                t0 = pnow();
+                const int got = p->src->wait_any(p->src->ctx, &j);
+                td = pnow() - t0;
+                p->t_io += td;
+                p->st.expert_io += td;
+                if (!got) break;
+                if (j < 0 || j >= ng || done[j] || !ex[j]) continue;
+                const int e = p->ex_order[base + j];
+                expert_bucket_forward(p, ex[j], p->ex_count[e],
+                                      p->ex_tok + p->ex_off[e],
+                                      p->ex_k + p->ex_off[e]);
+                done[j] = 1;
+            }
+        }
+
+        t0 = pnow();
+        p->src->end(p->src->ctx, ex);
+        td = pnow() - t0;
+        p->t_io += td;
+        p->st.expert_io += td;
+
+        for (int j = 0; j < ng; j++) {
+            if (done[j]) continue;
+            if (!ex[j]) {
+                fprintf(stderr, "prefill: layer %d could not obtain routed "
+                                "expert %d; refusing to emit a token routed "
+                                "through fewer experts\n",
+                        L, p->ex_order[base + j]);
+                return -1;
+            }
+            const int e = p->ex_order[base + j];
+            expert_bucket_forward(p, ex[j], p->ex_count[e],
+                                  p->ex_tok + p->ex_off[e],
+                                  p->ex_k + p->ex_off[e]);
+            done[j] = 1;
+        }
+    }
+
+    const double tsum = pnow();
+    for (int t = 0; t < n; t++) {
+        float *o = p->out + (size_t)t * d;
+        const float *tw = p->topk_w + (size_t)t * topk;
+        for (int i = 0; i < d; i++) o[i] = 0.0f;
+        for (int k = 0; k < topk; k++) {
+            const float wk = tw[k];
+            const float *acc = p->scratch[t].expert_acc +
+                               (size_t)k * p->scratch[t].expert_acc_stride;
+            for (int i = 0; i < d; i++) o[i] += wk * acc[i];
+        }
+        for (int i = 0; i < d; i++) o[i] += p->sh_out[(size_t)t * d + i];
+    }
+    p->st.expert_sum += pnow() - tsum;
+    p->t_moe += pnow() - tsum;
+    return 0;
+}
+
 static int prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                        int n, const int32_t *ids)
 {
@@ -555,18 +780,19 @@ static int prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                    &p->st.shared_mm, &p->st.f_shared)) return -1;
     p->t_shared += pnow() - tsh;
 
-    /* ROUTED EXPERTS STAY PER TOKEN.
+    /* ROUTED EXPERTS: LAYER-LEVEL UNION, THEN EXPERT-MAJOR.
      *
-     * This is the one place the batched path deliberately does not union the
-     * batch's top-k requests. A 32-token chunk asks for 192 experts but only
-     * ~65 are distinct, so the union saves ~3x reads -- and then destroys the
-     * cache hits that let the per-token path overlap half its reads with
-     * resident-expert matmuls. The measured result was +50% exposed I/O.
+     * The old path asked for six experts per token and waited at end() before
+     * the next token, which exposed the read tail once per token. The union
+     * path asks for every distinct expert the layer needs and computes each
+     * expert's whole token bucket as its read lands. The per-token k-order sum
+     * is still done afterwards, so the arithmetic is unchanged.
      *
-     * Layer-major order already gives the useful part for free: all tokens of
-     * one layer run back to back, so a duplicate request from the next token
-     * hits the cache without any union. The routed sum stays in k order per
-     * token, exactly as in dsv4_layer.c. */
+     * Sources without begin/end (the unit-test gates) keep the old per-token
+     * loop below; both paths write the same per-(token, k) accumulators. */
+    if (p->src->begin && p->src->end) {
+        if (prefill_moe_routed_union(p, L, n)) return -1;
+    } else {
     for (int t = 0; t < n; t++) {
         DSV4Scratch *s = &p->scratch[t];
         const float *x = p->x1 + (size_t)t * d;
@@ -652,6 +878,7 @@ static int prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
             p->st.expert_sum += pnow() - tsum;
         }
         p->t_moe += pnow() - tm0;
+    }
     }
 
     {
@@ -806,6 +1033,7 @@ static void pf_report(DSV4Prefill *p, int n, int nchunks, int first_m)
     pf_row("shared expert swiglu", s->shared_swiglu, T, n, 0.0);
     pf_row("routed expert I/O", s->expert_io, T, n, 0.0);
     pf_row("routed expert matmuls", s->expert_mm, T, n, s->f_expert);
+    pf_row("routed expert gather/scatter", s->expert_pack, T, n, 0.0);
     pf_row("routed expert swiglu", s->expert_swiglu, T, n, 0.0);
     pf_row("routed weighted sum", s->expert_sum, T, n, 0.0);
 
@@ -839,11 +1067,14 @@ static void pf_report(DSV4Prefill *p, int n, int nchunks, int first_m)
         const double gb = (double)s->e_bytes / 1073741824.0;
         fprintf(stderr,
                 "    expert cache: %llu requests, %llu hits (%.1f%%), "
-                "%llu misses, %.2f GB read, %.2f GB/s over prefill\n",
+                "%llu misses, %.2f GB read, %.2f GB/s over prefill%s\n",
                 (unsigned long long)req, (unsigned long long)s->e_hits,
                 req ? 100.0 * (double)s->e_hits / (double)req : 0.0,
                 (unsigned long long)s->e_misses, gb,
-                T > 0.0 ? gb / T : 0.0);
+                T > 0.0 ? gb / T : 0.0,
+                (p->src->begin && p->src->end)
+                    ? "  [union: duplicate requests are deduped before the cache]"
+                    : "");
     }
     if (s->trunk_bytes) {
         const double gb = (double)s->trunk_bytes / 1073741824.0;

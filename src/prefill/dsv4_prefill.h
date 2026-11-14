@@ -11,15 +11,16 @@
  *
  * WHAT IS BATCHED
  *   The dense matrices: q/kv/output projections, the shared expert and the
- *   router. Their weights are read once per chunk and used for every token in
- *   it. The routed experts stay on the per-token path -- at a 32-token prompt
- *   top-6 over 256 experts gives only ~2.9x reuse, and the expert union was
- *   measured to eat the cache hits that made the per-token path cheap.
+ *   router, read once per chunk and used for every token in it. The routed
+ *   experts are batched too, by layer-level union: every distinct expert the
+ *   chunk routes to is requested once, and each expert's whole token bucket is
+ *   run through one FP4 batch kernel. In a 64-token chunk that turns ~384
+ *   per-token expert requests into ~99 expert-major buckets.
  *
  * WHAT IS NOT BATCHED, DELIBERATELY
- *   mHC, RoPE, the compressor's sequential state, the CSA indexer, sparse
- *   attention and the routed experts. They either carry a position-ordered
- *   dependency or have no weight-reuse payoff. Only the projections are GEMMs.
+ *   mHC, RoPE, the compressor's sequential state, the CSA indexer and sparse
+ *   attention. They either carry a position-ordered dependency or have no
+ *   weight-reuse payoff. Only the projections are GEMMs.
  */
 #ifndef DSV4_PREFILL_H
 #define DSV4_PREFILL_H

@@ -859,9 +859,9 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               int n, const DSV4ExpertW **out,
                               DSV4CacheBatch *b)
 {
-    if (n > DSV4_MAX_TOPK) { b->rc = -1; return -1; }
+    if (n > DSV4_MAX_PREFETCH) { b->rc = -1; return -1; }
 
-    int claimed[DSV4_MAX_TOPK], nclaim = 0;
+    int claimed[DSV4_MAX_PREFETCH], nclaim = 0;
     b->layer = layer;
     b->n = n;
     b->ntodo = 0;

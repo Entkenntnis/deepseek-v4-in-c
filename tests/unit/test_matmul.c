@@ -577,7 +577,7 @@ int main(void)
                   "FP8 batched output is not bitwise-equal to nt GEMVs");
         }
 
-        /* FP4 has no batch kernel yet; the fallback must still be bitwise. */
+        /* FP4: the batch kernel must reproduce the production GEMV bitwise. */
         {
             static uint8_t W[(size_t)OUT * IN / 2];
             static uint8_t S[(size_t)OUT * (IN / 32)];
@@ -592,11 +592,11 @@ int main(void)
                 dsv4_mmq(ya + (size_t)t * OUT, x + (size_t)t * IN, &m);
             dsv4_mmq_n(yb, x, &m, NT);
             CHECK(memcmp(ya, yb, sizeof ya) == 0,
-                  "FP4 batched fallback is not bitwise-equal to nt GEMVs");
+                  "FP4 batched output is not bitwise-equal to nt GEMVs");
         }
 
         if (!fails)
-            printf("  ok    BF16, FP8 (normal+gather) and FP4 fallback all "
+            printf("  ok    BF16, FP8 (normal+gather) and FP4 batched all "
                    "bitwise-equal to nt GEMVs\n");
     }
 

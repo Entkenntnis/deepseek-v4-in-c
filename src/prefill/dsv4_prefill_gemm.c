@@ -23,10 +23,8 @@
  *   Batching changes only which independent dot products are in flight. BF16
  *   is bitwise; FP8 reuses the core rowscale body's exact block arithmetic
  *   (normal vs. scalar-special chosen by the same test), so it is bitwise
- *   against dsv4_matmul_fp8 rows as well.
- *
- * FP4 is a per-token fallback for now: the dense prefill path never calls it,
- * and a real FP4 batch kernel belongs with routed-expert work.
+ *   against dsv4_matmul_fp8 rows as well. FP4 reproduces the production
+ *   four-block fold per (row, token), and the matmul gate checks it bitwise.
  */
 #include <math.h>
 #include <stdio.h>
@@ -220,6 +218,129 @@ static void fp8_n(float *y, const float *x, const uint8_t *W,
     }
 }
 
+/* ---------------------------------------------------------------- FP4 ----- */
+/* Same nibble decode as src/core/dsv4_matmul.c: the batch kernel must produce
+ * the same f32 values the GEMV decodes, not merely an equivalent set. */
+static inline __m256 fp4_8(const uint8_t *row, int64_t base)
+{
+    uint32_t four;
+    memcpy(&four, row + (base >> 1), 4);
+    __m256i idx = _mm256_broadcastd_epi32(_mm_cvtsi32_si128((int)four));
+    idx = _mm256_srlv_epi32(idx, _mm256_setr_epi32(0, 4, 8, 12,
+                                                   16, 20, 24, 28));
+    const __m256 mag = _mm256_permutevar8x32_ps(
+        _mm256_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f), idx);
+    const __m256i sgn = _mm256_slli_epi32(
+        _mm256_and_si256(idx, _mm256_set1_epi32(8)), 28);
+    return _mm256_castsi256_ps(
+        _mm256_or_si256(_mm256_castps_si256(mag), sgn));
+}
+
+static inline __m256 fp4_block_sum32_w(const float *wf, const float *xb)
+{
+    const __m256 a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wf),
+                                      _mm256_loadu_ps(xb),
+                                      _mm256_setzero_ps());
+    const __m256 a1 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 8),
+                                      _mm256_loadu_ps(xb + 8),
+                                      _mm256_setzero_ps());
+    const __m256 a2 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 16),
+                                      _mm256_loadu_ps(xb + 16),
+                                      _mm256_setzero_ps());
+    const __m256 a3 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 24),
+                                      _mm256_loadu_ps(xb + 24),
+                                      _mm256_setzero_ps());
+    return _mm256_add_ps(_mm256_add_ps(a0, a1),
+                         _mm256_add_ps(a2, a3));
+}
+
+static inline double fp4_hsum256(__m256 s)
+{
+    __m128 lo = _mm256_castps256_ps128(s);
+    __m128 hi = _mm256_extractf128_ps(s, 1);
+    __m128 t = _mm_add_ps(lo, hi);
+    t = _mm_hadd_ps(t, t);
+    t = _mm_hadd_ps(t, t);
+    return (double)_mm_cvtss_f32(t);
+}
+
+/* Batched FP4 with the production kernel's arithmetic, not a new reduction
+ * order. Each 128-weight group is decoded ONCE into wf[128], then every token
+ * runs the same four block sums and the same four-lane double fold. The four
+ * block sums are folded exactly as dsv4_matmul_fp4_avx2 folds them, so the
+ * result for (row, token) is bitwise equal to nt separate GEMVs. */
+#define FP4_SC_MAX 512
+static void fp4_n(float *y, const float *x, const uint8_t *W,
+                  const uint8_t *S, int in, int out, int blk_r, int blk_c,
+                  int nt)
+{
+    const int sc = (in + blk_c - 1) / blk_c;
+
+    _Pragma("omp parallel for schedule(static) if (out > 64)")
+    for (int o = 0; o < out; o++) {
+        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+
+        double sdec[FP4_SC_MAX];
+        for (int i = 0; i < sc; i++)
+            sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
+
+        __m256d acc4[DSV4_MAX_BATCH];
+        double total[DSV4_MAX_BATCH];
+        for (int t = 0; t < nt; t++) {
+            acc4[t] = _mm256_setzero_pd();
+            total[t] = 0.0;
+        }
+
+        int bi = 0;
+        int c0 = 0;
+        for (; c0 + 127 < in; c0 += 128, bi += 4) {
+            float wf[128];
+            for (int i = 0; i < 128; i += 8)
+                _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+
+            const __m256d sl = _mm256_loadu_pd(sdec + bi);
+            for (int t = 0; t < nt; t++) {
+                const float *xb = x + (size_t)t * in + c0;
+                const __m256 s0 = fp4_block_sum32_w(wf,      xb);
+                const __m256 s1 = fp4_block_sum32_w(wf + 32, xb + 32);
+                const __m256 s2 = fp4_block_sum32_w(wf + 64, xb + 64);
+                const __m256 s3 = fp4_block_sum32_w(wf + 96, xb + 96);
+
+                const __m256 h01 = _mm256_hadd_ps(s0, s1);
+                const __m256 h23 = _mm256_hadd_ps(s2, s3);
+                const __m256 h   = _mm256_hadd_ps(h01, h23);
+                const __m128 lo  = _mm256_castps256_ps128(h);
+                const __m128 hi  = _mm256_extractf128_ps(h, 1);
+                const __m128 b4  = _mm_add_ps(lo, hi);
+
+                acc4[t] = _mm256_add_pd(
+                    acc4[t],
+                    _mm256_mul_pd(_mm256_cvtps_pd(b4), sl));
+            }
+        }
+        for (; c0 < in; c0 += 32, bi++) {
+            float wf[32];
+            for (int i = 0; i < 32; i += 8)
+                _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+            for (int t = 0; t < nt; t++) {
+                const __m256 s = fp4_block_sum32_w(
+                    wf, x + (size_t)t * in + c0);
+                total[t] += fp4_hsum256(s) * sdec[bi];
+            }
+        }
+
+        for (int t = 0; t < nt; t++) {
+            const __m128d dlo = _mm256_castpd256_pd128(acc4[t]);
+            const __m128d dhi = _mm256_extractf128_pd(acc4[t], 1);
+            const __m128d d2  = _mm_add_pd(dlo, dhi);
+            const __m128d d1  = _mm_unpackhi_pd(d2, d2);
+            total[t] += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
+            y[(size_t)t * out + o] = (float)total[t];
+        }
+    }
+}
+
 void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
 {
     if (nt <= 1) {
@@ -250,8 +371,15 @@ void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
         }
         break;
     case DSV4_WFP4:
-        for (int t = 0; t < nt; t++)
-            dsv4_mmq(y + (size_t)t * m->rows, x + (size_t)t * m->cols, m);
+        if (m->blk_r > 0 && m->blk_c == 32 && (m->cols & 31) == 0 &&
+            m->cols / 32 <= FP4_SC_MAX) {
+            fp4_n(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
+                  m->cols, m->rows, m->blk_r, m->blk_c, nt);
+        } else {
+            for (int t = 0; t < nt; t++)
+                dsv4_mmq(y + (size_t)t * m->rows,
+                         x + (size_t)t * m->cols, m);
+        }
         break;
     default:
         fprintf(stderr, "dsv4_mmq_n: matrix has unimplemented wdt %d "
