@@ -534,6 +534,16 @@ static int run_wait_any(void *ctx, int *k)
     return dsv4_cache_wait_any((DSV4Cache *)ctx, &g_batch, k);
 }
 
+static int run_expert_stats(void *ctx, DSV4ExpertStats *out)
+{
+    const DSV4Cache *c = (const DSV4Cache *)ctx;
+    out->hits = c->hits;
+    out->misses = c->misses;
+    out->evictions = c->evictions;
+    out->bytes_read = c->bytes_read;
+    return 0;
+}
+
 /* 0 = old end() barrier; >0 = miss reads in flight per layer. */
 static int g_stream_miss = 6;
 
@@ -633,7 +643,7 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
     }
     e->src = (DSV4ExpertSrc){ run_get_expert, run_get_experts,
                               run_begin_experts, run_end_experts,
-                              run_wait_any, &e->cache };
+                              run_wait_any, run_expert_stats, &e->cache };
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));

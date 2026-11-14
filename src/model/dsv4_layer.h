@@ -45,6 +45,13 @@ typedef struct {
     void  *arena;
 } DSV4Scratch;
 
+/* Optional accounting hook for the expert source. dsv4_prefill uses it to
+ * report the read side of a prefill separately from the matmul side; NULL is
+ * fine and means the caller does not want those counters. */
+typedef struct {
+    uint64_t hits, misses, evictions, bytes_read;
+} DSV4ExpertStats;
+
 /* A source of routed experts.
  *
  * Routed experts are streamed, not resident: 13,369,344 bytes each, 256 per
@@ -85,6 +92,10 @@ typedef struct {
      * run that expert's matmul while the remaining reads are still in flight.
      * NULL means "wait for the whole batch in end()", the old behaviour. */
     int (*wait_any)(void *ctx, int *k);
+
+    /* Optional. Fills the cumulative cache counters. Used by prefill
+     * instrumentation; NULL when the source has no counters (synthetic). */
+    int (*stats)(void *ctx, DSV4ExpertStats *out);
 
     void *ctx;
 } DSV4ExpertSrc;

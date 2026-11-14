@@ -154,6 +154,16 @@ static int dsv4_run_wait_any(void *ctx, int *k)
     return dsv4_cache_wait_any((DSV4Cache *)ctx, &g_batch, k);
 }
 
+static int dsv4_run_stats(void *ctx, DSV4ExpertStats *out)
+{
+    const DSV4Cache *c = (const DSV4Cache *)ctx;
+    out->hits = c->hits;
+    out->misses = c->misses;
+    out->evictions = c->evictions;
+    out->bytes_read = c->bytes_read;
+    return 0;
+}
+
 static double now_s(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -461,13 +471,13 @@ int main(int argc, char **argv)
             return 1;
         }
         src = (DSV4ExpertSrc){ synth_get, synth_get_many,
-                               synth_begin, synth_end, NULL, NULL };
+                               synth_begin, synth_end, NULL, NULL, NULL };
         fprintf(stderr, "synthetic experts: one fixed FP4 expert in RAM; "
                         "routed-expert disk traffic is disabled\n");
     } else {
         src = (DSV4ExpertSrc){ dsv4_run_get_expert, dsv4_run_get_experts,
                                dsv4_run_begin_experts, dsv4_run_end_experts,
-                               dsv4_run_wait_any, &cache };
+                               dsv4_run_wait_any, dsv4_run_stats, &cache };
     }
 
     /* ---- chat encoding, per the checkpoint's own encoding/README.md ----
