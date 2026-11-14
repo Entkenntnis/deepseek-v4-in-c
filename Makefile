@@ -9,7 +9,7 @@ CFLAGS  ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
 # never quietly become an accuracy change. Fusing a multiply and an add changes
 # the rounding, so it stays off.
 INCS    := -Iinclude -Iinclude/dsv4 -Ithird_party -Isrc/core -Isrc/io \
-           -Isrc/cache -Isrc/model -Isrc/tokenizer
+           -Isrc/cache -Isrc/model -Isrc/tokenizer -Isrc/prefill
 LDFLAGS ?= -lm -fopenmp -pthread
 
 BUILD := build
@@ -63,10 +63,12 @@ $(BIN)/test_quant: tests/unit/test_quant.c src/core/dsv4_quant.h
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_quant.c -o $@ $(LDFLAGS)
 
 $(BIN)/test_matmul: tests/unit/test_matmul.c src/core/dsv4_matmul.c \
+                    src/prefill/dsv4_prefill_gemm.c src/prefill/dsv4_prefill_gemm.h \
                     bench/matmul_reference.c src/core/dsv4_quant.h include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(INCS) tests/unit/test_matmul.c bench/matmul_reference.c \
-	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
+	      src/core/dsv4_matmul.c src/prefill/dsv4_prefill_gemm.c \
+	      -o $@ $(LDFLAGS)
 
 $(BIN)/test_ops: tests/unit/test_ops.c src/core/dsv4_ops.c include/dsv4/dsv4.h
 	@mkdir -p $(BIN)
@@ -120,16 +122,25 @@ tok-fixtures:
 
 DSV4_ENGINE := src/io/dsv4_st.c src/io/dsv4_trunk.c src/cache/dsv4_cache.c                src/model/dsv4_bind.c src/model/dsv4_layer.c                src/tokenizer/dsv4_tok.c $(DSV4_CORE)
 
-$(BIN)/dsv4: src/cli/dsv4_run.c $(DSV4_ENGINE)
+# The batched dense prefill path. Only the one-shot CLI takes it; keeping it
+# out of DSV4_ENGINE means the decode gates do not acquire a second forward
+# path or a new dependency.
+PREFILL_SRC := src/prefill/dsv4_prefill.c src/prefill/dsv4_prefill_gemm.c
+
+$(BIN)/dsv4: src/cli/dsv4_run.c $(DSV4_ENGINE) $(PREFILL_SRC) \
+             src/prefill/dsv4_prefill.h src/prefill/dsv4_prefill_gemm.h
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_run.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_run.c $(DSV4_ENGINE) $(PREFILL_SRC) \
+	      -o $@ $(LDFLAGS)
 
 # The TUI backend. Same engine, one JSON event per line on stdout. Kept separate
 # from dsv4_run.c so the one-shot CLI stays exactly what the gates and docs
 # describe.
-$(BIN)/dsv4-serve: src/cli/dsv4_serve.c $(DSV4_ENGINE)
+$(BIN)/dsv4-serve: src/cli/dsv4_serve.c $(DSV4_ENGINE) $(PREFILL_SRC) \
+                   src/prefill/dsv4_prefill.h src/prefill/dsv4_prefill_gemm.h
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_serve.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_serve.c $(DSV4_ENGINE) $(PREFILL_SRC) \
+	      -o $@ $(LDFLAGS)
 
 $(BIN)/test_pro: tests/unit/test_pro.c $(DSV4_ENGINE)
 	@mkdir -p $(BIN)
@@ -174,8 +185,19 @@ test: $(BIN)/test_pro $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/tes
 # The README tells you to run these, so something has to build them. They link
 # the same objects with the same CFLAGS as the engine -- a bench built with
 # different flags measures a different program.
-BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants $(BIN)/ctx_kernels $(BIN)/bind_resolve
+BENCHBIN := $(BIN)/matmul_bw $(BIN)/cache_bw $(BIN)/fp8_decode $(BIN)/fp4_f32 $(BIN)/matmul_variants $(BIN)/ctx_kernels $(BIN)/bind_resolve $(BIN)/prefill_gemm
 bench: $(BENCHBIN)
+
+# Does a dense prefill batch actually beat the GEMV it replaces? Cold weights,
+# per-token speedup, real Flash shapes. This is the go/no-go for the prefill
+# path; it does not touch the model or the disk.
+$(BIN)/prefill_gemm: bench/prefill_gemm.c src/core/dsv4_matmul.c \
+                     src/prefill/dsv4_prefill_gemm.c src/prefill/dsv4_prefill_gemm.h \
+                     bench/matmul_reference.c
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) bench/prefill_gemm.c bench/matmul_reference.c \
+	      src/core/dsv4_matmul.c src/prefill/dsv4_prefill_gemm.c \
+	      -o $@ $(LDFLAGS)
 
 # Context-scaling kernels: top-k, indexer, sparse attention and mHC, old vs new,
 # on a synthetic KV cache. No checkpoint and no disk, so it can run while the
@@ -237,7 +259,7 @@ help:
 	@echo "  make               build everything"
 	@echo "  make test          the gate ladder (the trunk gate needs"
 	@echo "                     DSV4_MODEL and DSV4_TRUNK)"
-	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels"
+	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels, prefill_gemm"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make tui           build the streaming backend and launch the Python TUI"
 	@echo "  make clean"

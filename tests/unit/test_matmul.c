@@ -33,6 +33,7 @@
 #endif
 #include "dsv4.h"
 #include "dsv4_quant.h"
+#include "dsv4_prefill_gemm.h"
 
 void dsv4_matmul_bf16(float *, const float *, const uint16_t *, int, int);
 void dsv4_matmul_fp8(float *, const float *, const uint8_t *, const uint8_t *,
@@ -504,6 +505,100 @@ int main(void)
                    "subnormal/NaN/zero block falls back exactly\n", OUT);
     }
 #endif
+
+    printf("\n-- GATE  batched matmul equals nt separate GEMVs --\n");
+    {
+        enum { NT = 7, IN = 256, OUT = 130 };
+        static float x[NT * IN], ya[NT * OUT], yb[NT * OUT];
+        unsigned r = 123456789u;
+
+        /* DIFFERENT activations for every token. Feeding one vector nt times
+         * would pass even if the kernel ignored the token index, which is the
+         * likeliest way to get a batched kernel wrong. */
+        for (int t = 0; t < NT; t++)
+            for (int i = 0; i < IN; i++) {
+                r = r * 1103515245u + 12345u;
+                x[(size_t)t * IN + i] =
+                    (float)((int)((r >> 16) & 0x3ff) - 512) * 0.017f;
+            }
+
+        /* BF16: bitwise, same reduction tree per token. */
+        {
+            static uint16_t W[(size_t)OUT * IN];
+            static uint8_t S[1];
+            for (size_t i = 0; i < (size_t)OUT * IN; i++) {
+                r = r * 1103515245u + 12345u;
+                /* Finite by construction. A NaN would compare by payload and
+                 * turn a real mismatch into a sign bit, which is not a test. */
+                W[i] = (uint16_t)(0x3800u | ((r >> 16) & 0x03FFu));
+            }
+            DSV4QMat m = { W, S, DSV4_WBF16, OUT, IN, 0, 0 };
+            for (int t = 0; t < NT; t++)
+                dsv4_mmq(ya + (size_t)t * OUT, x + (size_t)t * IN, &m);
+            dsv4_mmq_n(yb, x, &m, NT);
+            if (memcmp(ya, yb, sizeof ya) != 0) {
+                for (int i = 0; i < NT * OUT; i++)
+                    if (memcmp(&ya[i], &yb[i], sizeof(float)) != 0) {
+                        printf("  first BF16 diff at %d: gemv %.9g batched %.9g\n",
+                               i, (double)ya[i], (double)yb[i]);
+                        break;
+                    }
+            }
+            CHECK(memcmp(ya, yb, sizeof ya) == 0,
+                  "BF16 batched output is not bitwise-equal to nt GEMVs");
+
+            /* nt == 1 must land on the GEMV itself, not a one-wide batch. */
+            dsv4_mmq(ya, x, &m);
+            dsv4_mmq_n(yb, x, &m, 1);
+            CHECK(memcmp(ya, yb, (size_t)OUT * sizeof(float)) == 0,
+                  "BF16 nt=1 did not land on the GEMV");
+        }
+
+        /* FP8: the production rowscale body is reused per token, including a
+         * block forced through the exactness fallback. */
+        {
+            static uint8_t W[(size_t)OUT * IN];
+            static uint8_t S[(2 * (IN / 128))];
+            for (size_t i = 0; i < (size_t)OUT * IN; i++) {
+                r = r * 1103515245u + 12345u;
+                unsigned e = 1 + ((r >> 16) % 14);   /* normal, never sub/NaN */
+                unsigned mm = (r >> 20) & 7u;
+                unsigned s = (r >> 24) & 1u;
+                W[i] = (uint8_t)((s << 7) | (e << 3) | mm);
+            }
+            W[0] = 0x01;    /* force the first 128-byte block to the gather path */
+            for (size_t i = 0; i < sizeof S; i++)
+                S[i] = (uint8_t)(124 + (i % 7));
+            DSV4QMat m = { W, S, DSV4_WFP8, OUT, IN, 128, 128 };
+            for (int t = 0; t < NT; t++)
+                dsv4_mmq(ya + (size_t)t * OUT, x + (size_t)t * IN, &m);
+            dsv4_mmq_n(yb, x, &m, NT);
+            CHECK(memcmp(ya, yb, sizeof ya) == 0,
+                  "FP8 batched output is not bitwise-equal to nt GEMVs");
+        }
+
+        /* FP4 has no batch kernel yet; the fallback must still be bitwise. */
+        {
+            static uint8_t W[(size_t)OUT * IN / 2];
+            static uint8_t S[(size_t)OUT * (IN / 32)];
+            for (size_t i = 0; i < sizeof W; i++) {
+                r = r * 1103515245u + 12345u;
+                W[i] = (uint8_t)(r >> 16);
+            }
+            for (size_t i = 0; i < sizeof S; i++)
+                S[i] = (uint8_t)(124 + (i % 7));
+            DSV4QMat m = { W, S, DSV4_WFP4, OUT, IN, 1, 32 };
+            for (int t = 0; t < NT; t++)
+                dsv4_mmq(ya + (size_t)t * OUT, x + (size_t)t * IN, &m);
+            dsv4_mmq_n(yb, x, &m, NT);
+            CHECK(memcmp(ya, yb, sizeof ya) == 0,
+                  "FP4 batched fallback is not bitwise-equal to nt GEMVs");
+        }
+
+        if (!fails)
+            printf("  ok    BF16, FP8 (normal+gather) and FP4 fallback all "
+                   "bitwise-equal to nt GEMVs\n");
+    }
 
     if (fails) { printf("MATMUL GATE FAILED: %d check(s)\n", fails); return 1; }
     printf("MATMUL GATE PASSED\n");

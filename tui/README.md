@@ -85,9 +85,20 @@ is what makes the layer counter and the live cache/disk rates move during a
 token. With `--no-layers` there are only per-token events, which is quieter on a
 slow terminal or over a remote link.
 
-The one-shot CLI and all correctness gates are unchanged. The only engine-side
-additions needed for streaming were a tokenizer decoder (the old code could
-encode but not decode token ids to bytes) and the new `dsv4_serve.c`.
+Batched prefill is layer-major, so it does not emit one `layer` event per
+prompt token. Instead the engine emits `prefill` progress events carrying the
+stage (`chunk`, `layer`, `chunk_done`, `head`), chunk/layer counters, an
+estimated progress fraction and the same live `sys`/`cache`/`trunk` blocks as
+a layer event. The panel puts a **PREFILL** section above THROUGHPUT with the
+current stage and a progress bar; MEMORY keeps updating from the same events,
+so cache-hit and disk readout move during the prompt. The prompt-only timer
+also arrives on the first `token` event, and the transcript gets a
+`prefill: N tokens in T s (tok/s, s/token; batch N|per-token)` line before the
+assistant bubble.
+
+The one-shot CLI and all correctness gates are unchanged. The streaming
+backend is `dsv4_serve.c`; it shares the same `src/prefill/` dense-prefill
+module as the one-shot CLI, so both paths use identical math.
 
 ## Defaults
 
@@ -102,6 +113,11 @@ The defaults match the development machine:
 | `--budget` | `10.0` GB (or `auto`) |
 | `--ctx` | `4096` tokens |
 | `--gen` | `256` tokens per turn |
+| `--prefill-batch-size` | `16` tokens per dense prefill chunk (`0` disables) |
+
+The TUI runs the prompt through the dense prefill path in chunks of 16 by
+default; `--prefill-batch-size 0` restores the per-token path. Routed experts
+stay per token either way, and the generated token stream is identical.
 
 Budget matters. The trunk is ~6.3 GB and one decode pass touches ~3.2 GB of
 experts; a budget below roughly 9.5 GB leaves the expert cache with fewer slots

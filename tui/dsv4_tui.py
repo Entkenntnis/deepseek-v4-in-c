@@ -47,12 +47,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    from markdown_render import RICH_AVAILABLE, RICH_ERROR, Span, render_markdown
-except ImportError:  # running as `python3 -m tui.dsv4_tui`
-    from .markdown_render import (RICH_AVAILABLE, RICH_ERROR, Span,
-                                  render_markdown)
-
 # ----------------------------------------------------------------- defaults --
 
 HOME = Path.home()
@@ -123,43 +117,6 @@ def axis_label(value: float, step: float) -> str:
     if step < 1.0 and abs(value - round(value)) < 1e-9:
         return "0" if abs(value) < 1e-9 else f"{value:.1f}"
     return f"{value:g}"
-
-
-# xterm's first 16 colours. Rich downgrades named/true colours to an xterm-256
-# index, but a terminal with only 8 or 16 colours needs one more step down.
-_XTERM_STD = (
-    (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
-    (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
-    (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
-    (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
-)
-
-
-def _xterm_rgb(n: int) -> tuple[int, int, int]:
-    n = int(n)
-    if 0 <= n < 16:
-        return _XTERM_STD[n]
-    if 16 <= n < 232:
-        n -= 16
-        levels = (0, 95, 135, 175, 215, 255)
-        return levels[(n // 36) % 6], levels[(n // 6) % 6], levels[n % 6]
-    if 232 <= n < 256:
-        v = 8 + (n - 232) * 10
-        return v, v, v
-    return 0, 0, 0
-
-
-def _dist2(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
-    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-            + (a[2] - b[2]) ** 2)
-
-
-def _nearest_basic(rgb: tuple[int, int, int], n: int) -> int:
-    return min(range(max(1, min(n, 16))), key=lambda i: _dist2(rgb, _XTERM_STD[i]))
-
-
-def _rgb_to_xterm(rgb: tuple[int, int, int]) -> int:
-    return min(range(256), key=lambda i: _dist2(rgb, _xterm_rgb(i)))
 
 
 # ------------------------------------------------------------------ backend --
@@ -467,8 +424,8 @@ class DemoBackend:
 
         self.sink.event({
             "event": "start", "pos": 0, "prompt_tokens": prompt_tokens,
-            "gen_max": ngen, "mode": mode, "context_cap": 4096,
-            **self._base(),
+            "gen_max": ngen, "mode": mode, "prefill_batch": 0,
+            "context_cap": 4096, **self._base(),
         })
 
         text = self._response(prompt, think)
@@ -530,8 +487,9 @@ class DemoBackend:
             self.sink.event({
                 "event": "token", "id": 1000 + i,
                 "hex": chunk.encode("utf-8").hex(), "index": i,
-                "pos": context, "t": elapsed, "ttft": ttft, "top": top,
-                **self._base(elapsed),
+                "pos": context, "t": elapsed, "ttft": ttft,
+                "prefill_s": ttft, "prefill_tokens": prompt_tokens,
+                "top": top, **self._base(elapsed),
             })
             context += 1
             produced += 1
@@ -556,8 +514,6 @@ class Message:
     text: str = ""
     think: bool = False
     meta: dict = field(default_factory=dict)
-    md_cache_key: tuple = ()
-    md_cache_lines: list[list[Span]] = field(default_factory=list)
 
 
 class App:
@@ -616,6 +572,9 @@ class App:
         self.prefill_done = False
         self.prefill_total_s = 0.0
         self.prefill_tokens = 0
+        self.prefill_batch = int(getattr(args, "prefill_batch_size", 0) or 0)
+        self.prefill_progress: dict = {}
+        self.prefill_active = False
         self.ttft = 0.0
         self.current_layer = 0
         self.phase = ""
@@ -638,11 +597,6 @@ class App:
         self.last_render = 0.0
         self.demo = bool(args.demo)
         self.pairs: dict[str, int] = {}
-        self.markdown_enabled = not args.no_markdown
-        self.md_warned = False
-        self._pair_cache: dict[tuple[int, int], int] = {}
-        self._color_cache: dict[Any, int] = {}
-        self._next_pair = 1
 
     # -- backend lifecycle -------------------------------------------------
     def start_backend(self) -> None:
@@ -670,6 +624,12 @@ class App:
                 argv += ["--readers", str(self.args.readers)]
             if self.args.reader_pin is not None:
                 argv += ["--reader-pin", self.args.reader_pin]
+            # The TUI defaults to a small dense prefill batch. 0 falls back to
+            # the per-token decode path; the serve flag is the same one the
+            # one-shot CLI uses.
+            pb = getattr(self.args, "prefill_batch_size", 0)
+            if pb is not None:
+                argv += ["--prefill-batch-size", str(pb)]
             if self.args.think:
                 argv.append("--think")
             if self.args.no_layers:
@@ -877,7 +837,15 @@ class App:
         # Token text and layer progress below are NOT throttled.
         now = time.monotonic()
         force_stats = name in ("ready", "stats", "done")
-        if force_stats or now - self.last_stats_ingest >= self.stats_interval:
+        # Prefill has no layer events, so its progress events are the only
+        # live cache/disk samples. Ingest every one: the MEMORY block then
+        # moves during the prompt instead of waiting for the first decoded
+        # token. ingest_stats() still guards the *rate* window at 0.2 s, so a
+        # burst of layer progress does not turn into rate noise.
+        if name == "prefill":
+            self.ingest_stats(ev)
+            self.last_stats_ingest = now
+        elif force_stats or now - self.last_stats_ingest >= self.stats_interval:
             self.ingest_stats(ev)
             self.last_stats_ingest = now
             if force_stats:
@@ -900,14 +868,6 @@ class App:
                     f"({cache.get('resident_gb', 0):+.2f} GB), "
                     f"trunk {trunk.get('pinned', '?')} pinned. "
                     f"Context {self.context_cap} tokens."))
-                if self.markdown_enabled and not RICH_AVAILABLE and not self.md_warned:
-                    self.md_warned = True
-                    self.add_system(
-                        "Markdown rendering is off because rich is not installed. "
-                        "Install it with: python3 -m pip install -r "
-                        "tui/requirements.txt  (or run /markdown off to hide this)")
-                elif self.markdown_enabled and RICH_AVAILABLE:
-                    self.add_system("Markdown rendering on (rich)")
             if self.status in ("starting", "waiting"):
                 self.status = "ready"
             self.dirty = True
@@ -925,12 +885,17 @@ class App:
             self.gen_t = 0.0
             self.last_token_t = 0.0
             self.prefill_spt.clear()
-            self.decode_spt.clear()
+            # decode_spt is cleared on the first decoded token, not here: the
+            # DECODE numbers should stay on the last turn's value while the
+            # prompt is prefilling.
             self.prefill_pos = None
             self.prefill_prev_t = 0.0
             self.prefill_done = False
             self.prefill_total_s = 0.0
             self.prefill_tokens = self.prompt_tokens
+            self.prefill_batch = int(ev.get("prefill_batch") or 0)
+            self.prefill_progress = {}
+            self.prefill_active = self.prefill_batch > 1
             self.ttft = 0.0
             self.current_layer = 0
             self.phase = "prompt"
@@ -963,6 +928,17 @@ class App:
                     self.prefill_prev_t = self.gen_t
             self.dirty = True
 
+        elif name == "prefill":
+            self.prefill_progress = ev
+            self.prefill_active = True
+            self.prefill_batch = int(ev.get("batch") or self.prefill_batch or 0)
+            self.prefill_tokens = int(ev.get("tokens_total") or self.prompt_tokens or 0)
+            self.prefill_total_s = float(ev.get("elapsed") or self.prefill_total_s)
+            self.current_layer = int(ev.get("layer") or self.current_layer)
+            self.phase = "prompt"
+            self.stats_force = True
+            self.dirty = True
+
         elif name == "token":
             raw = bytes.fromhex(ev.get("hex") or "")
             text = strip_special_tokens(self.decoder.decode(raw, final=False))
@@ -974,6 +950,8 @@ class App:
             t = float(ev.get("t") or 0.0)
             ttft = float(ev.get("ttft") or self.ttft)
             if index == 0:
+                # Start the decode average fresh now that prompt work is done.
+                self.decode_spt.clear()
                 # The last prompt token completes at ttft; the previous
                 # positions were closed when the next position started.
                 if (self.prefill_pos is not None and not self.prefill_done
@@ -981,6 +959,11 @@ class App:
                     self.prefill_spt.append(ttft - self.prefill_prev_t)
                 self.prefill_done = True
                 self.prefill_total_s = ttft
+                ps = float(ev.get("prefill_s") or 0.0)
+                pt = int(ev.get("prefill_tokens") or self.prompt_tokens or 0)
+                if ps > 0.0 and pt > 0:
+                    self.add_prefill_note(ps, pt, self.prefill_batch)
+                self.prefill_active = False
             elif self.last_token_t > 0:
                 dt = t - self.last_token_t
                 if dt > 1e-6:
@@ -994,6 +977,7 @@ class App:
         elif name == "done":
             self.generating = False
             self.cancel_pending = False
+            self.prefill_active = False
             self.status = "ready" if ev.get("stop") != "error" else "failed"
             self.last_done = ev
             self.context_used = int(ev.get("context_used") or self.context_used)
@@ -1020,6 +1004,8 @@ class App:
             self.decode_spt.clear()
             self.prefill_done = False
             self.prefill_total_s = 0.0
+            self.prefill_active = False
+            self.prefill_progress = {}
             self.stats_force = True
             self.dirty = True
 
@@ -1038,6 +1024,7 @@ class App:
             self.current_msg = None
             self.generating = False
             self.cancel_pending = False
+            self.prefill_active = False
             if self.status not in ("starting",):
                 self.status = "ready" if self.backend_alive else "failed"
             self.messages.append(Message("error", msg))
@@ -1046,6 +1033,32 @@ class App:
     # -- commands ----------------------------------------------------------
     def add_system(self, text: str) -> None:
         self.messages.append(Message("system", text))
+        self.dirty = True
+
+    def add_prefill_note(self, seconds: float, tokens: int, batch: int) -> None:
+        """Put the prompt's own timing into the transcript, not just the panel.
+
+        Inserted before the assistant bubble that `start` already opened, so it
+        reads in the order the work happened: prompt, then answer. The timer is
+        the engine's prompt-only measurement; ttft would include the head.
+        """
+        if seconds <= 0.0 or tokens <= 0:
+            return
+        spt = seconds / tokens
+        tps = tokens / seconds
+        mode = f"batch {batch}" if batch > 1 else "per-token"
+        text = (f"prefill: {tokens} tokens in {seconds:.2f} s "
+                f"({tps:.2f} tok/s, {spt:.3f} s/token; {mode})")
+        msg = Message("system", text)
+        if self.current_msg is not None:
+            try:
+                at = self.messages.index(self.current_msg)
+            except ValueError:
+                self.messages.append(msg)
+            else:
+                self.messages.insert(at, msg)
+        else:
+            self.messages.append(msg)
         self.dirty = True
 
     def submit(self) -> None:
@@ -1117,7 +1130,6 @@ class App:
                 "  /think [on|off]       toggle thinking mode for the next turn\n"
                 "  /gen N                max tokens per turn\n"
                 "  /layers [on|off]      stream per-layer progress events\n"
-                "  /markdown [on|off]    Markdown rendering (rich, optional)\n"
                 "  /stats                ask the engine for a fresh snapshot\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
@@ -1177,19 +1189,6 @@ class App:
             else:
                 self.show_layers = not self.show_layers
             self.add_system(f"layer events {'on' if self.show_layers else 'off'}")
-        elif cmd == "/markdown":
-            if arg.lower() in ("on", "1", "true", "yes"):
-                self.markdown_enabled = True
-            elif arg.lower() in ("off", "0", "false", "no"):
-                self.markdown_enabled = False
-            else:
-                self.markdown_enabled = not self.markdown_enabled
-            if self.markdown_enabled and not RICH_AVAILABLE:
-                self.add_system("Markdown needs rich: python3 -m pip install -r "
-                                "tui/requirements.txt")
-            else:
-                self.add_system(f"Markdown rendering "
-                                f"{'on' if self.markdown_enabled else 'off'}")
         elif cmd == "/stats":
             if self.backend_alive:
                 self.backend.send({"cmd": "stats"})
@@ -1339,7 +1338,10 @@ class App:
         if status == "generating":
             n_layers = int((self.ready.get("config") or {}).get("layers") or 0) or 43
             if self.phase == "prompt":
-                phase = f"prefill {self.current_layer}/{n_layers}"
+                if self.prefill_batch > 1:
+                    phase = f"prefill batch {self.prefill_batch}"
+                else:
+                    phase = f"prefill {self.current_layer}/{n_layers}"
             elif self.phase == "resume":
                 phase = "closing previous turn"
             else:
@@ -1398,15 +1400,9 @@ class App:
             out.append(raw)
         return out
 
-    def chat_lines(self, width: int) -> list[list[Span]]:
-        """Build the transcript as lines of styled spans.
-
-        Each line is a list because Markdown can put several styles on one line
-        (e.g. a paragraph containing *italic* and **bold**). The speaker prefix
-        is a named span so it keeps the role colour even when the body is
-        Markdown.
-        """
-        lines: list[list[Span]] = []
+    def chat_lines(self, width: int) -> list[list[tuple[str, str]]]:
+        """Build the transcript as lines of (text, colour) segments."""
+        lines: list[list[tuple[str, str]]] = []
         for msg in self.messages:
             if msg.role == "user":
                 label, color = "you", "user"
@@ -1428,31 +1424,12 @@ class App:
                 reasoning = reasoning.strip()
                 if reasoning:
                     for ln in self._wrap(reasoning, width - 4):
-                        lines.append([Span("    " + ln, named="reasoning")])
+                        lines.append([("    " + ln, "reasoning")])
                     lines.append([])
 
-            use_md = (msg.role == "assistant" and self.markdown_enabled
-                      and RICH_AVAILABLE)
-            if use_md:
-                md_width = max(10, width - 4)
-                # The body only grows while streaming, so (length, width) is a
-                # sufficient cache key for this prototype.
-                key = (len(body), md_width)
-                if msg.md_cache_key != key:
-                    rendered = render_markdown(body, md_width) if body else None
-                    if rendered is None:
-                        rendered = [[Span(ln)] for ln in self._wrap(body, md_width)]
-                    msg.md_cache_lines = rendered
-                    msg.md_cache_key = key
-                md_lines = msg.md_cache_lines or [[]]
-                for i, spans in enumerate(md_lines):
-                    prefix = Span(f"{label} › " if i == 0 else "    ",
-                                  named=color)
-                    lines.append([prefix] + list(spans))
-            else:
-                for i, ln in enumerate(self._wrap(body, width - 4)):
-                    prefix = f"{label} › " if i == 0 else "    "
-                    lines.append([Span(prefix + ln, named=color)])
+            for i, ln in enumerate(self._wrap(body, width - 4)):
+                prefix = f"{label} › " if i == 0 else "    "
+                lines.append([(prefix + ln, color)])
 
             if msg.meta:
                 m = msg.meta
@@ -1461,7 +1438,7 @@ class App:
                         f"{float(m.get('s_per_token') or 0):.2f} s/tok · "
                         f"ttft {float(m.get('ttft') or 0):.1f}s · "
                         f"{m.get('stop', '')}")
-                lines.append([Span("    " + meta, named="dim")])
+                lines.append([("    " + meta, "dim")])
             lines.append([])
         return lines
 
@@ -1478,19 +1455,19 @@ class App:
         # Right-align the transcript to the bottom while it fits, so a new chat
         # starts at the bottom edge rather than floating at the top.
         pad = max(0, view_h - len(visible))
-        for i, spans in enumerate(visible):
+        for i, segments in enumerate(visible):
             row = top + pad + i
             if row > bottom:
                 break
             x = 0
-            for span in spans:
+            for text, color in segments:
                 if x >= width:
                     break
-                text = span.text.replace("\t", "    ")
+                text = text.replace("\t", "    ")
                 text = "".join(c if c.isprintable() else "?" for c in text)
                 if not text:
                     continue
-                self._add(scr, row, x, text, width - x, self.span_attr(span))
+                self._add(scr, row, x, text, width - x, self.attr(color))
                 x += len(text)
 
     def _draw_separator(self, scr: "curses.window", top: int, bottom: int,
@@ -1522,7 +1499,7 @@ class App:
 
     def stats_lines(self, width: int,
                     height: int) -> list[list[tuple[str, str]]]:
-        """One unified tok/s graph for prefill and decode.
+        """Decode tok/s graph plus live memory and CPU numbers.
 
         The graph is a right-aligned sliding window: new samples appear at the
         right edge and older ones move out to the left. The header carries the
@@ -1535,25 +1512,69 @@ class App:
         def emit(*segments: tuple[str, str]) -> None:
             out.append(list(segments))
 
-        prefill = [("prefill", 1.0 / dt) for dt in self.prefill_spt if dt > 1e-9]
-        decode = [("decode", 1.0 / dt) for dt in self.decode_spt if dt > 1e-9]
-        samples = prefill + decode
+        in_prefill = self.prefill_active
+
+        def emit_prefill() -> None:
+            p = self.prefill_progress or {}
+            stage = p.get("stage") or "start"
+            total = int(p.get("tokens_total") or self.prompt_tokens or 0)
+            done = int(p.get("tokens_done") or 0)
+            prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
+            elapsed = float(p.get("elapsed") or 0.0)
+            batch = int(p.get("batch") or self.prefill_batch or 0)
+            chunk = int(p.get("chunk") or 0)
+            chunks = int(p.get("chunks") or 0)
+            layer = int(p.get("layer") or 0)
+            layers = int(p.get("layers") or 0)
+
+            if stage == "layer":
+                status = f"layers {layer}/{layers}"
+            elif stage == "chunk":
+                status = f"chunk {chunk}/{chunks}"
+            elif stage == "chunk_done":
+                status = f"chunk {chunk}/{chunks} done"
+            elif stage == "head":
+                status = "output head"
+            elif stage == "done":
+                status = "prompt done"
+            else:
+                status = "preparing"
+
+            seg: list[tuple[str, str]] = [
+                (" PREFILL", "section"), (f" {status}", "active")]
+            if total:
+                seg.append((f"  {done}/{total} tok", "value"))
+            if batch > 1:
+                seg.append((f"  batch {batch}", "dim"))
+            emit(*seg)
+
+            bar_w = max(8, min(28, width - 18))
+            filled = int(round(prog * bar_w))
+            bar = "█" * filled + "░" * (bar_w - filled)
+            rate = (prog * total / elapsed) if elapsed > 0.05 else 0.0
+            emit((" [", "dim"), (bar, "prefill"), ("] ", "dim"),
+                 (f"{prog * 100:3.0f}%", "value"))
+            emit((" ", "dim"), (f"{elapsed:5.1f}s", "dim"),
+                 ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
+                  else ("  -", "dim")))
+            emit()
+
+        if in_prefill:
+            emit_prefill()
+
+        samples = [("decode", 1.0 / dt) for dt in self.decode_spt
+                   if dt > 1e-9]
 
         cur_spt = 0.0
         if samples:
             cur_spt = 1.0 / samples[-1][1]
-        elif (self.prefill_done and self.prefill_tokens > 0
-                and self.prefill_total_s > 0):
-            # With --no-layers there is no timeline, but the aggregate prefill
-            # time is still available.
-            cur_spt = self.prefill_total_s / self.prefill_tokens
         elif not self.generating:
             cur_spt = float(self.last_done.get("s_per_token") or 0.0)
         cur_rate = 1.0 / cur_spt if cur_spt > 0 else 0.0
         rate_txt = self._short(cur_rate) if cur_rate else "-"
         spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
 
-        emit((" THROUGHPUT", "section"),
+        emit((" DECODE", "section"),
              (f" {rate_txt} tok/s", "dim"),
              (f" ({spt_txt} s/tok)", "dim"))
 
@@ -1610,9 +1631,7 @@ class App:
             emit((" temp ", "dim"), (temp, "value"))
 
         def emit_bottom() -> None:
-            legend = [(" tok/s ", "dim"),
-                      ("● prefill", "prefill"), ("  ", "dim"),
-                      ("● decode", "decode")]
+            legend = [(" tok/s ", "dim"), ("● decode", "decode")]
             legend_len = sum(len(text) for text, _ in legend)
             emit((" " * max(0, width - legend_len), "dim"), *legend)
             emit()
@@ -1621,9 +1640,9 @@ class App:
             emit_cpu()
 
         if not samples:
-            if self.generating and self.phase == "prompt":
+            if self.generating and self.phase == "prompt" and not in_prefill:
                 emit(("  prefill in progress...", "dim"))
-            else:
+            elif not self.generating:
                 emit(("  waiting for a turn...", "dim"))
             emit_bottom()
             return out
@@ -1632,7 +1651,7 @@ class App:
         visible = samples[-graph_w:]
         cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
 
-        graph_h = max(3, min(10, height - 13))
+        graph_h = max(3, min(10, height - 13 - (4 if in_prefill else 0)))
         target = 5 if graph_h >= 6 else 2
         peak = max(rate for _, rate in visible)
         step = nice_step(peak, target)
@@ -1653,7 +1672,7 @@ class App:
             segments: list[tuple[str, str]] = []
             cur_color: Optional[str] = None
             cur_text = ""
-            for phase, rate in cols:
+            for _, rate in cols:
                 frac = clamp(rate / axis_max, 0.0, 1.0) if axis_max > 0 else 0.0
                 filled = (max(1, int(round(frac * graph_h * sub)))
                           if rate > 1e-9 else 0)
@@ -1664,8 +1683,7 @@ class App:
                     ch = blocks[n]
                 else:
                     ch = " "
-                color = ("prefill" if phase == "prefill" else "decode") \
-                    if ch != " " else "dim"
+                color = "decode" if ch != " " else "dim"
                 if color != cur_color:
                     if cur_text:
                         segments.append((cur_text, cur_color or "dim"))
@@ -1689,7 +1707,7 @@ class App:
         # it jitter faster than the values move.
         height = bottom - top + 1
         now = time.monotonic()
-        if (self.stats_force or not self.stats_cache
+        if (self.prefill_active or self.stats_force or not self.stats_cache
                 or width != self.stats_cache_width
                 or height != self.stats_cache_height
                 or now - self.stats_cache_ts >= self.stats_interval):
@@ -1747,74 +1765,6 @@ class App:
     def attr(self, name: str) -> int:
         return self.pairs.get(name, 0)
 
-    def _color_index(self, spec: Any) -> int:
-        """RGB/xterm-256 -> an index this terminal can actually init_pair()."""
-        if spec is None:
-            return -1
-        if isinstance(spec, tuple):
-            rgb = (int(spec[0]), int(spec[1]), int(spec[2]))
-        else:
-            idx = int(spec)
-            if curses.COLORS >= 256 and 0 <= idx < curses.COLORS:
-                return idx
-            rgb = _xterm_rgb(idx)
-        key = (rgb, curses.COLORS)
-        if key in self._color_cache:
-            return self._color_cache[key]
-        if curses.COLORS >= 256:
-            out = _rgb_to_xterm(rgb)
-        elif curses.COLORS >= 16:
-            out = _nearest_basic(rgb, 16)
-        elif curses.COLORS >= 8:
-            out = _nearest_basic(rgb, 8)
-        else:
-            out = -1
-        self._color_cache[key] = out
-        return out
-
-    def pair_for(self, fg: Any, bg: Any) -> int:
-        """Lazily allocate a curses colour pair for one Markdown span."""
-        if not curses.has_colors():
-            return 0
-        f = self._color_index(fg)
-        b = self._color_index(bg)
-        if f < 0 and b < 0:
-            return 0
-        key = (f, b)
-        if key in self._pair_cache:
-            return self._pair_cache[key]
-        try:
-            limit = curses.COLOR_PAIRS
-        except Exception:
-            limit = 64
-        if self._next_pair >= limit:
-            return 0
-        pid = self._next_pair
-        self._next_pair += 1
-        try:
-            curses.init_pair(pid, f, b)
-        except curses.error:
-            return 0
-        attr = curses.color_pair(pid)
-        self._pair_cache[key] = attr
-        return attr
-
-    def span_attr(self, span: Span) -> int:
-        if span.named:
-            return self.attr(span.named)
-        attr = self.pair_for(span.fg, span.bg)
-        if span.bold:
-            attr |= curses.A_BOLD
-        if span.italic:
-            attr |= getattr(curses, "A_ITALIC", 0)
-        if span.underline:
-            attr |= curses.A_UNDERLINE
-        if span.dim:
-            attr |= curses.A_DIM
-        if span.reverse:
-            attr |= curses.A_REVERSE
-        return attr
-
     def _add(self, scr: "curses.window", row: int, col: int, text: str,
              width: int, attr: int = 0) -> None:
         if not text or width <= 0 or row < 0 or col < 0:
@@ -1825,9 +1775,6 @@ class App:
             pass
 
     def init_colors(self) -> None:
-        self._pair_cache = {}
-        self._color_cache = {}
-        self._next_pair = 1
         self.pairs: dict[str, int] = {
             "default": 0, "value": 0, "dim": curses.A_DIM,
             "title": curses.A_BOLD, "status": 0, "active": curses.A_BOLD,
@@ -1865,7 +1812,6 @@ class App:
                 if name in ("title", "active", "error", "section"):
                     extra = curses.A_BOLD
                 self.pairs[name] = curses.color_pair(i) | extra
-            self._next_pair = len(specs) + 1
         except curses.error:
             pass
 
@@ -1955,6 +1901,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pin", choices=["off", "all", "p", "e"], default=None,
                    help="compute affinity: off, all, P-cores (p) or E-cores (e); "
                         "default: engine policy")
+    p.add_argument("--prefill-batch-size", type=int, default=16,
+                   metavar="N",
+                   help="dense prefill chunk size handed to dsv4-serve "
+                        "(default: 16; 0 = per-token decode path)")
     p.add_argument("--readers", type=int, default=None,
                    help="expert-reader threads; default: engine policy (6)")
     p.add_argument("--reader-pin", choices=["off", "all", "p", "e"],
@@ -1966,8 +1916,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start in thinking mode")
     p.add_argument("--no-layers", action="store_true",
                    help="do not stream per-layer events (less chatter)")
-    p.add_argument("--no-markdown", action="store_true",
-                   help="render assistant output as plain text, not Markdown")
     p.add_argument("--demo", action="store_true",
                    help="synthetic backend; no checkpoint required")
     return p

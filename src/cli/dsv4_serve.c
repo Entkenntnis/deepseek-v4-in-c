@@ -61,6 +61,7 @@
 #include "dsv4_layer.h"
 #include "dsv4_tok.h"
 #include "dsv4_threads.h"
+#include "dsv4_prefill.h"
 #include "json.h"
 
 /* Kernel entry points that intentionally live outside a public header. */
@@ -98,6 +99,9 @@ typedef struct {
     DSV4ModelBind    mb;
     DSV4Scratch      scratch;
     DSV4LayerState  *lst;
+    DSV4ExpertSrc    src;      /* one source, shared by decode and prefill */
+    DSV4Prefill     *pf;       /* NULL when batched prefill is disabled */
+    int              prefill_batch;
 
     float           *cs_d, *sn_d, *cs_c, *sn_c;
     int              maxpos;
@@ -108,6 +112,11 @@ typedef struct {
     int              n_ids, cap_ids;
     int32_t          eos_id;
     int              pending_forward;
+
+    /* Last turn's prompt timing, so the TUI can print an honest prefill line
+     * without subtracting the output head from ttft. */
+    double           prefill_s;
+    int              prefill_tokens;
 
     char            *system_prompt;
     int              think_default;
@@ -345,11 +354,13 @@ static void emit_ready(const Engine *e, const char *event)
 }
 
 static void emit_start(const Engine *e, int start_pos, int prompt_tokens,
-                       int gen_max, const char *mode)
+                       int gen_max, const char *mode, int prefill_batch)
 {
     printf("{\"event\":\"start\",\"pos\":%d,\"prompt_tokens\":%d,"
-           "\"gen_max\":%d,\"mode\":\"%s\",\"context_cap\":%d,",
-           start_pos, prompt_tokens, gen_max, mode, e->cap_ids);
+           "\"gen_max\":%d,\"mode\":\"%s\",\"prefill_batch\":%d,"
+           "\"context_cap\":%d,",
+           start_pos, prompt_tokens, gen_max, mode, prefill_batch,
+           e->cap_ids);
     write_sys_full(e);
     putchar(',');
     write_cache(e);
@@ -396,8 +407,10 @@ static void emit_token(const Engine *e, int32_t id, int index, int pos,
     e->hexbuf[2 * nb] = 0;
 
     printf("{\"event\":\"token\",\"id\":%d,\"hex\":\"%s\",\"index\":%d,"
-           "\"pos\":%d,\"t\":%.4f,\"ttft\":%.4f,\"top\":[",
-           id, e->hexbuf, index, pos, t_turn, ttft);
+           "\"pos\":%d,\"t\":%.4f,\"ttft\":%.4f,"
+           "\"prefill_s\":%.4f,\"prefill_tokens\":%d,\"top\":[",
+           id, e->hexbuf, index, pos, t_turn, ttft,
+           e->prefill_s, e->prefill_tokens);
     for (int k = 0; k < top->n; k++)
         printf("%s[%d,%.6f,%.6f]", k ? "," : "", top->id[k],
                top->prob[k], (double)top->logit[k]);
@@ -433,6 +446,33 @@ static void emit_done(const Engine *e, int prompt_tokens, int generated,
     write_prof(e);
     fputs("}\n", stdout);
     fflush(stdout);
+}
+
+/* Prefill progress. The batched path is layer-major: a chunk of prompt tokens
+ * walks every layer, so "tokens done" is an estimate until the chunk closes.
+ * The event carries the stage, chunk/layer counters and the live cache/trunk/
+ * process stats the TUI's existing MEMORY block already knows how to draw. */
+static void emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p)
+{
+    printf("{\"event\":\"prefill\",\"stage\":\"%s\",\"chunk\":%d,\"chunks\":%d,"
+           "\"layer\":%d,\"layers\":%d,\"tokens_done\":%d,\"tokens_total\":%d,"
+           "\"chunk_tokens\":%d,\"batch\":%d,\"elapsed\":%.4f,"
+           "\"progress\":%.4f,",
+           p->stage, p->chunk, p->chunks, p->layer, p->layers,
+           p->tokens_done, p->tokens_total, p->chunk_tokens, p->batch,
+           p->elapsed, p->progress);
+    write_sys_full(e);
+    putchar(',');
+    write_cache(e);
+    putchar(',');
+    write_trunk(e);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}
+
+static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
+{
+    emit_prefill_progress((Engine *)ctx, p);
 }
 
 /* ----------------------------------------------------------- engine core -- */
@@ -500,7 +540,7 @@ static int g_stream_miss = 6;
 static int engine_init(Engine *e, const char *model, const char *trunkdir,
                        const char *tokfile, double budget_gb, int budget_auto,
                        int ctx, int gen_default, int think_default,
-                       int layers_default)
+                       int layers_default, int prefill_batch)
 {
     memset(e, 0, sizeof *e);
     e->model_dir = model;
@@ -591,6 +631,9 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
         fprintf(stderr, "stream-miss: up to %d miss reads in flight; experts "
                         "are consumed as they land\n", e->cache.stream_cap);
     }
+    e->src = (DSV4ExpertSrc){ run_get_expert, run_get_experts,
+                              run_begin_experts, run_end_experts,
+                              run_wait_any, &e->cache };
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));
@@ -609,6 +652,25 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
     if (!e->lst) return -1;
     for (int L = 0; L < e->c.n_layers; L++)
         if (dsv4_state_init(&e->lst[L], &e->c, L, e->maxpos) != 0) return -1;
+
+    if (prefill_batch > 1) {
+        int pb = prefill_batch;
+        if (pb > DSV4_MAX_BATCH) pb = DSV4_MAX_BATCH;
+        const DSV4PrefillOpts po = {
+            .batch = pb, .max_pos = e->maxpos,
+            .on_progress = prefill_progress_cb, .progress_ctx = e,
+        };
+        if (dsv4_prefill_init(&e->pf, &e->c, &e->tr, e->lst, &e->src,
+                              &e->mb.w, &po) != 0) {
+            fprintf(stderr, "serve: batched prefill init failed; falling back "
+                            "to the per-token path\n");
+            e->pf = NULL;
+        } else {
+            e->prefill_batch = pb;
+            fprintf(stderr, "serve: batched dense prefill, %d tokens/chunk\n",
+                    pb);
+        }
+    }
 
     const int hc = e->c.hc_mult, d = e->c.hidden;
     e->h = calloc((size_t)hc * d, sizeof(float));
@@ -631,6 +693,7 @@ static int engine_init(Engine *e, const char *model, const char *trunkdir,
 
 static void engine_free(Engine *e)
 {
+    dsv4_prefill_free(e->pf);
     for (int L = 0; L < e->c.n_layers && e->lst; L++) dsv4_state_free(&e->lst[L]);
     free(e->lst);
     free(e->h); free(e->xh); free(e->logits); free(e->ids);
@@ -713,6 +776,21 @@ static int sample_top(Engine *e, TopK *top)
     return best;
 }
 
+/* Run the output head on whatever residual stream is in e->h. Shared by the
+ * per-token path and the batched prefill: the head's inputs are identical, and
+ * keeping two copies of this would be one more place for them to drift. */
+static void head_from_h(Engine *e, TopK *top)
+{
+    const int hc = e->c.hc_mult, d = e->c.hidden;
+    const double th = now_s();
+    hc_head(e->xh, e->h, &e->mb.w.hc_head, hc, d, e->c.rms_eps, e->c.hc_eps);
+    dsv4_rmsnorm(e->xh, e->xh, e->mb.w.norm, d, e->c.rms_eps);
+    DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0 };
+    dsv4_mmq(e->logits, e->xh, &head);
+    dsv4_prof.head += now_s() - th;
+    sample_top(e, top);
+}
+
 /* One token through every layer, optionally followed by the head. */
 static int forward(Engine *e, int32_t tid, int pos, int want_logits,
                    int emit_layers, const char *phase, double t_turn, TopK *top)
@@ -725,10 +803,6 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
     dsv4_embed_row(e->xh, e->mb.w.embed, e->mb.w.wdt, tid, d);
     for (int j = 0; j < hc; j++)
         memcpy(e->h + (size_t)j * d, e->xh, (size_t)d * sizeof(float));
-
-    DSV4ExpertSrc src = { run_get_expert, run_get_experts,
-                          run_begin_experts, run_end_experts,
-                          run_wait_any, &e->cache };
 
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerBind lb;
@@ -744,21 +818,13 @@ static int forward(Engine *e, int32_t tid, int pos, int want_logits,
         dsv4_prof.trunk_io += io;
         dsv4_prof.bind += call > io ? call - io : 0.0;
         const int comp = dsv4_compress_ratio(&e->c, L) != 0;
-        dsv4_layer_forward(e->h, &lb.w, &e->c, &e->scratch, &src,
+        dsv4_layer_forward(e->h, &lb.w, &e->c, &e->scratch, &e->src,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,
                            comp ? e->sn_c : e->sn_d, pos, tid);
         if (emit_layers) emit_layer(e, pos, phase, L, t_turn);
     }
 
-    if (!want_logits) return 0;
-
-    const double th = now_s();
-    hc_head(e->xh, e->h, &e->mb.w.hc_head, hc, d, e->c.rms_eps, e->c.hc_eps);
-    dsv4_rmsnorm(e->xh, e->xh, e->mb.w.norm, d, e->c.rms_eps);
-    DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0 };
-    dsv4_mmq(e->logits, e->xh, &head);
-    dsv4_prof.head += now_s() - th;
-    sample_top(e, top);
+    if (want_logits) head_from_h(e, top);
     return 0;
 }
 
@@ -827,18 +893,52 @@ static void engine_generate(Engine *e, const char *prompt, int ngen,
         return;
     }
 
-    emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat");
+    const int use_batched = (e->pf && n_added > 1);
+    emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat",
+               use_batched ? e->prefill_batch : 0);
 
     TopK top;
     memset(&top, 0, sizeof top);
 
     /* Prefill the new turn. The head runs only on the final prompt token; the
-     * earlier ones would cost a vocab-sized matmul for a result nothing reads. */
-    for (int i = start_pos; i < e->n_ids; i++) {
-        const int last = (i == e->n_ids - 1);
-        if (forward(e, e->ids[i], i, last, emit_layers, "prompt",
-                    now_s() - t0, &top) != 0) return;
+     * earlier ones would cost a vocab-sized matmul for a result nothing reads.
+     *
+     * With batched prefill the new tokens go through the dense GEMM path in
+     * the same module the one-shot CLI uses. `start_pos` is where the previous
+     * turn stopped, so a conversation's KV cache is extended rather than
+     * rebuilt. This path cannot fall back after it starts: it has already
+     * written KV and compressor state. An error is terminal for the turn.
+     *
+     * The timer covers the prompt only, not the head. The TUI prints this line
+     * as a transcript message; using ttft there would include the head and,
+     * on a follow-up turn, the pending token from the previous one. */
+    e->prefill_s = 0.0;
+    e->prefill_tokens = 0;
+    const double tp0 = now_s();
+    if (use_batched) {
+        if (dsv4_prefill_range(e->pf, e->ids + start_pos, n_added, start_pos,
+                               e->cs_d, e->sn_d, e->cs_c, e->sn_c,
+                               e->h) != 0) {
+            emit_error("batched prefill failed at position %d; reset the "
+                       "context before continuing", start_pos);
+            return;
+        }
+    } else {
+        for (int i = start_pos; i < e->n_ids; i++)
+            if (forward(e, e->ids[i], i, 0, emit_layers, "prompt",
+                        now_s() - t0, &top) != 0) return;
     }
+    e->prefill_s = now_s() - tp0;
+    e->prefill_tokens = n_added;
+    if (use_batched) {
+        const int chunks = (n_added + e->prefill_batch - 1) / e->prefill_batch;
+        const DSV4PrefillProgress hp = {
+            "head", chunks, chunks, e->c.n_layers, e->c.n_layers,
+            n_added, n_added, 0, e->prefill_batch, e->prefill_s, 1.0,
+        };
+        emit_prefill_progress(e, &hp);
+    }
+    head_from_h(e, &top);
 
     int generated = 0;
     double ttft = 0.0;
@@ -943,6 +1043,7 @@ static void usage(const char *me)
             "[--budget GB|auto] [--ctx N] [--gen N] [--think] [--no-layers]\n"
             "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
             "       [--reader-pin off|all|p|e] [--stream-miss N (default 6)]\n"
+            "       [--prefill-batch-size N (0 disables; default 0)]\n"
             "\n"
             "Speaks JSON lines on stdin/stdout. Start it from the TUI:\n"
             "  python3 tui/dsv4_tui.py\n", me);
@@ -954,6 +1055,7 @@ int main(int argc, char **argv)
     double budget_gb = 8.0;
     int budget_auto = 0;
     int ctx = 8192, ngen = 128, think = 0, layers = 1;
+    int prefill_batch = 0;
     const char *pin = "p", *reader_pin = "off";
     int threads = 4, readers = 6;
 
@@ -975,6 +1077,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc) reader_pin = argv[++i];
         else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
             g_stream_miss = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--prefill-batch-size") && i + 1 < argc)
+            prefill_batch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--think")) think = 1;
         else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -1009,7 +1113,7 @@ int main(int argc, char **argv)
 
     Engine e;
     if (engine_init(&e, model, trunkdir, tokfile, budget_gb, budget_auto, ctx,
-                    ngen, think, layers) != 0) {
+                    ngen, think, layers, prefill_batch) != 0) {
         emit_error("engine init failed (see stderr for the loader's message)");
         engine_free(&e);
         return 1;

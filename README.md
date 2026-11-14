@@ -137,6 +137,7 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--readers N` | expert-reader threads, independent of compute (default 6) |
 | `--reader-pin p\|e\|all\|off` | affinity for the reader threads |
 | `--stream-miss N` | keep N miss reads in flight and run each expert's matmul as it lands (default 6); `0` restores the old end-of-batch barrier |
+| `--prefill-batch-size N` | opt-in CPU dense prefill in chunks of N tokens (default 0 = per-token decode path); routed experts stay per token |
 | `--gpu` | put the dense trunk's FP8 matrices in VRAM (opt-in) |
 | `--route-log FILE` | record every expert request, for `tools/sim_cache.py` |
 
@@ -157,7 +158,10 @@ python3 tui/dsv4_tui.py --demo    # synthetic backend, no checkpoint needed
 ```
 
 `--budget 10` is the TUI default (the trunk pins at ~6.3 GB, leaving enough
-expert-cache slots to beat the 3.21 GB working set). `/help` lists the in-app
+expert-cache slots to beat the 3.21 GB working set). The TUI also passes
+`--prefill-batch-size 16` to `dsv4-serve`, so a turn's prompt uses the dense
+prefill path; use `--prefill-batch-size 0` to force the per-token path.
+`/help` lists the in-app
 commands; [tui/README.md](tui/README.md) explains the panel, the optional
 Markdown rendering (`pip install -r tui/requirements.txt`) and the JSON-lines
 protocol. The one-shot `bin/dsv4` and every correctness gate are unchanged.
@@ -281,7 +285,7 @@ router                   0.5%    0.2 s
 ```
 
 Disk is the largest single line. Note that 15 of these 40 passes are prompt
-tokens — see [Prefill is the expensive half](#prefill-is-the-expensive-half-and-it-is-not-batched).
+tokens — see [Prefill is the expensive half](#prefill-is-the-expensive-half-and-the-default-path-is-not-batched).
 
 The routed experts stay on the CPU on purpose: 137 GB, none of it resident,
 streamed per token. Sending them across PCIe would add a hop to a disk read.
@@ -358,7 +362,7 @@ Every cache gate passed throughout, for two compounding reasons, both now fixed:
   a different residue. The fixture now mirrors that, and the new gate fails
   without the fix.
 
-## Prefill is the expensive half, and it is not batched
+## Prefill is the expensive half, and the default path is not batched
 
 Prompt tokens go through the engine **one at a time**, exactly like generated
 ones. That is a deliberate gap, and this is what it costs. Two runs of the same
@@ -412,6 +416,43 @@ the only measurements here are the timings and the reuse factors above.
 It is not a small change: it needs a batched variant of every matmul, batched
 attention, and the compressor's `start_pos == 0` branch, and each has to keep
 the same 16-accumulator tree per (row, token) pair to stay bit-exact.
+
+### CPU dense prefill is now opt-in and measured
+
+`--prefill-batch-size N` sends the prompt through a separate module in
+`src/prefill/`. It batches the **dense** matrices only — q/kv/output
+projections, the shared expert and the router — while the routed experts stay
+on the per-token path. That boundary is deliberate: at a 32-token prompt top-6
+over 256 experts gives only ~2.9x reuse, and the earlier expert-union
+experiment measured **+50% exposed I/O** because deduplicating requests removed
+the cache hits that paid for the overlap.
+
+The kernel bench is `bin/prefill_gemm` (cold weights, per-token speedup,
+`OMP_NUM_THREADS=4`). At nt=32:
+
+| dense matrix | per-token speedup |
+|---|---:|
+| fp8 `wo_b` 4096×8192 | **1.7x** |
+| fp8 `wq_b` 32768×1024 | **2.45x** |
+| fp8 `wq_a` 1024×4096 | **1.66x** |
+| fp8 `wkv` 512×4096 | **1.68x** |
+| fp8 shared `w1` 2048×4096 | **1.92x** |
+| bf16 router 256×4096 | 1.1x |
+
+End to end, `--budget 16`, the same prompt on both paths and interleaved:
+
+| prompt | per-token TTFT | `--prefill-batch-size 32` |
+|---|---:|---:|
+| 30 tokens | 18.2–19.8 s | **14.9–15.1 s** |
+| 60 tokens (two chunks) | 35.6 s | **28.9 s** |
+| 30 tokens, `--prefill-batch-size 2` | — | 21.9 s (no win) |
+
+Token ids were identical in every arm, including batch sizes 2, 7, 32 and a
+ragged 60-token prompt. The default remains the per-token decode path; the flag
+is opt-in, and an allocation failure falls back to it before any layer state is
+touched. `dsv4-serve` accepts the same flag and prefills only the new turn,
+starting at the position where the previous turn stopped; the TUI passes 16 by
+default and `--prefill-batch-size 0` restores the per-token path there too.
 
 ## DeepSeek-V4-Pro
 

@@ -8,8 +8,10 @@
  *   the released encoding/ folder is the message-formatting path. So this
  *   produces base-model continuations, not replies.
  *
- *   No chunked prefill. The prompt is fed one token at a time through the same
- *   decode path the generated tokens use, which is correct and not fast.
+ *   By default there is no chunked prefill: the prompt is fed one token at a
+ *   time through the same decode path the generated tokens use, which is
+ *   correct and not fast. `--prefill-batch-size N` opts into the separate
+ *   dense prefill module in src/prefill; decode keeps its own path.
  *
  * TWO ROPE TABLES, NOT ONE
  *   model.py Attention.__init__ builds freqs_cis with compress_rope_theta and
@@ -32,6 +34,7 @@
 #include "dsv4_layer.h"
 #include "dsv4_tok.h"
 #include "dsv4_threads.h"
+#include "dsv4_prefill.h"
 
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
 void dsv4_mmq(float *, const float *, const DSV4QMat *);
@@ -238,7 +241,8 @@ static void usage(const char *me)
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
            "       [--reader-pin off|all|p|e] [--synthetic-kv START_POS]\n"
-           "       [--synthetic-experts] [--stream-miss N (default 6)]\n", me);
+           "       [--synthetic-experts] [--stream-miss N (default 6)]\n"
+           "       [--prefill-batch-size N (0 disables; dense prefill path)]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -256,6 +260,7 @@ int main(int argc, char **argv)
     int synthetic_kv = 0;       /* >0: prefill the KV state, start at this pos */
     int synthetic_experts = 0;  /* benchmark: one fixed FP4 expert in RAM */
     int stream_miss = 6;        /* miss reads in flight per layer; 0 = barrier */
+    int prefill_batch = 0;      /* 0 = per-token decode path (default) */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -283,6 +288,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--synthetic-experts")) synthetic_experts = 1;
         else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
             stream_miss = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--prefill-batch-size") && i + 1 < argc)
+            prefill_batch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -506,9 +513,65 @@ int main(int argc, char **argv)
      * engine is usable in an agent loop. */
     double ttft = 0.0;
 
-    /* Prompt tokens and generated tokens use the SAME forward path. That keeps
-     * prefill and decode timings comparable: there is no separate GEMM path
-     * whose cost would have to be reasoned about separately.
+    /* Batched dense prefill, off by default.
+     *
+     * This is deliberately a separate module (src/prefill). The decode loop
+     * below remains the bit-exact reference; only the prompt is allowed to take
+     * the GEMM path, and only when the user asks for it. If allocation fails,
+     * the run falls back to the per-token path before any layer state is
+     * touched. A failure during the prompt itself is not fallback-safe -- the
+     * KV cache and compressor state have already moved -- so it aborts. */
+    int prefill_done = 0, prefill_eos = 0;
+    if (prefill_batch > 1 && synthetic_kv == 0 && nprompt > 1) {
+        int pb = prefill_batch;
+        if (pb > DSV4_MAX_BATCH) {
+            fprintf(stderr, "prefill: batch %d clamped to DSV4_MAX_BATCH %d\n",
+                    pb, DSV4_MAX_BATCH);
+            pb = DSV4_MAX_BATCH;
+        }
+        DSV4PrefillOpts po = { .batch = pb, .max_pos = maxpos };
+        DSV4Prefill *pf = NULL;
+        if (dsv4_prefill_init(&pf, &c, &tr, lst, &src, &mb.w, &po) != 0) {
+            fprintf(stderr, "prefill: init failed; falling back to the "
+                            "per-token decode path\n");
+        } else {
+            if (dsv4_prefill_prompt(pf, ids, nprompt, cs_d, sn_d, cs_c, sn_c,
+                                    h) != 0) {
+                dsv4_prefill_free(pf);
+                fprintf(stderr, "prefill: prompt failed after layer state was "
+                                "modified; refusing to restart on the decode "
+                                "path\n");
+                return 1;
+            }
+            dsv4_prefill_free(pf);
+            prefill_done = 1;
+
+            const double th = now_s();
+            hc_head(xh, h, &mb.w.hc_head, hc, d, c.rms_eps, c.hc_eps);
+            dsv4_rmsnorm(xh, xh, mb.w.norm, d, c.rms_eps);
+            DSV4QMat head = { mb.w.head, NULL, DSV4_WBF16, c.vocab, d, 0, 0 };
+            dsv4_mmq(logits, xh, &head);
+            dsv4_prof.head += now_s() - th;
+
+            int best = 0;
+            for (int v = 1; v < c.vocab; v++)
+                if (logits[v] > logits[best]) best = v;
+            ids[nprompt] = best;
+            printf(" %d", best);
+            fflush(stdout);
+            ntok = 1;
+            ttft = now_s() - t0;
+            if (eos_id >= 0 && best == eos_id) {
+                printf("  <eos>");
+                prefill_eos = 1;
+            }
+        }
+    }
+
+    /* Prompt tokens and generated tokens use the SAME forward path when the
+     * batched prefill is off. That keeps prefill and decode timings
+     * comparable: there is no separate GEMM path whose cost would have to be
+     * reasoned about separately.
      *
      * With --synthetic-kv the prefill is skipped: step 0 is the seed token at
      * start_pos and every later step is a decode step against the filled KV.
@@ -516,8 +579,9 @@ int main(int argc, char **argv)
     const int start_pos = synthetic_kv > 0 ? synthetic_kv : 0;
     const int nsteps = synthetic_kv > 0 ? 1 + ngen : nprompt + ngen;
     double syn_ttft = 0.0;
+    const int step_start = prefill_done ? nprompt : 0;
 
-    for (int step = 0; step < nsteps; step++) {
+    for (int step = step_start; step < nsteps && !prefill_eos; step++) {
         const int pos = start_pos + step;
         const int32_t tid = ids[step];
 
@@ -601,7 +665,7 @@ int main(int argc, char **argv)
     }
     dsv4_trunk_report(&tr, "run");
     dsv4_cache_report(&cache, "run");
-    dsv4_prof_report(dt, ntok);
+    dsv4_prof_report(dt, prefill_done ? nprompt + ntok : ntok);
     printf("PEAK RSS for the whole run: %.2f GB\n", peak_rss_gb());
 
     for (int L = 0; L < c.n_layers; L++) dsv4_state_free(&lst[L]);
