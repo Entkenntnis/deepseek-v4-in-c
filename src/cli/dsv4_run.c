@@ -32,6 +32,7 @@
 #include "dsv4_layer.h"
 #include "dsv4_tok.h"
 #include "dsv4_threads.h"
+#include "dsv4_prefill.h"
 
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
 void dsv4_mmq(float *, const float *, const DSV4QMat *);
@@ -238,7 +239,8 @@ static void usage(const char *me)
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
            "       [--reader-pin off|all|p|e] [--synthetic-kv START_POS]\n"
-           "       [--synthetic-experts] [--stream-miss N (default 6)]\n", me);
+           "       [--synthetic-experts] [--stream-miss N (default 6)]\n"
+           "       [--gpu-prefill] [--prefill-batch N (default 8)]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -256,6 +258,8 @@ int main(int argc, char **argv)
     int synthetic_kv = 0;       /* >0: prefill the KV state, start at this pos */
     int synthetic_experts = 0;  /* benchmark: one fixed FP4 expert in RAM */
     int stream_miss = 6;        /* miss reads in flight per layer; 0 = barrier */
+    int gpu_prefill = 0;
+    int prefill_batch = 8;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -283,6 +287,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--synthetic-experts")) synthetic_experts = 1;
         else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
             stream_miss = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gpu-prefill")) gpu_prefill = 1;
+        else if (!strcmp(argv[i], "--prefill-batch") && i + 1 < argc)
+            prefill_batch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -506,6 +513,48 @@ int main(int argc, char **argv)
      * engine is usable in an agent loop. */
     double ttft = 0.0;
 
+    /* Batched prompt prefill. This is deliberately a separate module: the
+     * decode path below stays the bit-exact reference and keeps its one-token
+     * loop. The prefill path returns the last prompt token's residual stream;
+     * the head runs here so TTFT and the first generated id mean the same
+     * thing they do on the unbatched path. */
+    int prefill_done = 0, prefill_eos = 0;
+    if (gpu_prefill && synthetic_kv == 0 && nprompt > 1) {
+        /* DSV4_PREFILL_CPU is a debugging/gate switch: same batched path,
+         * CPU matmuls. It must reproduce the unbatched token stream. */
+        const int prefill_gpu = getenv("DSV4_PREFILL_CPU") ? 0 : 1;
+        DSV4PrefillOpts po = { prefill_gpu, prefill_batch, maxpos };
+        DSV4Prefill *pf = NULL;
+        if (dsv4_prefill_init(&pf, &c, &tr, lst, &src, &mb.w, &po) != 0)
+            return 1;
+        if (dsv4_prefill_prompt(pf, ids, nprompt, cs_d, sn_d, cs_c, sn_c,
+                                h) != 0) {
+            dsv4_prefill_free(pf);
+            return 1;
+        }
+        dsv4_prefill_free(pf);
+        prefill_done = 1;
+
+        const double th = now_s();
+        hc_head(xh, h, &mb.w.hc_head, hc, d, c.rms_eps, c.hc_eps);
+        dsv4_rmsnorm(xh, xh, mb.w.norm, d, c.rms_eps);
+        DSV4QMat head = { mb.w.head, NULL, DSV4_WBF16, c.vocab, d, 0, 0 };
+        dsv4_mmq(logits, xh, &head);
+        dsv4_prof.head += now_s() - th;
+
+        int best = 0;
+        for (int v = 1; v < c.vocab; v++) if (logits[v] > logits[best]) best = v;
+        ids[nprompt] = best;
+        printf(" %d", best);
+        fflush(stdout);
+        ntok = 1;
+        ttft = now_s() - t0;
+        if (eos_id >= 0 && best == eos_id) {
+            printf("  <eos>");
+            prefill_eos = 1;
+        }
+    }
+
     /* Prompt tokens and generated tokens use the SAME forward path. That keeps
      * prefill and decode timings comparable: there is no separate GEMM path
      * whose cost would have to be reasoned about separately.
@@ -516,8 +565,9 @@ int main(int argc, char **argv)
     const int start_pos = synthetic_kv > 0 ? synthetic_kv : 0;
     const int nsteps = synthetic_kv > 0 ? 1 + ngen : nprompt + ngen;
     double syn_ttft = 0.0;
+    const int step_start = prefill_done ? nprompt : 0;
 
-    for (int step = 0; step < nsteps; step++) {
+    for (int step = step_start; step < nsteps && !prefill_eos; step++) {
         const int pos = start_pos + step;
         const int32_t tid = ids[step];
 

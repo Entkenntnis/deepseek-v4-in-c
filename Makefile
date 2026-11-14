@@ -15,7 +15,7 @@ LDFLAGS ?= -lm -fopenmp -pthread
 BUILD := build
 BIN   := bin
 
-.PHONY: all test bench bench-decode cfg-fixtures st-fixtures tok-fixtures fixtures clean help tui
+.PHONY: all test bench bench-decode vk-bench cfg-fixtures st-fixtures tok-fixtures fixtures clean help tui
 
 # EVERY binary depends on EVERY engine source and header.
 #
@@ -29,6 +29,7 @@ BIN   := bin
 ENGINE := $(wildcard src/core/*.c src/core/*.h src/io/*.c src/io/*.h \
                      src/cache/*.c src/cache/*.h src/model/*.c src/model/*.h \
                      src/tokenizer/*.c src/tokenizer/*.h \
+                     src/prefill/*.c src/prefill/*.h src/prefill/shaders/*.comp \
                      include/dsv4/*.h third_party/*.h)
 ALLBIN := $(BIN)/test_pro $(BIN)/dsv4 $(BIN)/dsv4-serve $(BIN)/test_cfg $(BIN)/test_st $(BIN)/test_bind $(BIN)/test_quant $(BIN)/test_matmul $(BIN)/test_ops $(BIN)/test_hc $(BIN)/test_rope $(BIN)/test_attn $(BIN)/test_compress $(BIN)/test_indexer $(BIN)/test_layer $(BIN)/test_cache $(BIN)/test_bindmem $(BIN)/test_trunk $(BIN)/test_tok
 
@@ -120,9 +121,24 @@ tok-fixtures:
 
 DSV4_ENGINE := src/io/dsv4_st.c src/io/dsv4_trunk.c src/cache/dsv4_cache.c                src/model/dsv4_bind.c src/model/dsv4_layer.c                src/tokenizer/dsv4_tok.c $(DSV4_CORE)
 
-$(BIN)/dsv4: src/cli/dsv4_run.c $(DSV4_ENGINE)
+# Batched prefill + its Vulkan FP8 backend. Deliberately separate from
+# DSV4_ENGINE: only the one-shot CLI takes this path, and the decode path and
+# its gates must not acquire a Vulkan dependency.
+PREFILL_SRC := src/prefill/dsv4_prefill.c src/prefill/dsv4_prefill_vk.c
+PREFILL_SPV := $(BUILD)/prefill_fp8.spv
+PREFILL_SPV_H := $(BUILD)/prefill_fp8_spv.h
+
+$(PREFILL_SPV): src/prefill/shaders/prefill_fp8.comp
+	@mkdir -p $(BUILD)
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(PREFILL_SPV_H): $(PREFILL_SPV)
+	xxd -i -n dsv4_prefill_fp8_spv $< > $@
+
+$(BIN)/dsv4: src/cli/dsv4_run.c $(DSV4_ENGINE) $(PREFILL_SRC) $(PREFILL_SPV_H)
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) $(INCS) src/cli/dsv4_run.c $(DSV4_ENGINE) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCS) -Isrc/prefill -I$(BUILD) src/cli/dsv4_run.c \
+	      $(DSV4_ENGINE) $(PREFILL_SRC) -o $@ $(LDFLAGS) -lvulkan
 
 # The TUI backend. Same engine, one JSON event per line on stdout. Kept separate
 # from dsv4_run.c so the one-shot CLI stays exactly what the gates and docs
@@ -219,6 +235,26 @@ $(BIN)/fp8_decode: bench/fp8_decode.c bench/matmul_reference.c src/core/dsv4_mat
 	$(CC) $(CFLAGS) $(INCS) bench/fp8_decode.c bench/matmul_reference.c \
 	      src/core/dsv4_matmul.c -o $@ $(LDFLAGS)
 
+# Standalone Vulkan GEMV bench. Kept out of `bench` because it needs libvulkan
+# and glslc; the CPU-only build must stay complete. Run `make vk-bench`.
+VK_SPV := $(BUILD)/vk_gemv_fp4.spv $(BUILD)/vk_gemv_fp8.spv
+
+$(BUILD)/vk_gemv_fp4.spv: bench/shaders/vk_gemv_fp4.comp
+	@mkdir -p $(BUILD)
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(BUILD)/vk_gemv_fp8.spv: bench/shaders/vk_gemv_fp8.comp
+	@mkdir -p $(BUILD)
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(BIN)/vk_gemv: bench/vk_gemv.c src/core/dsv4_matmul.c $(VK_SPV)
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(INCS) bench/vk_gemv.c src/core/dsv4_matmul.c \
+	      -o $@ $(LDFLAGS) -lvulkan
+
+vk-bench: $(BIN)/vk_gemv
+	./$(BIN)/vk_gemv 30 --batch 100 --normals
+
 # The decode-rate baseline from BENCHMARK.md. Three runs at ~60 s each is the
 # price of a number this machine can be held to.
 bench-decode: $(BIN)/dsv4
@@ -238,6 +274,7 @@ help:
 	@echo "  make test          the gate ladder (the trunk gate needs"
 	@echo "                     DSV4_MODEL and DSV4_TRUNK)"
 	@echo "  make bench         matmul_bw, cache_bw, ctx_kernels"
+	@echo "  make vk-bench      standalone Vulkan GEMV bench (needs libvulkan+glslc)"
 	@echo "  make bench-decode  the decode-rate baseline (BENCHMARK.md)"
 	@echo "  make tui           build the streaming backend and launch the Python TUI"
 	@echo "  make clean"

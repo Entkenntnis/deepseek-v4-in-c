@@ -1,0 +1,203 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* prefill_fp8.comp - eight prompt tokens against one FP8 weight matrix.
+ *
+ * This is the batched prefill counterpart of bench/shaders/vk_gemv_fp8.comp.
+ * One 128-weight block belongs to one lane; each lane keeps eight float block
+ * sums and eight double totals, so the weight bytes are decoded ONCE and used
+ * by all eight tokens. That reuse is the entire point of the prefill batch:
+ * a GEMV reads each weight for one token, a GEMM reads it once for eight.
+ *
+ * The CPU reference keeps four float accumulators per (row, token) inside a
+ * 128-wide block and folds block scales in double. Here one float accumulator
+ * per token is used inside the block and the cross-block fold is double. A GPU
+ * cannot reproduce the CPU reduction tree bit-for-bit; the prefill gate checks
+ * relative error and token identity, and the CPU decode path remains the
+ * reference.
+ *
+ * NTOK is fixed at 8: the host pads the last chunk and ignores the extra
+ * outputs. A compile-time token count lets the accumulators stay in registers
+ * instead of being indexed dynamically.
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer S { uint s[]; };
+layout(std430, binding = 2) readonly buffer X { float x[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint in_n;
+    uint out_n;
+    uint blk_r;
+    uint blk_c;
+    uint sc;
+    uint w_off;
+    uint s_off;
+    uint w_row;
+    uint x_off;   /* float offset into the packed activation buffer */
+    uint y_off;   /* float offset into the packed output buffer    */
+} pc;
+
+#define NTOK 8u
+
+float e4m3_bits(uint b)
+{
+    const uint sign = (b & 0x80u) << 24;
+    const uint exp  = (b >> 3) & 0x0Fu;
+    const uint man  = b & 0x07u;
+    uint u;
+    if (exp == 0u) {
+        if (man == 0u) {
+            u = sign;
+        } else {
+            uint m = man, e = 120u;
+            while ((m & 0x04u) == 0u) { m <<= 1; e--; }
+            m &= 0x03u;
+            u = sign | (e << 23) | (m << 21);
+        }
+    } else if (exp == 0x0Fu && man == 0x07u) {
+        u = sign | 0x7FC00000u;
+    } else {
+        u = sign | ((exp + 120u) << 23) | (man << 20);
+    }
+    return uintBitsToFloat(u);
+}
+
+float e8m0(uint b)
+{
+    if (b == 0u)   return uintBitsToFloat(0x00400000u);
+    if (b == 0xFFu) return uintBitsToFloat(0x7FC00000u);
+    return uintBitsToFloat(b << 23);
+}
+
+uint sbyte(uint i)
+{
+    uint v = s[(pc.s_off + i) >> 2];
+    return (v >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+shared float e4lut[256];
+/* eight rows per workgroup, 32 lanes per row, NTOK partials per lane */
+shared double red[8u * 32u * NTOK];
+
+float e4m3_val(uint b)
+{
+    const uint mag = b & 0x7Fu;
+    if (mag >= 8u && mag != 0x7Fu)
+        return uintBitsToFloat(((b & 0x80u) << 24) |
+                               (0x3C000000u + (mag << 20)));
+    return e4lut[b];
+}
+
+void main()
+{
+    const uint tid  = gl_LocalInvocationIndex;
+    const uint sg   = tid >> 5;
+    const uint lane = tid & 31u;
+    const uint o    = gl_WorkGroupID.x * 8u + sg;
+
+    for (uint i = tid; i < 256u; i += 256u)
+        e4lut[i] = e4m3_bits(i);
+    barrier();
+
+    double total0 = 0.0, total1 = 0.0, total2 = 0.0, total3 = 0.0;
+    double total4 = 0.0, total5 = 0.0, total6 = 0.0, total7 = 0.0;
+
+    if (o < pc.out_n) {
+        const uint nblk  = (pc.in_n + pc.blk_c - 1u) / pc.blk_c;
+        const uint sbase = (o / pc.blk_r) * pc.sc;
+        const uint wbase = (pc.w_off + o * pc.w_row) >> 2;
+        const uint in_n  = pc.in_n;
+
+        for (uint b = lane; b < nblk; b += 32u) {
+            const uint c0 = b * pc.blk_c;
+            float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+            float a4 = 0.0, a5 = 0.0, a6 = 0.0, a7 = 0.0;
+
+            for (uint g = 0u; g < 4u; ++g) {
+                const uint base = wbase + b * 32u + g * 8u;
+                const uint c    = c0 + g * 32u;
+                for (uint j = 0u; j < 8u; ++j) {
+                    const uint word = w[base + j];
+                    const uint cb   = c + j * 4u;
+                    const float w0 = e4m3_val( word        & 0xFFu);
+                    const float w1 = e4m3_val((word >>  8) & 0xFFu);
+                    const float w2 = e4m3_val((word >> 16) & 0xFFu);
+                    const float w3 = e4m3_val( word >> 24);
+
+                    a0 = fma(w0, x[pc.x_off + cb + 0u], a0);
+                    a0 = fma(w1, x[pc.x_off + cb + 1u], a0);
+                    a0 = fma(w2, x[pc.x_off + cb + 2u], a0);
+                    a0 = fma(w3, x[pc.x_off + cb + 3u], a0);
+                    a1 = fma(w0, x[pc.x_off + in_n + cb + 0u], a1);
+                    a1 = fma(w1, x[pc.x_off + in_n + cb + 1u], a1);
+                    a1 = fma(w2, x[pc.x_off + in_n + cb + 2u], a1);
+                    a1 = fma(w3, x[pc.x_off + in_n + cb + 3u], a1);
+                    a2 = fma(w0, x[pc.x_off + 2u * in_n + cb + 0u], a2);
+                    a2 = fma(w1, x[pc.x_off + 2u * in_n + cb + 1u], a2);
+                    a2 = fma(w2, x[pc.x_off + 2u * in_n + cb + 2u], a2);
+                    a2 = fma(w3, x[pc.x_off + 2u * in_n + cb + 3u], a2);
+                    a3 = fma(w0, x[pc.x_off + 3u * in_n + cb + 0u], a3);
+                    a3 = fma(w1, x[pc.x_off + 3u * in_n + cb + 1u], a3);
+                    a3 = fma(w2, x[pc.x_off + 3u * in_n + cb + 2u], a3);
+                    a3 = fma(w3, x[pc.x_off + 3u * in_n + cb + 3u], a3);
+                    a4 = fma(w0, x[pc.x_off + 4u * in_n + cb + 0u], a4);
+                    a4 = fma(w1, x[pc.x_off + 4u * in_n + cb + 1u], a4);
+                    a4 = fma(w2, x[pc.x_off + 4u * in_n + cb + 2u], a4);
+                    a4 = fma(w3, x[pc.x_off + 4u * in_n + cb + 3u], a4);
+                    a5 = fma(w0, x[pc.x_off + 5u * in_n + cb + 0u], a5);
+                    a5 = fma(w1, x[pc.x_off + 5u * in_n + cb + 1u], a5);
+                    a5 = fma(w2, x[pc.x_off + 5u * in_n + cb + 2u], a5);
+                    a5 = fma(w3, x[pc.x_off + 5u * in_n + cb + 3u], a5);
+                    a6 = fma(w0, x[pc.x_off + 6u * in_n + cb + 0u], a6);
+                    a6 = fma(w1, x[pc.x_off + 6u * in_n + cb + 1u], a6);
+                    a6 = fma(w2, x[pc.x_off + 6u * in_n + cb + 2u], a6);
+                    a6 = fma(w3, x[pc.x_off + 6u * in_n + cb + 3u], a6);
+                    a7 = fma(w0, x[pc.x_off + 7u * in_n + cb + 0u], a7);
+                    a7 = fma(w1, x[pc.x_off + 7u * in_n + cb + 1u], a7);
+                    a7 = fma(w2, x[pc.x_off + 7u * in_n + cb + 2u], a7);
+                    a7 = fma(w3, x[pc.x_off + 7u * in_n + cb + 3u], a7);
+                }
+            }
+
+            const double sc = double(e8m0(sbyte(sbase + b)));
+            total0 += double(a0) * sc;
+            total1 += double(a1) * sc;
+            total2 += double(a2) * sc;
+            total3 += double(a3) * sc;
+            total4 += double(a4) * sc;
+            total5 += double(a5) * sc;
+            total6 += double(a6) * sc;
+            total7 += double(a7) * sc;
+        }
+    }
+
+    const uint rbase = (sg * 32u + lane) * NTOK;
+    red[rbase + 0u] = total0; red[rbase + 1u] = total1;
+    red[rbase + 2u] = total2; red[rbase + 3u] = total3;
+    red[rbase + 4u] = total4; red[rbase + 5u] = total5;
+    red[rbase + 6u] = total6; red[rbase + 7u] = total7;
+    barrier();
+
+    if (lane == 0u && o < pc.out_n) {
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        double s4 = 0.0, s5 = 0.0, s6 = 0.0, s7 = 0.0;
+        for (uint i = 0u; i < 32u; ++i) {
+            const uint rb = (sg * 32u + i) * NTOK;
+            s0 += red[rb + 0u]; s1 += red[rb + 1u];
+            s2 += red[rb + 2u]; s3 += red[rb + 3u];
+            s4 += red[rb + 4u]; s5 += red[rb + 5u];
+            s6 += red[rb + 6u]; s7 += red[rb + 7u];
+        }
+        y[pc.y_off + 0u * pc.out_n + o] = float(s0);
+        y[pc.y_off + 1u * pc.out_n + o] = float(s1);
+        y[pc.y_off + 2u * pc.out_n + o] = float(s2);
+        y[pc.y_off + 3u * pc.out_n + o] = float(s3);
+        y[pc.y_off + 4u * pc.out_n + o] = float(s4);
+        y[pc.y_off + 5u * pc.out_n + o] = float(s5);
+        y[pc.y_off + 6u * pc.out_n + o] = float(s6);
+        y[pc.y_off + 7u * pc.out_n + o] = float(s7);
+    }
+}

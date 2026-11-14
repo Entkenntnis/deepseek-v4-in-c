@@ -1,0 +1,163 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* vk_gemv_fp8.comp - eight output rows per workgroup, one 128-weight block per lane.
+ *
+ * Structure follows dsv4_matmul_fp8_f32_rows:
+ *   - the 128-wide block dot is float, with four independent accumulators
+ *     covering weights 0..7, 8..15, 16..23, 24..31 of each 32-weight group,
+ *   - the E8M0 block scale and the cross-block fold are double.
+ *
+ * E4M3 has 256 codes and the hot CPU path already uses a 256-entry table; the
+ * shader does the same in shared memory, which also keeps the subnormal and NaN
+ * cases exact without a divergent per-weight branch.  The table is built once
+ * per workgroup from the same bit arithmetic as dsv4_quant.h.
+ *
+ * Eight rows per 256-thread workgroup, as in the FP4 shader: the one-row/32-
+ * thread version paid a launch, a barrier and a serial reduction per row, and
+ * that overhead dominated at 4096-32768 rows.
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer S { uint s[]; };
+layout(std430, binding = 2) readonly buffer X { float x[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint in_n;
+    uint out_n;
+    uint blk_r;
+    uint blk_c;
+    uint sc;
+    uint w_off;
+    uint s_off;
+    uint w_row;   /* bytes per output row (in_n) */
+} pc;
+
+float e4m3_bits(uint b)
+{
+    const uint sign = (b & 0x80u) << 24;
+    const uint exp  = (b >> 3) & 0x0Fu;
+    const uint man  = b & 0x07u;
+    uint u;
+    if (exp == 0u) {
+        if (man == 0u) {
+            u = sign;
+        } else {
+            uint m = man, e = 120u;
+            while ((m & 0x04u) == 0u) { m <<= 1; e--; }
+            m &= 0x03u;
+            u = sign | (e << 23) | (m << 21);
+        }
+    } else if (exp == 0x0Fu && man == 0x07u) {
+        u = sign | 0x7FC00000u;
+    } else {
+        u = sign | ((exp + 120u) << 23) | (man << 20);
+    }
+    return uintBitsToFloat(u);
+}
+
+float e8m0(uint b)
+{
+    if (b == 0u)   return uintBitsToFloat(0x00400000u);
+    if (b == 0xFFu) return uintBitsToFloat(0x7FC00000u);
+    return uintBitsToFloat(b << 23);
+}
+
+uint sbyte(uint i)
+{
+    uint v = s[(pc.s_off + i) >> 2];
+    return (v >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+shared float e4lut[256];
+shared double red[256];
+
+/* E4M3 normals have a closed form: rebias 7 -> 127 and left-align three
+ * mantissa bits is exactly 0x3C000000 + ((byte & 0x7F) << 20), plus the sign.
+ * Only the 16 subnormals and two NaNs need the table.  The real checkpoint is
+ * 0.0145% subnormal, so this path covers essentially every weight; uniform
+ * random bytes are a much worse approximation and still take it 93.75% of the
+ * time. */
+float e4m3_val(uint b)
+{
+    const uint mag = b & 0x7Fu;
+    if (mag >= 8u && mag != 0x7Fu)
+        return uintBitsToFloat(((b & 0x80u) << 24) |
+                               (0x3C000000u + (mag << 20)));
+    return e4lut[b];
+}
+
+/* One full 128-weight block.  The four accumulators mirror the AVX2 kernel:
+ * within each 32-weight group, words 0..1 feed a0, 2..3 a1, 4..5 a2, 6..7 a3. */
+float block128(uint wbase, uint c0)
+{
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    for (uint g = 0u; g < 4u; ++g) {
+        const uint base = wbase + g * 8u;
+        const uint c    = c0 + g * 32u;
+        for (uint j = 0u; j < 8u; ++j) {
+            const uint word = w[base + j];
+            const uint cb   = c + j * 4u;
+            a0 = fma(e4lut[ word        & 0xFFu], x[cb + 0u], a0);
+            a1 = fma(e4lut[(word >>  8) & 0xFFu], x[cb + 1u], a1);
+            a2 = fma(e4lut[(word >> 16) & 0xFFu], x[cb + 2u], a2);
+            a3 = fma(e4lut[ word >> 24],          x[cb + 3u], a3);
+        }
+    }
+    return (a0 + a1) + (a2 + a3);
+}
+
+double tail_block(uint wbase_byte_off, uint c0, uint n)
+{
+    double acc = 0.0;
+    for (uint k = 0u; k < n; ++k) {
+        uint byte = w[(pc.w_off + wbase_byte_off + k) >> 2];
+        uint b    = (byte >> ((k & 3u) * 8u)) & 0xFFu;
+        acc += double(e4m3_val(b)) * double(x[c0 + k]);
+    }
+    return acc;
+}
+
+void main()
+{
+    const uint tid  = gl_LocalInvocationIndex;
+    const uint sg   = tid >> 5;
+    const uint lane = tid & 31u;
+    const uint nblk = (pc.in_n + pc.blk_c - 1u) / pc.blk_c;
+    const uint lpr  = nblk >= 32u ? 32u : (nblk >= 16u ? 16u : 8u);
+    const uint rpg  = 32u / lpr;
+    const uint row  = lane / lpr;
+    const uint lin  = lane % lpr;
+    const uint o    = gl_WorkGroupID.x * (8u * rpg) + sg * rpg + row;
+
+    for (uint i = tid; i < 256u; i += 256u)
+        e4lut[i] = e4m3_bits(i);
+    barrier();
+
+    double total = 0.0;
+    if (o < pc.out_n) {
+        const uint sbase = (o / pc.blk_r) * pc.sc;
+        const uint wbase = (pc.w_off + o * pc.w_row) >> 2;
+
+        for (uint b = lin; b < nblk; b += lpr) {
+            const uint c0 = b * pc.blk_c;
+            const uint n  = min(pc.blk_c, pc.in_n - c0);
+            double acc;
+            if (n == 128u && pc.blk_c == 128u)
+                acc = double(block128(wbase + b * 32u, c0));
+            else
+                acc = tail_block(o * pc.w_row + b * 128u, c0, n);
+            total += acc * double(e8m0(sbyte(sbase + b)));
+        }
+    }
+
+    red[tid] = total;
+    barrier();
+    if (lin == 0u && o < pc.out_n) {
+        double sum = 0.0;
+        for (uint i = 0u; i < lpr; ++i) sum += red[sg * 32u + row * lpr + i];
+        y[o] = float(sum);
+    }
+}
