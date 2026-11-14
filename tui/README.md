@@ -205,9 +205,10 @@ model runs, plus a decode graph while a turn is generating tokens:
   no CPU sensor is exposed by sysfs.
 
 The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
-graph update on each token event. While prefill runs, the PREFILL bar updates
-live and is replaced by the final prompt timing after the first token is
-decoded; the DECODE section appears at that point and stays after the turn
+graph update on each token event. Prefill is no exception: its stats stay on
+that 1 Hz cadence. While prefill runs, the PREFILL bar in the status line
+updates live and is replaced by the final prompt timing after the first token
+is decoded; the DECODE section appears at that point and stays after the turn
 ends. The trunk hit rate, profiler split and top-k counters are still collected
 and sent by `bin/dsv4-serve`, but are not drawn while this panel is being
 reworked.

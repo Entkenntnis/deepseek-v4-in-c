@@ -891,15 +891,12 @@ class App:
         # Token text and layer progress below are NOT throttled.
         now = time.monotonic()
         force_stats = name in ("ready", "stats", "done")
-        # Prefill has no layer events, so its progress events are the only
-        # live cache/disk samples. Ingest every one: the MEMORY block then
-        # moves during the prompt instead of waiting for the first decoded
-        # token. ingest_stats() still guards the *rate* window at 0.2 s, so a
-        # burst of layer progress does not turn into rate noise.
-        if name == "prefill":
-            self.ingest_stats(ev)
-            self.last_stats_ingest = now
-        elif force_stats or now - self.last_stats_ingest >= self.stats_interval:
+        # Prefill emits far more progress events than the panel needs. Treat
+        # them like any other event: the stats panel is a 1 Hz instrument, and
+        # the PREFILL bar in the status line already updates live from every
+        # event. Ingesting here too would repaint the MEMORY block many times a
+        # second during the prompt.
+        if force_stats or now - self.last_stats_ingest >= self.stats_interval:
             self.ingest_stats(ev)
             self.last_stats_ingest = now
             if force_stats:
@@ -975,7 +972,6 @@ class App:
             self.prefill_batch = int(ev.get("batch") or self.prefill_batch or 0)
             self.current_layer = int(ev.get("layer") or self.current_layer)
             self.phase = "prompt"
-            self.stats_force = True
             self.dirty = True
 
         elif name == "token":
@@ -1600,7 +1596,7 @@ class App:
                     status = "preparing"
 
             seg: list[tuple[str, str]] = [
-                (" PREFILL", "section"), (f" {status}", "active")]
+                (" PREFILL", "section"), (f" {status}", "muted" if status == "done" else "active")]
             if total:
                 seg.append((f"  {done}/{total} tok", "value"))
             if batch > 1:
@@ -1794,11 +1790,12 @@ class App:
         if width <= 4:
             return
         # The panel is a 1 Hz instrument. The status line above it stays live
-        # for layer/token progress; repainting a graph on every layer only makes
-        # it jitter faster than the values move.
+        # for layer/token/prefill progress; repainting a graph on every event
+        # only makes it jitter faster than the values move. Prefill is no
+        # exception: its progress bar lives in the status line, not here.
         height = bottom - top + 1
         now = time.monotonic()
-        if (self.prefill_active or self.stats_force or not self.stats_cache
+        if (self.stats_force or not self.stats_cache
                 or width != self.stats_cache_width
                 or height != self.stats_cache_height
                 or now - self.stats_cache_ts >= self.stats_interval):
