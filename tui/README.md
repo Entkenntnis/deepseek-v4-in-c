@@ -90,13 +90,14 @@ prompt token. Instead the engine emits `prefill` progress events carrying the
 stage (`chunk`, `layer`, `chunk_done`, `head`), chunk/layer counters, an
 estimated progress fraction and the same live `sys`/`cache`/`trunk` blocks as
 a layer event. While the prompt runs, the panel shows a **PREFILL** section with
-the current stage, a progress bar on its own line and the percentage, elapsed
-time and rate on the next line; MEMORY keeps updating from the same events, so
-cache-hit and disk readout move during the prompt. The DECODE section appears
-only once the first token has been decoded. The prompt-only timer also arrives on
-the first `token` event, and the transcript gets a
-`prefill: N tokens in T s (tok/s, s/token; batch N|per-token)` line before the
-assistant bubble.
+the current stage, token counts, batch size and a progress bar with the
+estimated percentage, elapsed time and rate; MEMORY keeps updating from the same
+events, so cache-hit and disk readout move during the prompt. When the prompt
+completes, the progress bar is replaced by the engine's final timing line
+(`N tokens in T s (tok/s, s/token)`), and the section stays visible while the
+response decodes. The DECODE section appears once the first token is decoded.
+The prompt-only timer arrives on the first `token` event and is not written to
+the transcript.
 
 The one-shot CLI and all correctness gates are unchanged. The streaming
 backend is `dsv4_serve.c`; it shares the same `src/prefill/` dense-prefill
@@ -171,6 +172,10 @@ prompt in the KV state.
 The right-hand panel keeps the live resource numbers that are useful while the
 model runs, plus a decode graph while a turn is generating tokens:
 
+* **PREFILL** — the prompt's stage, token progress and batch size, with a
+  progress bar while the prompt runs. After completion the bar is replaced by
+  the engine's final `N tokens in T s (tok/s, s/token)` line, and the section
+  stays visible while the response decodes.
 * **DECODE** — a graph of **tok/s** for generated tokens only. It appears while
   the turn is decoding and disappears during prefill and while idle. The graph
   is right-aligned and scrolls left as new tokens arrive, and uses a linear axis
@@ -196,10 +201,11 @@ model runs, plus a decode graph while a turn is generating tokens:
   no CPU sensor is exposed by sysfs.
 
 The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
-graph update on each token event. While prefill runs, the PREFILL progress
-lines update; the DECODE section appears once the first token is decoded. The
-trunk hit rate, profiler split and top-k counters are still collected and sent
-by `bin/dsv4-serve`, but are not drawn while this panel is being reworked.
+graph update on each token event. While prefill runs, the PREFILL bar updates
+live and is replaced by the final prompt timing after the first token is
+decoded; the DECODE section appears at that point. The trunk hit rate,
+profiler split and top-k counters are still collected and sent by
+`bin/dsv4-serve`, but are not drawn while this panel is being reworked.
 
 ## Caveats
 

@@ -612,6 +612,8 @@ class App:
         self.prefill_batch = int(getattr(args, "prefill_batch_size", 0) or 0)
         self.prefill_progress: dict = {}
         self.prefill_active = False
+        self.prefill_s = 0.0
+        self.prefill_tokens = 0
         self.ttft = 0.0
         self.current_layer = 0
         self.phase = ""
@@ -936,6 +938,8 @@ class App:
             self.prefill_batch = int(ev.get("prefill_batch") or 0)
             self.prefill_progress = {}
             self.prefill_active = self.prefill_batch > 1
+            self.prefill_s = 0.0
+            self.prefill_tokens = 0
             self.ttft = 0.0
             self.current_layer = 0
             self.phase = "prompt"
@@ -982,7 +986,8 @@ class App:
                 ps = float(ev.get("prefill_s") or 0.0)
                 pt = int(ev.get("prefill_tokens") or self.prompt_tokens or 0)
                 if ps > 0.0 and pt > 0:
-                    self.add_prefill_note(ps, pt, self.prefill_batch)
+                    self.prefill_s = ps
+                    self.prefill_tokens = pt
                 self.prefill_active = False
             elif self.last_token_t > 0:
                 dt = t - self.last_token_t
@@ -1023,6 +1028,8 @@ class App:
             self.decode_spt.clear()
             self.prefill_active = False
             self.prefill_progress = {}
+            self.prefill_s = 0.0
+            self.prefill_tokens = 0
             self.stats_force = True
             self.dirty = True
 
@@ -1050,32 +1057,6 @@ class App:
     # -- commands ----------------------------------------------------------
     def add_system(self, text: str) -> None:
         self.messages.append(Message("system", text))
-        self.dirty = True
-
-    def add_prefill_note(self, seconds: float, tokens: int, batch: int) -> None:
-        """Put the prompt's own timing into the transcript, not just the panel.
-
-        Inserted before the assistant bubble that `start` already opened, so it
-        reads in the order the work happened: prompt, then answer. The timer is
-        the engine's prompt-only measurement; ttft would include the head.
-        """
-        if seconds <= 0.0 or tokens <= 0:
-            return
-        spt = seconds / tokens
-        tps = tokens / seconds
-        mode = f"batch {batch}" if batch > 1 else "per-token"
-        text = (f"prefill: {tokens} tokens in {seconds:.2f} s "
-                f"({tps:.2f} tok/s, {spt:.3f} s/token; {mode})")
-        msg = Message("system", text)
-        if self.current_msg is not None:
-            try:
-                at = self.messages.index(self.current_msg)
-            except ValueError:
-                self.messages.append(msg)
-            else:
-                self.messages.insert(at, msg)
-        else:
-            self.messages.append(msg)
         self.dirty = True
 
     def submit(self) -> None:
@@ -1566,34 +1547,43 @@ class App:
             out.append(list(segments))
 
         in_prefill = self.prefill_active
+        show_prefill = in_prefill or self.prefill_tokens > 0
         in_decode = (self.generating and not in_prefill
                      and self.phase not in ("prompt", "resume"))
 
         def emit_prefill() -> None:
             p = self.prefill_progress or {}
             stage = p.get("stage") or "start"
-            total = int(p.get("tokens_total") or self.prompt_tokens or 0)
-            done = int(p.get("tokens_done") or 0)
-            prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
-            elapsed = float(p.get("elapsed") or 0.0)
             batch = int(p.get("batch") or self.prefill_batch or 0)
             chunk = int(p.get("chunk") or 0)
             chunks = int(p.get("chunks") or 0)
             layer = int(p.get("layer") or 0)
             layers = int(p.get("layers") or 0)
 
-            if stage == "layer":
-                status = f"layers {layer}/{layers}"
-            elif stage == "chunk":
-                status = f"chunk {chunk}/{chunks}"
-            elif stage == "chunk_done":
-                status = f"chunk {chunk}/{chunks} done"
-            elif stage == "head":
-                status = "output head"
-            elif stage == "done":
-                status = "prompt done"
+            final = self.prefill_tokens > 0 and self.prefill_s > 0.0
+            if final:
+                # The engine's own prompt timer, measured without the head.
+                tokens = self.prefill_tokens
+                seconds = self.prefill_s
+                total = done = tokens
+                status = "done"
             else:
-                status = "preparing"
+                tokens = int(p.get("tokens_done") or 0)
+                seconds = float(p.get("elapsed") or 0.0)
+                total = int(p.get("tokens_total") or self.prompt_tokens or 0)
+                done = tokens
+                if stage == "layer":
+                    status = f"layers {layer}/{layers}"
+                elif stage == "chunk":
+                    status = f"chunk {chunk}/{chunks}"
+                elif stage == "chunk_done":
+                    status = f"chunk {chunk}/{chunks} done"
+                elif stage == "head":
+                    status = "output head"
+                elif stage == "done":
+                    status = "prompt done"
+                else:
+                    status = "preparing"
 
             seg: list[tuple[str, str]] = [
                 (" PREFILL", "section"), (f" {status}", "active")]
@@ -1603,18 +1593,30 @@ class App:
                 seg.append((f"  batch {batch}", "dim"))
             emit(*seg)
 
-            bar_w = max(8, min(28, width - 18))
-            filled = int(round(prog * bar_w))
-            bar = "█" * filled + "░" * (bar_w - filled)
-            rate = (prog * total / elapsed) if elapsed > 0.05 else 0.0
-            emit((" [", "dim"), (bar, "prefill"), ("]", "dim"))
-            emit((" ", "dim"), (f"{prog * 100:3.0f}%", "value"),
-                 (f"  {elapsed:5.1f}s", "dim"),
-                 ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
-                  else ("  -", "dim")))
+            if final:
+                spt = seconds / tokens
+                tps = tokens / seconds
+                # The header already carries the batch size when it is > 1.
+                mode = "; per-token" if batch <= 1 else ""
+                emit((" ", "dim"),
+                     (f"{tokens} tokens in {seconds:.2f} s "
+                      f"({tps:.2f} tok/s, {spt:.3f} s/tok)",
+                      "value"))
+            else:
+                prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
+                elapsed = float(p.get("elapsed") or 0.0)
+                bar_w = max(8, min(28, width - 18))
+                filled = int(round(prog * bar_w))
+                bar = "█" * filled + "░" * (bar_w - filled)
+                rate = (prog * total / elapsed) if elapsed > 0.05 else 0.0
+                emit((" [", "dim"), (bar, "prefill"), ("]", "dim"))
+                emit((" ", "dim"), (f"{prog * 100:3.0f}%", "value"),
+                     (f"  {elapsed:5.1f}s", "dim"),
+                     ((f"  {self._short(rate)} tok/s", "dim") if rate > 0
+                      else ("  -", "dim")))
             emit()
 
-        if in_prefill:
+        if show_prefill:
             emit_prefill()
 
         samples = [("decode", 1.0 / dt) for dt in self.decode_spt
@@ -1698,7 +1700,8 @@ class App:
                 visible = samples[-graph_w:]
                 cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
 
-                graph_h = max(3, min(10, height - 12))
+                graph_h = max(3, min(10, height - 12
+                                     - (3 if show_prefill else 0)))
                 target = 5 if graph_h >= 6 else 2
                 peak = max(rate for _, rate in visible)
                 step = nice_step(peak, target)
@@ -1748,7 +1751,7 @@ class App:
                 emit(("  waiting for the first token...", "dim"))
         elif not in_prefill:
             if not self.generating:
-                emit(("  waiting for a turn...", "dim"))
+                emit((" Waiting for a turn...", "dim"))
             elif self.phase == "resume":
                 emit(("  closing previous turn...", "dim"))
             else:
