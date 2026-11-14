@@ -2,11 +2,12 @@
 
 A dependency-free Python TUI for `deepseek-v4-in-c`. It keeps the engine
 resident and shows the conversation next to a live decode tok/s graph. The
-graph appears only while tokens are decoding and carries tok/s and
-seconds-per-token numbers in its header; live RSS, available memory, cache-hit
-rate, disk-read, CPU-inflow, per-core CPU use and temperature stats sit below
-it, and prefill progress is shown separately. The profiler split and top-k
-counters are still sent by the engine but are not drawn yet.
+graph appears while tokens are decoding and stays visible after the turn ends;
+it carries tok/s and seconds-per-token numbers in its header, while live RSS,
+available memory, cache-hit rate, disk-read, CPU-inflow, per-core CPU use and
+temperature stats sit below it, and prefill progress is shown separately. The
+profiler split and top-k counters are still sent by the engine but are not drawn
+yet.
 
 ```
 make tui               # builds bin/dsv4-serve, then launches the TUI
@@ -177,9 +178,10 @@ model runs, plus a decode graph while a turn is generating tokens:
   the engine's final `N tokens in T s (tok/s, s/token)` line, and the section
   stays visible while the response decodes.
 * **DECODE** — a graph of **tok/s** for generated tokens only. It appears while
-  the turn is decoding and disappears during prefill and while idle. The graph
-  is right-aligned and scrolls left as new tokens arrive, and uses a linear axis
-  with round labels (0, 0.25, 0.5, 0.75, 1.0, 1.25, …).
+  the turn is decoding and stays visible after the turn ends, until the next
+  turn's prefill starts or the context is reset. The graph is right-aligned and
+  scrolls left as new tokens arrive, and uses a linear axis with round labels
+  (0, 0.25, 0.5, 0.75, 1.0, 1.25, …).
 * **readout** — the latest decode speed sits on the `DECODE` line as
   `xx tok/s (xx s/tok)`.
 * **decode-avg** — the mean of every decode sample in the current turn, shown
@@ -193,8 +195,10 @@ model runs, plus a decode graph while a turn is generating tokens:
   * **disk** — current device read rate from `/proc/self/io`.
   * **inflow** — estimated RAM→CPU traffic. Each token reads the dense trunk
     plus `layers × topk` expert slots from RAM, so the readout is
-    `(trunk_gb + layers × topk × slot_mb / 1024) × current_tok/s`. This is an
-    estimate of model-weight traffic, not a measured memory-bus counter.
+    `(trunk_gb + layers × topk × slot_mb / 1024) × current_tok/s`. During
+    prefill, `current_tok/s` is the prompt's token rate, so the readout moves
+    while the prompt is running as well. This is an estimate of model-weight
+    traffic, not a measured memory-bus counter.
 * **CPU** — utilization of cores 0–3 from `/proc/stat` deltas, and the CPU
   package temperature from the first matching `hwmon` sensor (preferring
   `Package`, `Tctl`/`Tdie`, then `x86_pkg_temp`). Temperature shows `n/a` when
@@ -203,9 +207,10 @@ model runs, plus a decode graph while a turn is generating tokens:
 The graph, memory and CPU numbers are refreshed at 1 Hz, with an immediate
 graph update on each token event. While prefill runs, the PREFILL bar updates
 live and is replaced by the final prompt timing after the first token is
-decoded; the DECODE section appears at that point. The trunk hit rate,
-profiler split and top-k counters are still collected and sent by
-`bin/dsv4-serve`, but are not drawn while this panel is being reworked.
+decoded; the DECODE section appears at that point and stays after the turn
+ends. The trunk hit rate, profiler split and top-k counters are still collected
+and sent by `bin/dsv4-serve`, but are not drawn while this panel is being
+reworked.
 
 ## Caveats
 

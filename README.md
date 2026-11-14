@@ -146,8 +146,9 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 `tui/dsv4_tui.py` is a standard-library-only curses front end. It keeps the
 engine resident across turns and streams a JSON event per decoder layer, so the
 transcript sits next to a live decode tok/s graph and resource readouts. The
-graph appears only while tokens are decoding and scrolls right-to-left, with
-tok/s and seconds-per-token numbers in its header and RSS, available memory,
+graph appears while tokens are decoding and stays visible after the turn ends;
+it scrolls right-to-left, with tok/s and seconds-per-token numbers in its header
+and RSS, available memory,
 cache-hit, disk-read, CPU-inflow, per-core CPU and temperature stats below it;
 prefill progress is shown separately and the profiler split and top-k counters
 are still collected for later use but are not drawn:

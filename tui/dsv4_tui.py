@@ -722,7 +722,10 @@ class App:
             dt = now - self.prev_snap_t
             # A forced update (start/done) can land milliseconds after the last
             # sample. Rates over that window are noise, not information; keep
-            # the previous ones until a real sampling interval has passed.
+            # the previous ones until a real sampling interval has passed. Do
+            # not move the baseline meanwhile, or a stream of sub-0.2 s prefill
+            # events would reset the window forever and the disk rate would
+            # never be recomputed.
             if dt >= 0.2:
                 ps = self.prev_snap.get("sys") or {}
                 pc = self.prev_snap.get("cache") or {}
@@ -736,12 +739,19 @@ class App:
                 self.cpu_pct = clamp(
                     (sysd.get("cpu_s", 0.0) - ps.get("cpu_s", 0.0)) / dt * 100.0,
                     0.0, 999.0)
-        self.prev_snap = {
-            "sys": dict(sysd),
-            "cache": dict(cache),
-            "trunk": dict(trunk),
-        }
-        self.prev_snap_t = now
+                self.prev_snap = {
+                    "sys": dict(sysd),
+                    "cache": dict(cache),
+                    "trunk": dict(trunk),
+                }
+                self.prev_snap_t = now
+        else:
+            self.prev_snap = {
+                "sys": dict(sysd),
+                "cache": dict(cache),
+                "trunk": dict(trunk),
+            }
+            self.prev_snap_t = now
         self.last = ev
 
     @staticmethod
@@ -1548,8 +1558,12 @@ class App:
 
         in_prefill = self.prefill_active
         show_prefill = in_prefill or self.prefill_tokens > 0
-        in_decode = (self.generating and not in_prefill
-                     and self.phase not in ("prompt", "resume"))
+        # Keep the last turn's graph on screen after `done`; it is replaced by
+        # the next turn's decode data once that turn produces tokens.
+        has_decode = bool(self.decode_spt)
+        in_decode = (not in_prefill
+                     and self.phase not in ("prompt", "resume")
+                     and (self.generating or has_decode))
 
         def emit_prefill() -> None:
             p = self.prefill_progress or {}
@@ -1631,6 +1645,20 @@ class App:
         rate_txt = self._short(cur_rate) if cur_rate else "-"
         spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
 
+        # The inflow estimate needs a token rate. Decode supplies it once the
+        # graph has samples; during prefill use the engine's prompt timing or
+        # the live progress estimate instead of showing zero.
+        flow_rate = cur_rate
+        if flow_rate <= 0.0:
+            if self.prefill_tokens > 0 and self.prefill_s > 0.0:
+                flow_rate = self.prefill_tokens / self.prefill_s
+            else:
+                p = self.prefill_progress or {}
+                elapsed = float(p.get("elapsed") or 0.0)
+                done = int(p.get("tokens_done") or 0)
+                if elapsed > 0.05 and done > 0:
+                    flow_rate = done / elapsed
+
         def emit_memory() -> None:
             sysd = self.last.get("sys") or self.ready.get("sys") or {}
             cache = self.last.get("cache") or self.ready.get("cache") or {}
@@ -1643,13 +1671,14 @@ class App:
 
             # Per token the CPU reads every dense trunk weight plus the routed
             # experts from RAM. That is a fixed byte count for a given model,
-            # so multiplying by the current token rate estimates the flow.
+            # so multiplying by the current token rate estimates the flow. The
+            # rate is decode tok/s, or the prompt's token rate during prefill.
             layers = int(cfg.get("layers") or 0)
             topk = int(cfg.get("topk") or 0)
             slot_mb = float(cache.get("slot_mb") or 0.0)
             expert_gb = layers * topk * slot_mb / 1024.0
             trunk_gb = float(trunk.get("resident_gb") or 0.0)
-            inflow = (expert_gb + trunk_gb) * cur_rate
+            inflow = (expert_gb + trunk_gb) * flow_rate
 
             emit((" MEMORY", "section"))
             emit((" RSS  ", "dim"), (f"{rss:.2f} GB", "value"),
@@ -1689,11 +1718,11 @@ class App:
             if self.decode_spt:
                 avg_spt = sum(self.decode_spt) / len(self.decode_spt)
                 avg_rate = 1.0 / avg_spt if avg_spt > 0 else 0.0
-                emit((" decode-avg ", "dim"),
-                     (f"{self._short(avg_rate)} tok/s", "active"),
+                emit((" ⌀ avg  ", "dim"),
+                     (f"{self._short(avg_rate)} tok/s", "system"),
                      (f" ({self._short_spt(avg_spt)} s/tok)", "value"))
             else:
-                emit((" decode-avg ", "dim"), ("-", "value"))
+                emit((" ⌀ avg  ", "dim"), ("-", "value"))
 
             if samples:
                 graph_w = max(6, width - 8)
