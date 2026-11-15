@@ -69,6 +69,8 @@ typedef struct {
     int             pf_enabled;
     struct DSV4CacheBatch *pf_batch;
     uint64_t pf_requests, pf_hits, pf_loads, pf_fail, pf_bytes;
+    /* Always 0 now: a pending prefetch slot is streamed by wait_any(), never
+     * waited for inside begin(). Kept because the stats report prints it. */
     double   pf_wait_s;
 } DSV4Cache;
 
@@ -87,7 +89,9 @@ int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id);
 
 /* ---- overlapped fetching ------------------------------------------------
  * begin() does the whole serial decide pass, fills out[k] for every HIT, leaves
- * NULL for misses and hands them to the pool. end() waits and fills the rest.
+ * NULL for misses and hands them to the pool. A slot the hash prefetch is
+ * still reading is registered, not waited for: wait_any()/end() deliver it
+ * when it publishes, exactly like a miss. end() waits and fills the rest.
  * Between the two, the caller owns the CPU. Cache state is decided in begin()
  * in request order, before any I/O, so output does not depend on read order.
  * The caller must still accumulate each k into its own buffer and sum in k
@@ -108,6 +112,15 @@ typedef struct DSV4CacheBatch {
     int layer_of[DSV4_MAX_PREFETCH];
     int failed[DSV4_MAX_PREFETCH];
     uint64_t got[DSV4_MAX_PREFETCH];
+    /* Slots the hash-layer prefetch was already reading when begin() ran.
+     * They are NOT jobs of this batch: begin() neither waits for them nor
+     * re-reads them. wait_any()/end() hand each one out the moment its
+     * prefetch reader publishes, so the caller streams them like a miss. */
+    int nwait;
+    int wait_slot[DSV4_MAX_PREFETCH];
+    int wait_k[DSV4_MAX_PREFETCH];
+    int wait_expert[DSV4_MAX_PREFETCH];
+    int wait_done[DSV4_MAX_PREFETCH];
     /* Requests for an expert another request in this batch is already
      * reading; they cannot be answered until that read lands. */
     int ndup, dup_k[DSV4_MAX_PREFETCH], dup_j[DSV4_MAX_PREFETCH];
@@ -124,7 +137,8 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
 void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);
 
 /* Block until one miss has landed; *k indexes the caller's out array. Returns 1
- * when one was handed out, 0 when every miss has been consumed. */
+ * when one was handed out, 0 when every miss has been consumed. A prefetch
+ * slot that was still reading at begin() counts as one of these. */
 int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
 
 #endif /* DSV4_CACHE_H */

@@ -45,7 +45,7 @@ enum {
 };
 
 /* Field use per kind (unused fields are zero):
- *   B  layer n=requested ntodo=misses k=dups
+ *   B  layer n=requested ntodo=misses k=dups slot=prefetch-waits
  *   H  layer k expert slot tag=resident|prefetch|dup|pf-wait ms=wait
  *   Q  layer k expert slot tag=pf
  *   R  layer k expert slot reader

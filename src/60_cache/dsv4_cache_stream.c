@@ -25,11 +25,8 @@ int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
 
     pthread_mutex_lock(&c->rmx);
     for (;;) {
-        for (int j = 0; j < b->ntodo; j++) {
-            if (!b->published[j] || b->taken[j]) continue;
-            b->taken[j] = 1;
-            *k = b->k_of[j];
-            const int expert = b->expert_of[j];
+        int expert = -1;
+        if (dsv4_cache_take_ready(c, b, k, &expert)) {
             pthread_mutex_unlock(&c->rmx);
             if (tr)
                 dsv4_trace_ev(&(DSV4TraceEv){ .kind = DSV4_TR_WAKE,
@@ -37,7 +34,7 @@ int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
                                               .expert = expert });
             return 1;
         }
-        if (b->rdone >= b->ntodo) {
+        if (b->rdone >= b->ntodo && !dsv4_cache_waits_left(b)) {
             pthread_mutex_unlock(&c->rmx);
             if (tr)
                 dsv4_trace_ev(&(DSV4TraceEv){ .kind = DSV4_TR_WAIT_END,

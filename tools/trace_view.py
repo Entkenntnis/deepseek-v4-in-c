@@ -71,6 +71,7 @@ def layer_stats(evs):
     pf_waits = []
     miss = 0
     dups = 0
+    pfw_b = 0
     pubs = []
     last_pub = 0.0
     wait_ms = 0.0
@@ -86,6 +87,7 @@ def layer_stats(evs):
         if k == "B":
             miss = e["ntodo"]
             dups = e["k"]
+            pfw_b = e["slot"]
         elif k == "H":
             hits.append(e)
             if e["tag"] == "pf-wait":
@@ -117,7 +119,8 @@ def layer_stats(evs):
         tail_ms = sum(e["ms"] for e in mm_events if e["t"] >= last_pub)
 
     return {
-        "hits": len(hits), "dups": dups, "pfw": len(pf_waits),
+        "hits": len(hits), "dups": dups,
+        "pfw": pfw_b if pfw_b else len(pf_waits),
         "pf_wait_ms": sum(e["ms"] for e in pf_waits),
         "miss": miss, "last_pub": last_pub, "wait_ms": wait_ms,
         "mm_ms": mm_ms, "tail_ms": tail_ms, "layer_ms": layer_ms,
@@ -399,12 +402,18 @@ def write_note(tokens, out):
             evs = sorted(layers[L], key=lambda e: e["t"])
             st = layer_stats(evs)
             out.write(f"\nL{L:02d}  moe {st['layer_ms']:.3f} ms   "
-                      f"{st['hits']} hit / {st['miss']} miss   "
-                      f"wait {st['wait_ms']:.3f} ms   "
+                      f"{st['hits']} hit / {st['miss']} miss")
+            if st["pfw"]:
+                out.write(f" / {st['pfw']} prefetch")
+            out.write(f"   wait {st['wait_ms']:.3f} ms   "
                       f"tail {st['tail_ms']:.3f} ms\n")
             if st["pfw"]:
-                out.write(f"  prefetch hits that blocked begin(): {st['pfw']} "
-                          f"({st['pf_wait_ms']:.3f} ms)\n")
+                if st["pf_wait_ms"] > 0.0:
+                    out.write(f"  prefetch hits that blocked begin(): "
+                              f"{st['pfw']} ({st['pf_wait_ms']:.3f} ms)\n")
+                else:
+                    out.write(f"  prefetch slots streamed by wait_any(): "
+                              f"{st['pfw']}\n")
             for e in evs:
                 out.write("  " + fmt_event(e) + "\n")
 

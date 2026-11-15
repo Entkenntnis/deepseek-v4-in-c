@@ -37,6 +37,51 @@ int dsv4_cache_claim_slot(DSV4Cache *c, int layer, int expert,
     return victim;
 }
 
+/* Caller holds rmx. Hand out one k that has become usable: either a read this
+ * batch queued (published by its reader for a streaming batch) or a prefetch
+ * slot that begin() registered. Sets b->out[k] for the prefetch case. Returns
+ * 0 when nothing new is ready. */
+int dsv4_cache_take_ready(DSV4Cache *c, DSV4CacheBatch *b, int *k, int *expert)
+{
+    for (int j = 0; j < b->ntodo; j++) {
+        if (!b->published[j] || b->taken[j]) continue;
+        b->taken[j] = 1;
+        *k = b->k_of[j];
+        *expert = b->expert_of[j];
+        return 1;
+    }
+    for (int i = 0; i < b->nwait; i++) {
+        if (b->wait_done[i]) continue;
+        DSV4Slot *s = &c->slot[b->wait_slot[i]];
+        if (s->pending) continue;
+        b->wait_done[i] = 1;
+        if (s->layer != b->layer || s->expert != b->wait_expert[i]) {
+            b->out[b->wait_k[i]] = NULL;   /* prefetch failed; caller aborts */
+            b->rc = -1;
+            continue;
+        }
+        c->hits++;
+        s->stamp = ++c->clock;
+        b->out[b->wait_k[i]] = &s->w;
+        if (dsv4_trace_active())
+            dsv4_trace_ev(&(DSV4TraceEv){
+                .kind = DSV4_TR_HIT, .layer = b->layer, .k = b->wait_k[i],
+                .expert = b->wait_expert[i], .slot = b->wait_slot[i],
+                .tag = "prefetch" });
+        *k = b->wait_k[i];
+        *expert = b->wait_expert[i];
+        return 1;
+    }
+    return 0;
+}
+
+int dsv4_cache_waits_left(const DSV4CacheBatch *b)
+{
+    for (int i = 0; i < b->nwait; i++)
+        if (!b->wait_done[i]) return 1;
+    return 0;
+}
+
 int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               int n, const DSV4ExpertW **out,
                               DSV4CacheBatch *b)
@@ -49,6 +94,7 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     b->n = n;
     b->ntodo = 0;
     b->ndup = 0;
+    b->nwait = 0;
     b->rc = 0;
     b->rdone = 0;
     b->is_prefetch = 0;
@@ -66,9 +112,7 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
         out[k] = NULL;
         c->clock++;
 
-        /* A duplicate request must not take a second slot. This check MUST
-         * come before the pending-slot wait: the duplicate's read has not been
-         * queued yet, so waiting here would deadlock. */
+        /* A duplicate request must not take a second slot. */
         int dup = -1;
         for (int j = 0; j < b->ntodo; j++)
             if (b->expert_of[j] == e) { dup = j; break; }
@@ -91,15 +135,18 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             if (c->slot[i].layer == layer && c->slot[i].expert == e) {
                 found = i; break;
             }
-        double pf_wait_ms = -1.0;
         if (found >= 0 && c->slot[found].pending) {
-            const double t0 = dsv4_now_s();
-            while (c->slot[found].pending)
-                pthread_cond_wait(&c->rdone, &c->rmx);
-            pf_wait_ms = (dsv4_now_s() - t0) * 1000.0;
-            c->pf_wait_s += pf_wait_ms / 1000.0;
-            if (c->slot[found].layer != layer || c->slot[found].expert != e)
-                found = -1;
+            /* The hash-layer prefetch is already reading it. Do NOT block
+             * begin(): register the slot and let wait_any()/end() hand it
+             * over the moment its reader publishes. Adding it to claimed[]
+             * keeps a later claim in this same decide pass off it. */
+            claimed[nclaim++] = found;
+            b->wait_slot[b->nwait]   = found;
+            b->wait_k[b->nwait]      = k;
+            b->wait_expert[b->nwait] = e;
+            b->wait_done[b->nwait]   = 0;
+            b->nwait++;
+            continue;
         }
         if (found >= 0) {
             c->slot[found].stamp = ++c->clock;
@@ -109,9 +156,8 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             if (dsv4_trace_active())
                 dsv4_trace_ev(&(DSV4TraceEv){
                     .kind = DSV4_TR_HIT, .layer = layer, .k = k, .expert = e,
-                    .slot = found, .ms = pf_wait_ms > 0.0 ? pf_wait_ms : 0.0,
-                    .tag = pf_wait_ms >= 0.0 ? "pf-wait"
-                           : c->slot[found].origin == 1 ? "prefetch" : "resident" });
+                    .slot = found,
+                    .tag = c->slot[found].origin == 1 ? "prefetch" : "resident" });
             continue;
         }
 
@@ -135,7 +181,8 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     if (dsv4_trace_active())
         dsv4_trace_ev(&(DSV4TraceEv){ .kind = DSV4_TR_BATCH, .layer = layer,
                                       .n = n, .ntodo = b->ntodo,
-                                      .k = b->ndup, .at = t_begin });
+                                      .k = b->ndup, .slot = b->nwait,
+                                      .at = t_begin });
 
     if (b->ntodo > 0 && c->nrth > 0) {
         int first = b->ntodo;
@@ -176,8 +223,15 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
     }
 
     pthread_mutex_lock(&c->rmx);
-    while (b->rdone < b->ntodo)
+    for (;;) {
+        int k, expert;
+        /* Jobs and prefetch slots that have already published are handed out
+         * here, so a batch whose caller never calls wait_any() (stream cap 0,
+         * or the tail after the last wake) still gets them all. */
+        while (dsv4_cache_take_ready(c, b, &k, &expert)) { }
+        if (b->rdone >= b->ntodo && !dsv4_cache_waits_left(b)) break;
         pthread_cond_wait(&c->rdone, &c->rmx);
+    }
 
     if (b->streaming) {
         /* The reader already published and accounted every miss. Anything the
