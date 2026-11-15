@@ -3,7 +3,7 @@
 
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
-            -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off
+            -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off -flto=auto
 INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party \
             -Isrc/00_base -Isrc/10_compute -Isrc/20_runtime -Isrc/30_tokenizer \
             -Isrc/40_io -Isrc/50_loader -Isrc/60_cache -Isrc/70_decode \
