@@ -34,88 +34,10 @@
 #include <immintrin.h>
 
 #include "dsv4_prefill_gemm.h"
+#include "dsv4_qmat_dec.h"
 #include "dsv4_quant.h"
 
-/* --------------------------------------------------------------- BF16 ----- */
-static inline double bf16d(uint16_t h)
-{
-    union { uint32_t u; float f; } v;
-    v.u = (uint32_t)h << 16;
-    return (double)v.f;
-}
-
-static inline __m256d load4_bf16(const uint16_t *row, int i)
-{
-    const __m128i h = _mm_loadl_epi64((const __m128i *)(row + i));
-    const __m128i w = _mm_slli_epi32(_mm_cvtepu16_epi32(h), 16);
-    return _mm256_cvtps_pd(_mm_castsi128_ps(w));
-}
-
-#define XB4(i) _mm256_loadu_pd(xdb + (i))
-#define BLOCK_DOT_V(LOAD1, LOAD4)                                              \
-    do {                                                                       \
-        __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();            \
-        __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();            \
-        int i = 0;                                                             \
-        for (; i + 15 < n; i += 16) {                                          \
-            v0 = _mm256_fmadd_pd(LOAD4(i),      XB4(i),      v0);              \
-            v1 = _mm256_fmadd_pd(LOAD4(i + 4),  XB4(i + 4),  v1);              \
-            v2 = _mm256_fmadd_pd(LOAD4(i + 8),  XB4(i + 8),  v2);              \
-            v3 = _mm256_fmadd_pd(LOAD4(i + 12), XB4(i + 12), v3);              \
-        }                                                                      \
-        double bb[4];                                                          \
-        _mm256_storeu_pd(bb, _mm256_add_pd(_mm256_add_pd(v0, v1),              \
-                                           _mm256_add_pd(v2, v3)));            \
-        acc = (bb[0] + bb[1]) + (bb[2] + bb[3]);                               \
-        for (; i < n; i++) acc = fma(LOAD1(i), (double)xb[i], acc);            \
-    } while (0)
-
-#define LOAD1_BF16(k) bf16d(row[k])
-#define LOAD4_BF16(k) load4_bf16(row, (k))
-
 /* ---------------------------------------------------------------- FP8 ----- */
-/* Exact f32 bit pattern for one E4M3 byte. This is the scalar decoder from
- * dsv4_quant.h; the fast vector form below must produce the same bits. */
-static inline __m256 fp8_8_normal(const uint8_t *wb, int i)
-{
-    const __m128i b8 = _mm_loadl_epi64((const __m128i *)(wb + i));
-    const __m256i b = _mm256_cvtepu8_epi32(b8);
-    const __m256i bits = _mm256_add_epi32(
-        _mm256_slli_epi32(_mm256_and_si256(b, _mm256_set1_epi32(0x7F)), 20),
-        _mm256_set1_epi32(0x3C000000));
-    const __m256i sign = _mm256_and_si256(_mm256_slli_epi32(b, 24),
-                                          _mm256_set1_epi32((int)0x80000000u));
-    return _mm256_castsi256_ps(_mm256_or_si256(bits, sign));
-}
-
-/* Any byte with exp==0 (subnormal or zero) or abs==0x7F (NaN). */
-static inline int fp8_block_has_special(const uint8_t *wb)
-{
-    const __m256i zero = _mm256_setzero_si256();
-    const __m256i emask = _mm256_set1_epi8(0x78);
-    const __m256i amask = _mm256_set1_epi8(0x7F);
-    const __m256i nan = _mm256_set1_epi8(0x7F);
-    __m256i any = zero;
-    for (int i = 0; i < 128; i += 32) {
-        const __m256i v = _mm256_loadu_si256((const __m256i *)(wb + i));
-        const __m256i abs = _mm256_and_si256(v, amask);
-        any = _mm256_or_si256(any, _mm256_cmpeq_epi8(
-            _mm256_and_si256(abs, emask), zero));
-        any = _mm256_or_si256(any, _mm256_cmpeq_epi8(abs, nan));
-    }
-    return !_mm256_testz_si256(any, any);
-}
-
-static inline double hsum_old(__m256 s)
-{
-    __m128 lo = _mm256_castps256_ps128(s);
-    __m128 hi = _mm256_extractf128_ps(s, 1);
-    __m128 t = _mm_add_ps(lo, hi);
-    t = _mm_hadd_ps(t, t);
-    t = _mm_hadd_ps(t, t);
-    return (double)_mm_cvtss_f32(t);
-}
-
 /* Decode one 128-byte block once, into exact f32 values. The normal path uses
  * the same closed form as the core kernel; the rare subnormal/NaN block falls
  * back to the scalar definition, which is what the core table was built from. */
@@ -207,7 +129,7 @@ static void fp8_n(float *y, const float *x, const uint8_t *W,
                         a3 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + i + 24),
                                              _mm256_loadu_ps(xb + i + 24), a3);
                     }
-                    const double acc = hsum_old(_mm256_add_ps(
+                    const double acc = dsv4_hsum256(_mm256_add_ps(
                         _mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
                     total[t] += acc * s;
                 }
@@ -218,58 +140,11 @@ static void fp8_n(float *y, const float *x, const uint8_t *W,
     }
 }
 
-/* ---------------------------------------------------------------- FP4 ----- */
-/* Same nibble decode as src/core/dsv4_matmul.c: the batch kernel must produce
- * the same f32 values the GEMV decodes, not merely an equivalent set. */
-static inline __m256 fp4_8(const uint8_t *row, int64_t base)
-{
-    uint32_t four;
-    memcpy(&four, row + (base >> 1), 4);
-    __m256i idx = _mm256_broadcastd_epi32(_mm_cvtsi32_si128((int)four));
-    idx = _mm256_srlv_epi32(idx, _mm256_setr_epi32(0, 4, 8, 12,
-                                                   16, 20, 24, 28));
-    const __m256 mag = _mm256_permutevar8x32_ps(
-        _mm256_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f), idx);
-    const __m256i sgn = _mm256_slli_epi32(
-        _mm256_and_si256(idx, _mm256_set1_epi32(8)), 28);
-    return _mm256_castsi256_ps(
-        _mm256_or_si256(_mm256_castps_si256(mag), sgn));
-}
-
-static inline __m256 fp4_block_sum32_w(const float *wf, const float *xb)
-{
-    const __m256 a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wf),
-                                      _mm256_loadu_ps(xb),
-                                      _mm256_setzero_ps());
-    const __m256 a1 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 8),
-                                      _mm256_loadu_ps(xb + 8),
-                                      _mm256_setzero_ps());
-    const __m256 a2 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 16),
-                                      _mm256_loadu_ps(xb + 16),
-                                      _mm256_setzero_ps());
-    const __m256 a3 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + 24),
-                                      _mm256_loadu_ps(xb + 24),
-                                      _mm256_setzero_ps());
-    return _mm256_add_ps(_mm256_add_ps(a0, a1),
-                         _mm256_add_ps(a2, a3));
-}
-
-static inline double fp4_hsum256(__m256 s)
-{
-    __m128 lo = _mm256_castps256_ps128(s);
-    __m128 hi = _mm256_extractf128_ps(s, 1);
-    __m128 t = _mm_add_ps(lo, hi);
-    t = _mm_hadd_ps(t, t);
-    t = _mm_hadd_ps(t, t);
-    return (double)_mm_cvtss_f32(t);
-}
-
 /* Batched FP4 with the production kernel's arithmetic, not a new reduction
  * order. Each 128-weight group is decoded ONCE into wf[128], then every token
  * runs the same four block sums and the same four-lane double fold. The four
  * block sums are folded exactly as dsv4_matmul_fp4_avx2 folds them, so the
  * result for (row, token) is bitwise equal to nt separate GEMVs. */
-#define FP4_SC_MAX 512
 static void fp4_n(float *y, const float *x, const uint8_t *W,
                   const uint8_t *S, int in, int out, int blk_r, int blk_c,
                   int nt)
@@ -326,7 +201,7 @@ static void fp4_n(float *y, const float *x, const uint8_t *W,
             for (int t = 0; t < nt; t++) {
                 const __m256 s = fp4_block_sum32_w(
                     wf, x + (size_t)t * in + c0);
-                total[t] += fp4_hsum256(s) * sdec[bi];
+                total[t] += dsv4_hsum256(s) * sdec[bi];
             }
         }
 
