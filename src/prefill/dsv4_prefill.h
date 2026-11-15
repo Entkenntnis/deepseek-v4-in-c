@@ -34,7 +34,7 @@
 #include <stdint.h>
 
 #include "dsv4.h"
-#include "dsv4_prefill_gemm.h"
+#include "dsv4_matmul.h"
 #include "dsv4_bind.h"
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"

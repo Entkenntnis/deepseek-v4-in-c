@@ -34,7 +34,7 @@
 #include <time.h>
 
 #include "dsv4_prefill.h"
-#include "dsv4_prefill_gemm.h"
+#include "dsv4_matmul.h"
 
 /* Primitives defined in src/model/dsv4_layer.c and src/core/dsv4_*.c. */
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);

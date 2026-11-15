@@ -33,7 +33,7 @@
 #endif
 #include "dsv4.h"
 #include "dsv4_quant.h"
-#include "dsv4_prefill_gemm.h"
+#include "dsv4_matmul.h"
 
 void dsv4_matmul_bf16(float *, const float *, const uint16_t *, int, int);
 void dsv4_matmul_fp8(float *, const float *, const uint8_t *, const uint8_t *,
