@@ -16,7 +16,6 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const DSV4Cfg *c = p->c;
     const int hc = c->hc_mult, d = c->hidden;
     const int inter = c->moe_inter * c->n_shared;
-    const int rinter = c->moe_inter;
     const int topk = c->topk;
 
     const double tg = dsv4_now_s();
@@ -59,61 +58,9 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                               &p->st.shared_mm, &p->st.f_shared)) return -1;
     p->t_shared += dsv4_now_s() - tsh;
 
-    /* ROUTED EXPERTS: layer-level union and expert-major when the source can
-     * overlap; otherwise the per-token path. Both write the same per-(token, k)
-     * accumulators, so the arithmetic is unchanged. */
-    if (p->src->begin && p->src->end) {
-        if (dsv4_prefill_moe_union(p, L, n)) return -1;
-    } else {
-        for (int t = 0; t < n; t++) {
-            DSV4Scratch *s = &p->scratch[t];
-            const float *x = p->x1 + (size_t)t * d;
-            float *o = p->out + (size_t)t * d;
-            const int *tidx = p->topk_idx + (size_t)t * topk;
-            const float *tw = p->topk_w + (size_t)t * topk;
-            const DSV4ExpertW *ex[DSV4_MAX_TOPK];
-            for (int k = 0; k < topk; k++) ex[k] = NULL;
-
-            double ti0 = dsv4_now_s();
-            if (p->src->get_many)
-                p->src->get_many(p->src->ctx, L, tidx, topk, ex);
-            else
-                for (int k = 0; k < topk; k++)
-                    ex[k] = p->src->get(p->src->ctx, L, tidx[k]);
-            {
-                const double td = dsv4_now_s() - ti0;
-                p->t_io += td;
-                p->st.expert_io += td;
-            }
-
-            const double tm0 = dsv4_now_s();
-            for (int k = 0; k < topk; k++) {
-                if (!ex[k]) {
-                    fprintf(stderr, "prefill: layer %d could not obtain routed "
-                                    "expert %d of %d for token %d; refusing to "
-                                    "emit a token routed through fewer experts\n",
-                            L, k + 1, topk, t);
-                    return -1;
-                }
-                dsv4_prefill_expert(p, s->expert_acc +
-                                       (size_t)k * s->expert_acc_stride,
-                                    x, ex[k], s, d, rinter, c->swiglu_limit);
-            }
-            {
-                const double tsum = dsv4_now_s();
-                for (int i = 0; i < d; i++) o[i] = 0.0f;
-                for (int k = 0; k < topk; k++) {
-                    const float wk = tw[k];
-                    const float *acc = s->expert_acc +
-                                       (size_t)k * s->expert_acc_stride;
-                    for (int i = 0; i < d; i++) o[i] += wk * acc[i];
-                }
-                for (int i = 0; i < d; i++) o[i] += p->sh_out[(size_t)t * d + i];
-                p->st.expert_sum += dsv4_now_s() - tsum;
-            }
-            p->t_moe += dsv4_now_s() - tm0;
-        }
-    }
+    /* ROUTED EXPERTS: layer-level union and expert-major. begin()/end() are
+     * required by dsv4_prefill_init(), so this is the only path. */
+    if (dsv4_prefill_moe_union(p, L, n)) return -1;
 
     {
         const double ts = dsv4_now_s();

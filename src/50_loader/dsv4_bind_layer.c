@@ -16,8 +16,6 @@ static void plan_compressor(DSV4BindPlan *p, const DSV4Cfg *c,
                             const char *base)
 {
     const int coff = comp_coff(ratio);
-    w->ratio = ratio;
-    w->coff  = coff;
     dsv4_bind_reqw(p, &w->ape,  (int64_t)ratio * coff * head_dim, "%s.ape", base);
     dsv4_bind_reqw(p, &w->norm, head_dim, "%s.norm.weight", base);
     dsv4_bind_reqq(p, &w->wkv, DSV4_WBF16, (int64_t)coff * head_dim, c->hidden,
@@ -26,8 +24,8 @@ static void plan_compressor(DSV4BindPlan *p, const DSV4Cfg *c,
                    "%s.wgate", base);
 }
 
-/* Everything one decoder layer needs, and NOTHING it must not have. See
- * README.md for the five layer shapes this branches on. */
+/* Everything one decoder layer needs, and NOTHING it must not have. The five
+ * shapes come from compress_ratio, has_indexer and is_hash_routed. */
 static void plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L, DSV4LayerW *w)
 {
     const int ratio = dsv4_compress_ratio(c, L);
@@ -36,7 +34,6 @@ static void plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L, DSV4LayerW *w)
     memset(w, 0, sizeof *w);
     w->layer = L;
     w->compress_ratio = ratio;
-    w->hash_routed = hash;
     w->has_comp = (ratio != 0);
     w->has_idx  = dsv4_has_indexer(c, L);
 
@@ -45,8 +42,6 @@ static void plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L, DSV4LayerW *w)
 
     /* ---- attention ---- */
     DSV4AttnW *a = &w->attn;
-    a->has_comp = w->has_comp;
-    a->has_idx  = w->has_idx;
     dsv4_bind_reqw(p, &a->sink,    c->n_heads,  "layers.%d.attn.attn_sink",      L);
     dsv4_bind_reqw(p, &a->q_norm,  c->q_lora,   "layers.%d.attn.q_norm.weight",  L);
     dsv4_bind_reqw(p, &a->kv_norm, c->head_dim, "layers.%d.attn.kv_norm.weight", L);

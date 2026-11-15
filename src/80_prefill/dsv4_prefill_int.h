@@ -90,9 +90,6 @@ struct DSV4Prefill {
 };
 
 /* Batched-matmul seam and its timed wrappers. */
-int dsv4_prefill_pm(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj);
-int dsv4_prefill_pm1(DSV4Prefill *p, int layer, float *y, const float *x,
-                     const DSV4QMat *m, int n);
 int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
                           const DSV4QMat *m, int n, double *timer,
                           double *flops);

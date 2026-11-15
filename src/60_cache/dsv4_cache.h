@@ -1,12 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_cache.h - LRU cache for the streamed routed experts.
- * The sizing measurements, the alignment argument and the overlap contract are
- * in README.md. */
+/* dsv4_cache.h - LRU cache for the streamed routed experts. */
 #ifndef DSV4_CACHE_H
 #define DSV4_CACHE_H
 
 #include <pthread.h>
-#include <stdio.h>
 
 #include "dsv4.h"
 #include "dsv4_st.h"
@@ -47,12 +44,9 @@ typedef struct {
     int64_t         bounce_cap;
     int            direct;      /* 1 when the shards opened O_DIRECT */
 
-    /* Optional routing log: every (layer, expert) request in issue order. */
-    FILE *route_log;
-
     /* READER POOL: threads that exist only to sit inside pread(). They are
      * pthreads, not an OpenMP team, because the caller is expected to run its
-     * own full-width matmul meanwhile. See README.md. */
+     * own full-width matmul meanwhile. */
     pthread_t      *rth;
     int             nrth;
     pthread_mutex_t rmx;
@@ -78,10 +72,6 @@ typedef struct {
     double   pf_wait_s;
 } DSV4Cache;
 
-/* Bytes one routed expert occupies, from config alone. The budget planner
- * reserves room for topk of them BEFORE giving the trunk its share. */
-int64_t dsv4_cache_expert_bytes(const DSV4Cfg *cfg);
-
 /* What one slot costs: payload plus alignment slack. This, not expert_bytes, is
  * what a budget is divided by -- the slack is real resident memory. */
 int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg);
@@ -93,20 +83,7 @@ int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
 void dsv4_cache_free(DSV4Cache *c);
 
 /* ---- hash-layer prefetch (automatic; init enables it) -------------------- */
-int dsv4_cache_enable_prefetch(DSV4Cache *c);
-int dsv4_cache_prefetch(DSV4Cache *c, const int *layers, const int *experts,
-                        int n);
 int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id);
-
-/* Fetch one expert, loading it if absent. NULL means a read failure, which
- * callers must treat as fatal: routing a token through fewer experts than the
- * model specifies is a silently different model. */
-const DSV4ExpertW *dsv4_cache_get(DSV4Cache *c, int layer, int expert);
-
-/* Fetch n experts of one layer at once, reading the misses concurrently.
- * out[k] is NULL for any expert that failed to load. Returns 0 if all loaded. */
-int dsv4_cache_get_many(DSV4Cache *c, int layer, const int *experts, int n,
-                        const DSV4ExpertW **out);
 
 /* ---- overlapped fetching ------------------------------------------------
  * begin() does the whole serial decide pass, fills out[k] for every HIT, leaves
@@ -149,8 +126,5 @@ void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);
 /* Block until one miss has landed; *k indexes the caller's out array. Returns 1
  * when one was handed out, 0 when every miss has been consumed. */
 int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
-
-void dsv4_cache_reset_stats(DSV4Cache *c);
-void dsv4_cache_report(const DSV4Cache *c, const char *label);
 
 #endif /* DSV4_CACHE_H */

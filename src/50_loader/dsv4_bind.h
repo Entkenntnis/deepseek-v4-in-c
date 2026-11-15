@@ -4,8 +4,7 @@
  * ONE plan_layer() declares what a layer needs, and both binding paths -- from
  * safetensors shards and from a streamed trunk run -- walk that same plan. Two
  * independent name lists would drift, and the drift would show up as a
- * transposed or truncated matrix rather than as an error. See README.md for the
- * storage classes, the five layer shapes and the trunk format.
+ * transposed or truncated matrix rather than as an error.
  */
 #ifndef DSV4_BIND_H
 #define DSV4_BIND_H
@@ -14,25 +13,7 @@
 #include "dsv4_st.h"
 
 typedef struct {
-    void  *blob;      /* one allocation holding every resident weight of this
-                       * layer, MIXED narrow and fp32, each tensor 8-aligned */
-    size_t nbytes;
-    int    layer;
-    DSV4LayerW w;
-} DSV4LayerBind;
-
-/* Bind one decoder layer. Returns 0 on success. Routed expert pointers are
- * deliberately absent from DSV4LayerW: those are streamed per token. */
-int  dsv4_bind_layer(const DSV4St *s, const DSV4Cfg *c, int layer,
-                     DSV4LayerBind *b);
-void dsv4_bind_free(DSV4LayerBind *b);
-
-/* Bytes one layer needs, without reading any. For sizing and reporting. */
-int64_t dsv4_bind_layer_bytes(const DSV4St *s, const DSV4Cfg *c, int layer);
-
-typedef struct {
-    void  *blob;
-    size_t nbytes;
+    void     *blob;      /* one allocation holding embed/head/norm/hc_head */
     DSV4ModelW w;
 } DSV4ModelBind;
 
@@ -78,7 +59,7 @@ int dsv4_bind_layer_plan(const DSV4Cfg *c, int L,
                          int (*emit)(void *ctx, int i, const char *name),
                          void *ctx);
 
-int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
+int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerW *w,
                         const unsigned char *run, const DSV4MemSrc *src,
                         unsigned char *widen, size_t widen_cap,
                         size_t *widen_used);

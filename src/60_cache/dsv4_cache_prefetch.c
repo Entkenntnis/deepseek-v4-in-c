@@ -28,8 +28,8 @@ static int pf_has_room(const DSV4Cache *c, int n)
            c->nslot > n + c->cfg->topk;
 }
 
-int dsv4_cache_prefetch(DSV4Cache *c, const int *layers, const int *experts,
-                        int n)
+static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
+                    int n)
 {
     if (!c || n <= 0 || n > DSV4_MAX_PREFETCH) return 0;
     if (!pf_has_room(c, n)) return 0;
@@ -120,5 +120,5 @@ int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id)
         }
     }
     if (n == 0) return 0;
-    return dsv4_cache_prefetch(c, layers, experts, n);
+    return pf_queue(c, layers, experts, n);
 }

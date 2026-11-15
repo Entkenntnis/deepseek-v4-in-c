@@ -99,4 +99,3 @@ void dsv4_indexer_offset(int *idxs, int n, int offset)
  * the indexer may choose from: (pos + 1) / ratio. The top-k is
  * min(index_topk, that), so early in a sequence every row is selected and the
  * indexer is a no-op. */
-int dsv4_indexer_navail(int pos, int ratio) { return (pos + 1) / ratio; }

@@ -215,7 +215,6 @@ typedef struct {
     const float *norm;      /* widened from BF16 [head_dim]                  */
     DSV4QMat     wkv;       /* BF16 [coff*head_dim, hidden]                  */
     DSV4QMat     wgate;     /* BF16 [coff*head_dim, hidden]                  */
-    int          ratio, coff;
 } DSV4CompressorW;
 
 /* CSA indexer. Present ONLY where compress_ratio == 4 -- invariant 2, and
@@ -237,7 +236,6 @@ typedef struct {
     DSV4QMat     wo_b;      /* FP8 [hidden, o_lora*o_groups]   = [4096, 8192] */
     DSV4CompressorW comp;   /* valid when has_comp                            */
     DSV4IndexerW    idx;    /* valid when has_idx                             */
-    int has_comp, has_idx;
 } DSV4AttnW;
 
 /* One routed expert, as it sits in the cache: still packed FP4, never widened.
@@ -271,7 +269,6 @@ typedef struct {
     DSV4HcW      hc_attn, hc_ffn;
     int          layer;
     int          compress_ratio;
-    int          hash_routed;   /* layer < num_hash_layers: tid2eid, no bias */
     int          has_comp;      /* compress_ratio != 0                       */
     int          has_idx;       /* compress_ratio == 4                       */
 } DSV4LayerW;

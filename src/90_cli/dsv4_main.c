@@ -12,19 +12,19 @@
 #include "json.h"
 #include "dsv4_threads.h"
 
-const char *dsv4_jstr(jval *o, const char *key)
+static const char *jstr(jval *o, const char *key)
 {
     jval *v = json_get(o, key);
     return v && v->t == J_STR ? v->str : NULL;
 }
 
-double dsv4_jnum(jval *o, const char *key, double dflt)
+static double jnum(jval *o, const char *key, double dflt)
 {
     jval *v = json_get(o, key);
     return v && v->t == J_NUM ? v->num : dflt;
 }
 
-int dsv4_jbool(jval *o, const char *key, int dflt)
+static int jbool(jval *o, const char *key, int dflt)
 {
     jval *v = json_get(o, key);
     if (!v) return dflt;
@@ -36,12 +36,12 @@ int dsv4_jbool(jval *o, const char *key, int dflt)
 /* json.h deliberately has no free: it was written for parse-once-at-startup
  * files. A command stream parses repeatedly, so this walks the tree and frees
  * every j_dup'd string too. */
-void dsv4_jfree(jval *v)
+static void jfree(jval *v)
 {
     if (!v) return;
     if (v->t == J_STR) free(v->str);
     for (int i = 0; i < v->len; i++) {
-        if (v->kids) dsv4_jfree(v->kids[i]);
+        if (v->kids) jfree(v->kids[i]);
         if (v->keys) free(v->keys[i]);
     }
     free(v->kids);
@@ -57,15 +57,15 @@ static void handle_cancel(int sig)
 
 static void handle_command(Engine *e, jval *v)
 {
-    const char *cmd = dsv4_jstr(v, "cmd");
+    const char *cmd = jstr(v, "cmd");
     if (!cmd) { dsv4_emit_error("command object has no \"cmd\""); return; }
 
     if (!strcmp(cmd, "generate")) {
-        const char *prompt = dsv4_jstr(v, "prompt");
+        const char *prompt = jstr(v, "prompt");
         if (!prompt) prompt = "";
-        const int ngen = (int)dsv4_jnum(v, "gen", e->gen_default);
-        const int think = dsv4_jbool(v, "think", e->think_default);
-        const int layers = dsv4_jbool(v, "layers", e->emit_layers_default);
+        const int ngen = (int)jnum(v, "gen", e->gen_default);
+        const int think = jbool(v, "think", e->think_default);
+        const int layers = jbool(v, "layers", e->emit_layers_default);
         dsv4_engine_generate(e, prompt, ngen, think, layers);
     } else if (!strcmp(cmd, "reset")) {
         if (dsv4_engine_reset_context(e) != 0)
@@ -81,7 +81,7 @@ static void handle_command(Engine *e, jval *v)
             fflush(stdout);
         }
     } else if (!strcmp(cmd, "system")) {
-        const char *text = dsv4_jstr(v, "text");
+        const char *text = jstr(v, "text");
         free(e->system_prompt);
         e->system_prompt = text ? strdup(text) : NULL;
         printf("{\"event\":\"system\",\"ok\":true,\"chars\":%d}\n",
@@ -182,13 +182,13 @@ int main(int argc, char **argv)
         jval *v = json_parse(line, NULL);
         if (!v || v->t != J_OBJ) {
             dsv4_emit_error("invalid JSON command");
-            dsv4_jfree(v);
+            jfree(v);
             continue;
         }
-        const char *cmd = dsv4_jstr(v, "cmd");
+        const char *cmd = jstr(v, "cmd");
         const int quit = cmd && !strcmp(cmd, "quit");
         handle_command(&e, v);
-        dsv4_jfree(v);
+        jfree(v);
         if (quit) break;
     }
     free(line);

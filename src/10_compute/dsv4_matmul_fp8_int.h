@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_matmul_fp8_int.h - the FP8 table, decoders and block reduction.
  *
- * Only dsv4_matmul_fp8.c and dsv4_matmul_fp8_ref.c include this. The table is
+ * Only dsv4_matmul_fp8.c and tests/unit/ref_kernels.c include this. The table is
  * one page and lives in L1; the block helpers are the exact arithmetic the
  * scalar reference is compared against.
  */
@@ -69,36 +69,6 @@ static inline __m256 load8_fp8(const uint8_t *wb, int i)
     const __m256i bits = _mm256_i32gather_epi32((const int *)dsv4_e4m3_bits,
                                                 idx, 4);
     return _mm256_castsi256_ps(bits);
-}
-
-/* FP8 FLOAT-INNER REFERENCE HELPER.
- *
- * This is the exact-table gather path used by the reference and by the rare
- * subnormal/NaN block. The production fast path forms each 128-wide block sum
- * with 8-lane float FMAs and accumulates four blocks at a time in float; this
- * helper returns the block sum as a double so the gate has a stable scalar
- * comparison. It is deliberately not bitwise-equal to the production float
- * fold; the matmul gate bounds the L2 relative error (measured ~8e-8). */
-static inline double fp8_block_dot_f32_128(const uint8_t *wb,
-                                           const float *xb)
-{
-    __m256 s;
-#define FP8_LOAD8(k) load8_fp8(wb, (k))
-    FP8_BLOCK_SUM(FP8_LOAD8);
-#undef FP8_LOAD8
-    return (double)dsv4_hsum256(s);
-}
-
-/* The same tree over the closed-form decoder. This is the fast path for a
- * block with no subnormal and no NaN. */
-static inline double fp8_block_dot_f32_128_normal(const uint8_t *wb,
-                                                  const float *xb)
-{
-    __m256 s;
-#define FP8_LOAD8(k) fp8_8_normal(wb, (k))
-    FP8_BLOCK_SUM(FP8_LOAD8);
-#undef FP8_LOAD8
-    return (double)dsv4_hsum256(s);
 }
 
 /* The production nt == 1 body needs the block sum as lanes, not as a scalar:

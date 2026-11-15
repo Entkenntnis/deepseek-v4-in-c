@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_layer.h - one decoder layer, decode path. See README.md. */
+/* dsv4_layer.h - one decoder layer, decode path. */
 #ifndef DSV4_LAYER_H
 #define DSV4_LAYER_H
 
@@ -31,7 +31,7 @@ typedef struct {
 
 /* Optional accounting for the expert source, used by prefill instrumentation. */
 typedef struct {
-    uint64_t hits, misses, evictions, bytes_read;
+    uint64_t hits, misses, bytes_read;
 } DSV4ExpertStats;
 
 /* A source of routed experts.
@@ -47,9 +47,8 @@ typedef struct {
  * neither. wait_any() additionally hands back each miss as its read lands.
  * Output is identical on every path: the sum still runs in k order. */
 typedef struct {
+    /* Serial fallback, used by synthetic sources (the layer gate). */
     const DSV4ExpertW *(*get)(void *ctx, int layer, int expert);
-    int (*get_many)(void *ctx, int layer, const int *experts, int n,
-                    const DSV4ExpertW **out);
     int (*begin)(void *ctx, int layer, const int *experts, int n,
                  const DSV4ExpertW **out);
     int (*end)(void *ctx, const DSV4ExpertW **out);

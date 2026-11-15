@@ -7,7 +7,7 @@
 #include "dsv4_bind.h"
 #include "dsv4_bind_int.h"
 
-void dsv4_bind_req_(DSV4BindPlan *p, const void **dest, int narrow, int64_t want,
+static void req_(DSV4BindPlan *p, const void **dest, int narrow, int64_t want,
                     const char *fmt, va_list ap)
 {
     if (p->n >= DSV4_BIND_MAXB) {
@@ -27,7 +27,7 @@ void dsv4_bind_reqw(DSV4BindPlan *p, const float **dest, int64_t want,
                     const char *fmt, ...)
 {
     va_list ap; va_start(ap, fmt);
-    dsv4_bind_req_(p, (const void **)dest, 0, want, fmt, ap);
+    req_(p, (const void **)dest, 0, want, fmt, ap);
     va_end(ap);
 }
 
@@ -36,7 +36,7 @@ void dsv4_bind_reqn(DSV4BindPlan *p, const void **dest, int64_t want,
                     const char *fmt, ...)
 {
     va_list ap; va_start(ap, fmt);
-    dsv4_bind_req_(p, dest, 1, want, fmt, ap);
+    req_(p, dest, 1, want, fmt, ap);
     va_end(ap);
 }
 

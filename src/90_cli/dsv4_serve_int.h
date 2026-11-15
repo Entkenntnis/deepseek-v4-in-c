@@ -16,10 +16,6 @@
 #include "dsv4_tok.h"
 #include "dsv4_trunk.h"
 
-/* json.h is included only where it is used; this keeps its static helpers out
- * of every CLI translation unit. */
-struct jval;
-
 typedef struct {
     const char      *model_dir;
     DSV4Cfg          c;
@@ -83,10 +79,6 @@ double dsv4_proc_read_gb(void);
 void   dsv4_json_escape(const char *s);
 void   dsv4_usage(const char *me);
 void   dsv4_emit_error(const char *fmt, ...);
-const char *dsv4_jstr(struct jval *o, const char *key);
-double dsv4_jnum(struct jval *o, const char *key, double dflt);
-int    dsv4_jbool(struct jval *o, const char *key, int dflt);
-void   dsv4_jfree(struct jval *v);
 
 /* ---- stats ---- */
 void dsv4_write_sys_full(const Engine *e);

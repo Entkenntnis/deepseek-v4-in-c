@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_bind_mem.c - binding from a trunk run: point narrow tensors in place,
- * widen only the small vectors. See README.md. */
+ * widen only the small vectors. */
 #include <stdio.h>
 #include <string.h>
 
@@ -51,17 +51,13 @@ size_t dsv4_bind_widen_bytes(const DSV4Cfg *c)
     return worst;
 }
 
-int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerBind *b,
+int dsv4_bind_layer_mem(const DSV4Cfg *c, int layer, DSV4LayerW *w,
                         const unsigned char *run, const DSV4MemSrc *src,
                         unsigned char *widen, size_t widen_cap,
                         size_t *widen_used)
 {
-    memset(b, 0, sizeof *b);
-    b->layer = layer;
-    b->blob = NULL;                 /* the run is borrowed, not owned */
-
     DSV4BindPlan p; memset(&p, 0, sizeof p);
-    dsv4_bind_plan_layer(&p, c, layer, &b->w);
+    dsv4_bind_plan_layer(&p, c, layer, w);
 
     size_t woff = 0;
     for (int i = 0; i < p.n; i++) {

@@ -62,7 +62,6 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
         const int e = experts[k];
         out[k] = NULL;
         c->clock++;
-        if (c->route_log) fprintf(c->route_log, "%d %d\n", layer, e);
 
         /* A duplicate request must not take a second slot. This check MUST
          * come before the pending-slot wait: the duplicate's read has not been

@@ -14,7 +14,7 @@
 #include "dsv4_bind.h"
 #include "dsv4_bind_int.h"
 
-int64_t dsv4_bind_plan_resolve(DSV4BindPlan *p, const DSV4St *s)
+static int64_t plan_resolve(DSV4BindPlan *p, const DSV4St *s)
 {
     size_t off = 0;
     for (int i = 0; i < p->n; i++) {
@@ -51,7 +51,7 @@ int64_t dsv4_bind_plan_resolve(DSV4BindPlan *p, const DSV4St *s)
     return p->bad ? -1 : (int64_t)off;
 }
 
-int dsv4_bind_plan_load(DSV4BindPlan *p, const DSV4St *s, unsigned char *blob)
+static int plan_load(DSV4BindPlan *p, const DSV4St *s, unsigned char *blob)
 {
     for (int i = 0; i < p->n; i++) {
         DSV4BindReq *q = &p->r[i];
@@ -73,55 +73,12 @@ int dsv4_bind_plan_load(DSV4BindPlan *p, const DSV4St *s, unsigned char *blob)
     return 0;
 }
 
-int64_t dsv4_bind_layer_bytes(const DSV4St *s, const DSV4Cfg *c, int L)
-{
-    DSV4BindPlan p; memset(&p, 0, sizeof p);
-    DSV4LayerW tmp;
-    dsv4_bind_plan_layer(&p, c, L, &tmp);
-    return dsv4_bind_plan_resolve(&p, s);
-}
-
 int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head)
 {
     DSV4BindPlan p; memset(&p, 0, sizeof p);
     DSV4ModelW tmp;
     dsv4_bind_plan_model(&p, c, want_head, &tmp);
-    return dsv4_bind_plan_resolve(&p, s);
-}
-
-int dsv4_bind_layer(const DSV4St *s, const DSV4Cfg *c, int L, DSV4LayerBind *b)
-{
-    memset(b, 0, sizeof *b);
-    b->layer = L;
-
-    DSV4BindPlan p; memset(&p, 0, sizeof p);
-    dsv4_bind_plan_layer(&p, c, L, &b->w);
-    const int64_t need = dsv4_bind_plan_resolve(&p, s);
-    if (need < 0) {
-        fprintf(stderr, "dsv4_bind: layer %d could not be planned\n", L);
-        return -1;
-    }
-
-    b->blob = malloc((size_t)need);
-    if (!b->blob) {
-        fprintf(stderr, "dsv4_bind: OOM allocating %lld bytes for layer %d\n",
-                (long long)need, L);
-        return -1;
-    }
-    b->nbytes = (size_t)need;
-
-    if (dsv4_bind_plan_load(&p, s, (unsigned char *)b->blob) != 0) {
-        free(b->blob); b->blob = NULL; b->nbytes = 0;
-        return -1;
-    }
-    return 0;
-}
-
-void dsv4_bind_free(DSV4LayerBind *b)
-{
-    if (!b) return;
-    free(b->blob);
-    memset(b, 0, sizeof *b);
+    return plan_resolve(&p, s);
 }
 
 int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
@@ -131,7 +88,7 @@ int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
 
     DSV4BindPlan p; memset(&p, 0, sizeof p);
     dsv4_bind_plan_model(&p, c, want_head, &m->w);
-    const int64_t need = dsv4_bind_plan_resolve(&p, s);
+    const int64_t need = plan_resolve(&p, s);
     if (need < 0) {
         fprintf(stderr, "dsv4_bind: model could not be planned\n");
         return -1;
@@ -143,10 +100,9 @@ int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
                 (long long)need);
         return -1;
     }
-    m->nbytes = (size_t)need;
 
-    if (dsv4_bind_plan_load(&p, s, (unsigned char *)m->blob) != 0) {
-        free(m->blob); m->blob = NULL; m->nbytes = 0;
+    if (plan_load(&p, s, (unsigned char *)m->blob) != 0) {
+        free(m->blob); m->blob = NULL;
         return -1;
     }
     return 0;

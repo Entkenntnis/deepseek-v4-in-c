@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_emit.c - the line-delimited JSON events. See README.md for the protocol. */
+/* dsv4_emit.c - the line-delimited JSON events. */
 #include <stdio.h>
 #include <string.h>
 

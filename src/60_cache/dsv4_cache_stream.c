@@ -1,16 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_cache_stream.c - get_many, the stream cap and wait_any(). */
+/* dsv4_cache_stream.c - the stream cap and wait_any(). */
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
-
-int dsv4_cache_get_many(DSV4Cache *c, int layer, const int *experts, int n,
-                        const DSV4ExpertW **out)
-{
-    DSV4CacheBatch b;
-    const int rc  = dsv4_cache_get_many_begin(c, layer, experts, n, out, &b);
-    const int rc2 = dsv4_cache_get_many_end(c, out, &b);
-    return rc != 0 ? rc : rc2;
-}
 
 void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap)
 {

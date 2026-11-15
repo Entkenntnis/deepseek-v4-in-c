@@ -8,7 +8,7 @@ void dsv4_indexer_score(float *, const float *, const float *, const float *,
                         int, int, int);
 int  dsv4_topk(int *, const float *, int, int);
 void dsv4_indexer_offset(int *, int, int);
-int  dsv4_indexer_navail(int, int);
+int dsv4_indexer_navail(int pos, int ratio) { return (pos + 1) / ratio; }
 
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \

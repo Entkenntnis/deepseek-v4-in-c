@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_trunk.c - open, size and report the streamed trunk. See README.md. */
+/* dsv4_trunk.c - open and size the streamed trunk. */
 
 /* O_DIRECT is a GNU extension, so the feature macro has to precede EVERY libc
  * header. Defining it after an include silently leaves O_DIRECT undeclared and
@@ -120,21 +120,4 @@ void dsv4_trunk_close(DSV4Trunk *tr)
     free(tr->lay); free(tr->json_arena); free(tr->json_text);
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
-}
-
-void dsv4_trunk_report(const DSV4Trunk *tr, const char *label)
-{
-    const uint64_t n = tr->hits + tr->misses;
-    printf("trunk %s: %d layers, %d pinned + %d ring slot(s) of %.2f MB\n",
-           label, tr->n_layers, tr->npin, tr->nslot,
-           (double)tr->slot_bytes / 1048576.0);
-    printf("  %llu binds, %llu hits (%.1f%%), %llu reads\n",
-           (unsigned long long)n, (unsigned long long)tr->hits,
-           n ? 100.0 * (double)tr->hits / (double)n : 0.0,
-           (unsigned long long)tr->misses);
-    printf("  %.2f GB read in %.2f s = %.2f GB/s%s\n",
-           (double)tr->bytes_read / 1073741824.0, tr->load_seconds,
-           tr->load_seconds > 0
-               ? (double)tr->bytes_read / tr->load_seconds / 1e9 : 0.0,
-           tr->direct ? " (O_DIRECT)" : " (buffered)");
 }

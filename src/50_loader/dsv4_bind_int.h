@@ -33,8 +33,6 @@ static inline size_t dsv4_bind_align8(size_t x)
 }
 
 /* The three request classes. All take format strings, deliberately. */
-void dsv4_bind_req_(DSV4BindPlan *p, const void **dest, int narrow, int64_t want,
-                    const char *fmt, va_list ap);
 void dsv4_bind_reqw(DSV4BindPlan *p, const float **dest, int64_t want,
                     const char *fmt, ...);
 void dsv4_bind_reqn(DSV4BindPlan *p, const void **dest, int64_t want,
@@ -50,10 +48,5 @@ void dsv4_bind_plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L,
                           DSV4LayerW *w);
 void dsv4_bind_plan_model(DSV4BindPlan *p, const DSV4Cfg *c, int want_head,
                           DSV4ModelW *w);
-
-/* Validate against the config, lay out the blob, then read into it. */
-int64_t dsv4_bind_plan_resolve(DSV4BindPlan *p, const DSV4St *s);
-int     dsv4_bind_plan_load(DSV4BindPlan *p, const DSV4St *s,
-                            unsigned char *blob);
 
 #endif /* DSV4_BIND_INT_H */

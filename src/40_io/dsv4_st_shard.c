@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_st_shard.c - index one safetensors shard. See README.md. */
+/* dsv4_st_shard.c - index one safetensors shard. */
 #define _GNU_SOURCE            /* O_DIRECT */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64

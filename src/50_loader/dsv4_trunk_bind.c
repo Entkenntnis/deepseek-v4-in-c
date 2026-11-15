@@ -74,7 +74,7 @@ static int trunk_find_idx(void *ctx, int i, const char *name,
     return 0;
 }
 
-int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
+int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w)
 {
     if (L < 0 || L >= tr->n_layers || tr->lay[L].nt == 0) {
         fprintf(stderr, "dsv4_trunk: layer %d is not in the trunk\n", L);
@@ -115,7 +115,7 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
     /* A pinned run is immutable, so its binding is too. Re-planning and
      * re-widening it every token dominated the bind/widen profile row. */
     if (L < tr->npin && lay->bind_ready) {
-        *b = lay->bind_cached;
+        *w = lay->bind_cached;
         return 0;
     }
 
@@ -126,21 +126,21 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b)
         /* Size the persistent widen area exactly: the first pass is the same
          * validation every bind does; the second writes the bytes we keep. */
         size_t used = 0;
-        if (dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap,
+        if (dsv4_bind_layer_mem(c, L, w, run, &src, tr->widen, tr->widen_cap,
                                 &used) != 0)
             return -1;
-        unsigned char *w = (unsigned char *)malloc(used ? used : 1);
-        if (!w) return -1;
-        if (dsv4_bind_layer_mem(c, L, b, run, &src, w, used, &used) != 0) {
-            free(w);
+        unsigned char *wbuf = (unsigned char *)malloc(used ? used : 1);
+        if (!wbuf) return -1;
+        if (dsv4_bind_layer_mem(c, L, w, run, &src, wbuf, used, &used) != 0) {
+            free(wbuf);
             return -1;
         }
-        lay->bind_widen = w;
-        lay->bind_cached = *b;
+        lay->bind_widen = wbuf;
+        lay->bind_cached = *w;
         lay->bind_ready = 1;
         return 0;
     }
 
-    return dsv4_bind_layer_mem(c, L, b, run, &src, tr->widen, tr->widen_cap,
+    return dsv4_bind_layer_mem(c, L, w, run, &src, tr->widen, tr->widen_cap,
                                NULL);
 }

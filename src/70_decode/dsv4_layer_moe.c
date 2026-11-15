@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_layer_moe.c - routed + shared expert for one token.
  *
- * The overlap argument and the bit-exactness invariant are in README.md. In
- * short: every k has its own accumulator, and the weighted sum runs in k order,
- * so read completion order can never reach the arithmetic. */
+ * Every k has its own accumulator, and the weighted sum runs in k order, so
+ * read completion order can never reach the arithmetic. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +46,6 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
     t0 = dsv4_now_s();
     if (overlapped)
         src->begin(src->ctx, layer, s->topk_idx, c->topk, ex);
-    else if (src->get_many)
-        src->get_many(src->ctx, layer, s->topk_idx, c->topk, ex);
     else
         for (int k = 0; k < c->topk; k++)
             ex[k] = src->get(src->ctx, layer, s->topk_idx[k]);

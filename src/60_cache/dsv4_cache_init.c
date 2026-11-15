@@ -17,16 +17,14 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
     c->st = st; c->cfg = cfg;
     dsv4_cache_expert_geometry(c, cfg);
 
-    /* A cache smaller than topk is a WARNING here, not an error: the constraint
-     * belongs to get_many, which will not evict a slot it already claimed. A
-     * single-expert caller is fine with two slots, and the cache gate relies on
-     * that to test eviction order. The budget planner reserves topk experts,
-     * and moe() is the last line of defence. */
+    /* A cache smaller than topk cannot serve begin(), which will not evict a
+     * slot it already claimed for the same batch. This stays a warning here
+     * because the budget planner is the layer that turns it into an error;
+     * moe() is the last line of defence. */
     if ((int64_t)cfg->topk * c->expert_bytes > budget_bytes)
         fprintf(stderr,
                 "dsv4_cache: %lld slots cannot hold one layer's %d experts at "
-                "once;\n  dsv4_cache_get_many will fail. Single-expert use is "
-                "fine.\n",
+                "once;\n  dsv4_cache_get_many_begin will fail.\n",
                 (long long)(budget_bytes / c->expert_bytes), cfg->topk);
 
     if (budget_bytes < c->expert_bytes) {
@@ -73,7 +71,7 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
 
     /* SAY SO WHEN THE CACHE CANNOT POSSIBLY WORK. Under LRU a hit needs the
      * entry to survive until the next layer visit; below a full pass's working
-     * set the hit rate is exactly zero (README.md). This happened: 160 slots
+     * set the hit rate is exactly zero. This happened: 160 slots
      * against 258 returned 0 hits on 2,580 requests while reading 32 GB. */
     const int64_t ws = (int64_t)cfg->n_layers * cfg->topk;
     if ((int64_t)c->nslot < ws)

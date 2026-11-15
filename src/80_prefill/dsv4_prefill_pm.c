@@ -13,7 +13,7 @@ static void pf_flops(double *acc, const DSV4QMat *m, int n)
     *acc += 2.0 * (double)m->rows * (double)m->cols * (double)n * 1e-9;
 }
 
-int dsv4_prefill_pm(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj)
+static int pm(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj)
 {
     (void)p; (void)layer;
     for (int j = 0; j < nj; j++) {
@@ -23,11 +23,11 @@ int dsv4_prefill_pm(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj)
     return 0;
 }
 
-int dsv4_prefill_pm1(DSV4Prefill *p, int layer, float *y, const float *x,
-                     const DSV4QMat *m, int n)
+static int pm1(DSV4Prefill *p, int layer, float *y, const float *x,
+               const DSV4QMat *m, int n)
 {
     DSV4PMJob job = { m, x, y, n };
-    return dsv4_prefill_pm(p, layer, &job, 1);
+    return pm(p, layer, &job, 1);
 }
 
 int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
@@ -35,7 +35,7 @@ int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
                           double *flops)
 {
     const double t0 = dsv4_now_s();
-    const int rc = dsv4_prefill_pm1(p, 0, y, x, m, n);
+    const int rc = pm1(p, 0, y, x, m, n);
     *timer += dsv4_now_s() - t0;
     if (flops) pf_flops(flops, m, n);
     return rc;
@@ -45,7 +45,7 @@ int dsv4_prefill_pm_multi_stats(DSV4Prefill *p, const DSV4PMJob *jobs, int nj,
                                 double *timer, double *flops)
 {
     const double t0 = dsv4_now_s();
-    const int rc = dsv4_prefill_pm(p, 0, jobs, nj);
+    const int rc = pm(p, 0, jobs, nj);
     *timer += dsv4_now_s() - t0;
     if (flops)
         for (int j = 0; j < nj; j++) pf_flops(flops, jobs[j].m, jobs[j].n);

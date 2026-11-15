@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_tok.h - DeepSeek-V4's byte-level BPE, from the packed tokenizer.
- * The pre-tokenizer stages and their traps are documented in README.md. */
+/* dsv4_tok.h - DeepSeek-V4's byte-level BPE, from the packed tokenizer. */
 #ifndef DSV4_TOK_H
 #define DSV4_TOK_H
 

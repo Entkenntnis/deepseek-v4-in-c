@@ -100,7 +100,6 @@ static void build(int hash_routed)
 
     memset(&g_w, 0, sizeof g_w);
     g_w.layer = 0;
-    g_w.hash_routed = hash_routed;
 
     float *an = alloc_f(HID), *fn = alloc_f(HID);
     for (int i = 0; i < HID; i++) { an[i] = 1.0f; fn[i] = 1.0f; }

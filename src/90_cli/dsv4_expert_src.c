@@ -4,18 +4,8 @@
 
 #include "dsv4_serve_int.h"
 
-/* Expert source: the cache, carried through ctx. */
-static const DSV4ExpertW *run_get_expert(void *ctx, int layer, int expert)
-{
-    return dsv4_cache_get((DSV4Cache *)ctx, layer, expert);
-}
-
-static int run_get_experts(void *ctx, int layer, const int *e, int n,
-                           const DSV4ExpertW **out)
-{
-    return dsv4_cache_get_many((DSV4Cache *)ctx, layer, e, n, out);
-}
-
+/* Expert source: the cache, carried through ctx. The engine only uses the
+ * overlapped begin()/end() pair; get() is the gate path and stays NULL. */
 static DSV4CacheBatch g_batch;
 
 static int run_begin_experts(void *ctx, int layer, const int *e, int n,
@@ -40,7 +30,6 @@ static int run_expert_stats(void *ctx, DSV4ExpertStats *out)
     const DSV4Cache *c = (const DSV4Cache *)ctx;
     out->hits = c->hits;
     out->misses = c->misses;
-    out->evictions = c->evictions;
     out->bytes_read = c->bytes_read;
     return 0;
 }
@@ -61,8 +50,9 @@ int dsv4_stream_miss(void)
 
 int dsv4_make_expert_src(DSV4ExpertSrc *src, DSV4Cache *cache)
 {
-    *src = (DSV4ExpertSrc){ run_get_expert, run_get_experts,
-                            run_begin_experts, run_end_experts,
-                            run_wait_any, run_expert_stats, cache };
+    *src = (DSV4ExpertSrc){
+        .begin = run_begin_experts, .end = run_end_experts,
+        .wait_any = run_wait_any, .stats = run_expert_stats, .ctx = cache,
+    };
     return 0;
 }

@@ -176,9 +176,3 @@ void fp8_n(float *y, const float *x, const uint8_t *W,
             y[(size_t)t * out + o] = total[t];
     }
 }
-
-void dsv4_matmul_fp8(float *y, const float *x, const uint8_t *W,
-                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
-{
-    fp8_n(y, x, W, S, in, out, blk_r, blk_c, 1);
-}

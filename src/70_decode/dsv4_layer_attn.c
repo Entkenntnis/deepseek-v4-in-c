@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_layer_attn.c - attention for one token: CSA, HCA, grouped output proj.
- * The shape notes are in README.md. */
+/* dsv4_layer_attn.c - attention for one token: CSA, HCA, grouped output proj. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

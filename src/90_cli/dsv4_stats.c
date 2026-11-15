@@ -64,9 +64,12 @@ void dsv4_write_prof(const Engine *e)
     const double sh  = p->shared    - e->prof_base.shared;
     const double hd  = p->head      - e->prof_base.head;
     const double bd  = p->bind      - e->prof_base.bind;
-    printf("\"prof\":{\"hc\":%.4f,\"attn\":%.4f,\"gate\":%.4f,"
-           "\"expert_io\":%.4f,\"expert_mm\":%.4f,\"shared\":%.4f,"
-           "\"head\":%.4f,\"bind\":%.4f,\"accounted\":%.4f}",
-           hc, at, ga, io, mm, sh, hd, bd,
-           hc + at + ga + io + mm + sh + hd + bd);
+    const double ix  = p->idxer     - e->prof_base.idxer;
+    const double ti  = p->trunk_io  - e->prof_base.trunk_io;
+    printf("\"prof\":{\"hc\":%.4f,\"attn\":%.4f,\"idxer\":%.4f,"
+           "\"gate\":%.4f,\"expert_io\":%.4f,\"expert_mm\":%.4f,"
+           "\"shared\":%.4f,\"head\":%.4f,\"bind\":%.4f,"
+           "\"trunk_io\":%.4f,\"accounted\":%.4f}",
+           hc, at, ix, ga, io, mm, sh, hd, bd, ti,
+           hc + at + ga + io + mm + sh + hd + bd + ti);
 }

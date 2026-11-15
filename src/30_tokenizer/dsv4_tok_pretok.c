@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_tok_pretok.c - the four-stage pre-tokenizer. See README.md for the
- * ordered alternatives and the traps. */
+/* dsv4_tok_pretok.c - the four-stage pre-tokenizer; alternatives are tried in
+ * order and the first match wins. */
 #include "dsv4_tok.h"
 #include "dsv4_tok_int.h"
 

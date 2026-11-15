@@ -122,6 +122,11 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
                       DSV4LayerState *lst, const DSV4ExpertSrc *src,
                       const DSV4ModelW *mw, const DSV4PrefillOpts *opt)
 {
+    if (!src || !src->begin || !src->end) {
+        fprintf(stderr, "prefill: the expert source must provide begin/end; "
+                        "the block path has no per-token fallback\n");
+        return -1;
+    }
     DSV4Prefill *p = (DSV4Prefill *)xcalloc(sizeof *p);
     if (!p) return -1;
     p->c = c; p->tr = tr; p->lst = lst; p->src = src; p->mw = mw;

@@ -32,12 +32,10 @@ BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
+REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 
-.PHONY: test serve tui bench e2e clean check
-.SECONDARY: $(TEST_OBJ)
-
-check:
-	python3 tools/check_src.py
+.PHONY: test serve tui bench e2e clean
+.SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
 	@set -e; for t in $(TEST_BIN); do echo; ./$$t; done
@@ -61,7 +59,7 @@ $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(ENGINE_OBJ)
+$(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(REF_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
@@ -80,5 +78,5 @@ $(OBJ)/bench/%.o: bench/%.c
 clean:
 	rm -rf $(BIN) build
 
--include $(ENGINE_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(SERVE_OBJ:.o=.d) \
-         $(BENCH_OBJ:.o=.d)
+-include $(ENGINE_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(REF_OBJ:.o=.d) \
+         $(SERVE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)

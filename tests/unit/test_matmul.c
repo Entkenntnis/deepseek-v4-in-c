@@ -34,12 +34,8 @@
 #include "dsv4.h"
 #include "dsv4_quant.h"
 #include "dsv4_matmul.h"
+#include "ref_kernels.h"
 
-void dsv4_matmul_bf16(float *, const float *, const uint16_t *, int, int);
-void dsv4_matmul_fp8(float *, const float *, const uint8_t *, const uint8_t *,
-                     int, int, int, int);
-void dsv4_matmul_fp4(float *, const float *, const uint8_t *, const uint8_t *,
-                     int, int, int, int);
 void dsv4_mmq(float *, const float *, const DSV4QMat *);
 
 /* Both instantiations, so the gate can run them against each other. */
@@ -48,15 +44,6 @@ void dsv4_matmul_fp8_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
 void dsv4_matmul_fp4_scalar(float *, const float *, const uint8_t *,
                             const uint8_t *, int, int, int, int);
-#if defined(__AVX2__) && defined(__FMA__)
-/* The float-inner gather reference (the production path of the previous
- * release, still exported for A/B). The new production path must agree with it
- * bit for bit, including on the normal-only blocks that take the closed-form
- * decode and on the block that falls back for a subnormal or a NaN. */
-void dsv4_matmul_fp8_f32(float *, const float *, const uint8_t *,
-                         const uint8_t *, int, int, int, int);
-#endif
-
 /* ------------------------------------------------------------- oracle ---
  * Scalar double-precision reference bodies. They live in this translation
  * unit so the gate compares the production kernels against an independent

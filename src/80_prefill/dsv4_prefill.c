@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_prefill.c - one block through every layer. See README.md. */
+/* dsv4_prefill.c - one block through every layer, layer-major. */
 #include <stdio.h>
 #include <string.h>
 
@@ -105,10 +105,10 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     p->st.embed += dsv4_now_s() - te;
 
     for (int L = 0; L < c->n_layers; L++) {
-        DSV4LayerBind lb;
+        DSV4LayerW lw;
         const double tb = dsv4_now_s();
         const double io0 = p->tr->load_seconds;
-        if (dsv4_trunk_bind(p->tr, c, L, &lb) != 0) return -1;
+        if (dsv4_trunk_bind(p->tr, c, L, &lw) != 0) return -1;
         const double io = p->tr->load_seconds - io0;
         const double call = dsv4_now_s() - tb;
         p->t_io += io;
@@ -126,7 +126,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         const double frac = (double)L / (double)c->n_layers;
         dsv4_prefill_progress(p, "layer", L + 1, (int)(frac * (double)n), n,
                               dsv4_now_s() - t0, frac);
-        if (prefill_layer(p, L, &lb.w, n, pos0, ids, cs, sn)) return -1;
+        if (prefill_layer(p, L, &lw, n, pos0, ids, cs, sn)) return -1;
     }
 
     dsv4_prefill_progress(p, "done", c->n_layers, n, n, dsv4_now_s() - t0, 1.0);

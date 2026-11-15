@@ -49,7 +49,6 @@ void dsv4_indexer_score(float *out, const float *q, const float *kv,
                         int n_pos);
 int  dsv4_topk(int *idxs, const float *scores, int n, int k);
 void dsv4_indexer_offset(int *idxs, int n, int offset);
-int  dsv4_indexer_navail(int pos, int ratio);
 
 /* mHC */
 void dsv4_hc_split_sinkhorn(float *pre, float *post, float *comb,

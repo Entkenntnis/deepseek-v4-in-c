@@ -8,7 +8,7 @@
 /* An expert's six tensors, in the order they are laid out inside a slot.
  * w2 is the down projection and has the transposed shape, which is why its
  * lengths are computed separately. The order mirrors DISK order (scales, then
- * weights) so each run lands in one pread; see README.md. */
+ * weights) so each run lands in one pread. */
 int dsv4_cache_expert_geometry(DSV4Cache *c, const DSV4Cfg *cfg)
 {
     const int64_t inter = cfg->moe_inter, hid = cfg->hidden;
@@ -46,14 +46,6 @@ void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s)
         m[i]->w = s->bytes + s->toff[3 + i];
         m[i]->s = s->bytes + s->toff[i];
     }
-}
-
-int64_t dsv4_cache_expert_bytes(const DSV4Cfg *cfg)
-{
-    DSV4Cache tmp;
-    memset(&tmp, 0, sizeof tmp);
-    dsv4_cache_expert_geometry(&tmp, cfg);
-    return tmp.expert_bytes;
 }
 
 int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg)

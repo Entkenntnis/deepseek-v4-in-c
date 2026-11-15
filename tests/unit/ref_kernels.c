@@ -1,14 +1,43 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_matmul_fp8_ref.c - exact-table FP8 reference used by the matmul gate. */
+/* ref_kernels.c - reference entry points used only by the gates. */
 #include <stdint.h>
 
-#include "dsv4_matmul.h"
+#include "dsv4.h"
+#include "dsv4_matmul_int.h"
 #include "dsv4_matmul_fp8_int.h"
+#include "ref_kernels.h"
 
-/* The reference gather kernel: exact f32 values from the 256-entry table, with
- * no closed-form shortcut. Kept callable so the matmul gate can compare the
- * production path against it bit for bit, including on blocks with subnormals
- * and NaNs. Production is fp8_n(), not this. */
+/* The exact-table 128-wide block sum, as a double so the gate has a stable
+ * scalar comparison. Deliberately not bitwise-equal to the production float
+ * fold; test_matmul bounds the L2 relative error. */
+static inline double fp8_block_dot_f32_128(const uint8_t *wb,
+                                           const float *xb)
+{
+    __m256 s;
+#define FP8_LOAD8(k) load8_fp8(wb, (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return (double)dsv4_hsum256(s);
+}
+
+void dsv4_matmul_bf16(float *y, const float *x, const uint16_t *W,
+                      int in, int out)
+{
+    bf16_n(y, x, W, in, out, 1);
+}
+
+void dsv4_matmul_fp8(float *y, const float *x, const uint8_t *W,
+                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
+{
+    fp8_n(y, x, W, S, in, out, blk_r, blk_c, 1);
+}
+
+void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
+                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
+{
+    fp4_n(y, x, W, S, in, out, blk_r, blk_c, 1);
+}
+
 void dsv4_matmul_fp8_f32(float *y, const float *x, const uint8_t *W,
                          const uint8_t *S, int in, int out,
                          int blk_r, int blk_c)

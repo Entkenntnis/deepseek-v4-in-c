@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_layer.c - one decoder layer, decode path. See README.md. */
+/* dsv4_layer.c - one decoder layer, decode path. */
 #include <string.h>
 
 #include "dsv4.h"

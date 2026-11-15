@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_cache_load.c - resolve six tensors, then read them into a slot with
- * coalescing and no copy. See README.md. */
+ * coalescing and no copy. */
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -143,7 +143,7 @@ int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
     }
 
     /* The layout is per-load, so rebound here. Touches only this slot, which is
-     * what makes it safe inside get_many's parallel read pass. */
+     * what makes it safe inside begin()/end()'s parallel read pass. */
     dsv4_cache_bind_slot(c, s);
     return 0;
 }

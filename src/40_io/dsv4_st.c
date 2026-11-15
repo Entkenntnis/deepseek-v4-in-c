@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_st.c - safetensors index: open, close and look up. See README.md. */
+/* dsv4_st.c - safetensors index: open, close and look up. */
 #define _GNU_SOURCE            /* O_DIRECT */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64

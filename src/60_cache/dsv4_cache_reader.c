@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_cache_reader.c - the pread() pool. See README.md for why it is pthreads
- * and why the width is topk. */
+/* dsv4_cache_reader.c - the pread() pool. */
 #include <stdio.h>
 #include <stdlib.h>
 

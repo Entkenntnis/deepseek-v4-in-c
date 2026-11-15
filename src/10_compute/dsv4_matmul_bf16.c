@@ -52,9 +52,3 @@ void bf16_n(float *y, const float *x, const uint16_t *W,
  * than one token decodes the block once into wf[128] and runs the same tree
  * over it per token. Both apply the scale to the block dot product in double,
  * and both use FP8_BLOCK_SUM, so only the schedule differs. */
-
-void dsv4_matmul_bf16(float *y, const float *x, const uint16_t *W,
-                      int in, int out)
-{
-    bf16_n(y, x, W, in, out, 1);
-}

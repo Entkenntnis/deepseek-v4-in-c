@@ -33,6 +33,7 @@ struct DSV4CacheJob {
 };
 
 int  dsv4_cache_expert_geometry(DSV4Cache *c, const DSV4Cfg *cfg);
+int  dsv4_cache_enable_prefetch(DSV4Cache *c);
 void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s);
 int  dsv4_cache_rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j);
 int  dsv4_cache_resolve(DSV4Cache *c, int layer, int expert,

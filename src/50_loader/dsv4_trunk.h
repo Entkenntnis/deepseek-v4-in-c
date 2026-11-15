@@ -63,7 +63,7 @@ typedef struct {
      * independent of the token, so its binding can be built once. Rebuilding
      * it per token re-widens ~3.3 MB of mHC/compressor vectors every pass,
      * which dominated the "bind / widen" profile row. */
-    DSV4LayerBind    bind_cached;
+    DSV4LayerW       bind_cached;
     unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
     int              bind_ready;
 } DSV4TrunkLayer;
@@ -105,8 +105,6 @@ void dsv4_trunk_close(DSV4Trunk *tr);
 int64_t dsv4_trunk_resident_bytes(const DSV4Trunk *tr);
 
 /* Make layer L resident and point b's weight pointers at it. */
-int  dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerBind *b);
-
-void dsv4_trunk_report(const DSV4Trunk *tr, const char *label);
+int  dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w);
 
 #endif /* DSV4_TRUNK_H */

@@ -31,6 +31,4 @@ extern DSV4Prof dsv4_prof;
  * taken in different modules are directly comparable. */
 double dsv4_now_s(void);
 
-void dsv4_prof_report(double wall, int passes);
-
 #endif /* DSV4_PROF_H */

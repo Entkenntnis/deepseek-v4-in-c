@@ -20,7 +20,7 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
     }
 
     /* Close a truncated previous turn, then forward the token that the previous
-     * turn deliberately left pending (see README.md, pending-token rule). */
+     * turn deliberately left pending; its KV entry is not in the layer state yet. */
     if (e->n_ids > 0 && e->ids[e->n_ids - 1] != e->eos_id) {
         if (e->n_ids >= e->cap_ids) {
             dsv4_emit_error("context full (%d tokens); reset before continuing",
