@@ -636,7 +636,9 @@ int main(void)
 
     printf("\n-- GATE  batched matmul equals nt separate GEMVs --\n");
     {
-        enum { NT = 7, IN = 256, OUT = 130 };
+        /* NT > DSV4_MAX_BATCH on purpose: this walks dsv4_mmq_n()'s tiling
+         * path as well as the per-token reduction. */
+        enum { NT = 130, IN = 256, OUT = 130 };
         static float x[NT * IN], ya[NT * OUT], yb[NT * OUT];
         unsigned r = 123456789u;
 
@@ -682,7 +684,7 @@ int main(void)
                   "BF16 nt=1 did not land on the GEMV");
         }
 
-        /* FP8: the production rowscale body is reused per token, including a
+        /* FP8: the batch body is compared against nt one-token calls, with a
          * block forced through the exactness fallback. */
         {
             static uint8_t W[(size_t)OUT * IN];

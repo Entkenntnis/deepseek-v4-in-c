@@ -136,6 +136,27 @@ static inline int fp8_block_has_special(const uint8_t *wb)
     return !_mm256_testz_si256(any, any);
 }
 
+/* One 128-wide FP8 scale block, as the sum of its four 8-lane float
+ * accumulators. LOAD8(k) must return the eight decoded weights at logical
+ * columns k..k+7. The tree is the production one; the macro exists so the
+ * register-decode (nt == 1) and decode-once (nt > 1) forms cannot diverge. */
+#define FP8_BLOCK_SUM(LOAD8)                                                   \
+    do {                                                                       \
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();             \
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();             \
+        for (int i = 0; i < 128; i += 32) {                                    \
+            a0 = _mm256_fmadd_ps(LOAD8(i),      _mm256_loadu_ps(xb + i), a0);  \
+            a1 = _mm256_fmadd_ps(LOAD8(i + 8),  _mm256_loadu_ps(xb + i + 8),   \
+                                 a1);                                          \
+            a2 = _mm256_fmadd_ps(LOAD8(i + 16), _mm256_loadu_ps(xb + i + 16),  \
+                                 a2);                                          \
+            a3 = _mm256_fmadd_ps(LOAD8(i + 24), _mm256_loadu_ps(xb + i + 24),  \
+                                 a3);                                          \
+        }                                                                      \
+        s = _mm256_add_ps(_mm256_add_ps(a0, a1),                               \
+                          _mm256_add_ps(a2, a3));                              \
+    } while (0)
+
 /* ---------------------------------------------------------------- FP4 ----- */
 /* EIGHT FP4 VALUES AT ONCE, without eight table lookups.
  *
@@ -153,7 +174,7 @@ static inline int fp8_block_has_special(const uint8_t *wb)
  * Measured honestly: this is worth almost nothing on its own (81.5 GF/s against
  * 80.9 for the four-lookup form). FP4 was never dequant-bound. It is kept
  * because it is not slower and it removes the table from the hot loop, but the
- * gain in dsv4_matmul.c came from elsewhere -- see widen_x.
+ * gain in dsv4_matmul.c came from elsewhere -- see the batch kernels.
  *
  * THE TWO MASKS THAT WERE NOT NEEDED. The shift result used to be masked with
  * 0x0F and then masked again with 7 for the magnitude permute. Neither mask

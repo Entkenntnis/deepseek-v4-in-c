@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_matmul.c - matrix-vector products that consume the checkpoint's own
- * packed bytes, without ever widening a tensor.
+/* dsv4_matmul.c - packed-weight matrix products that consume the checkpoint's
+ * own bytes, without ever widening a tensor.
+ *
+ * ONE IMPLEMENTATION, TWO SCHEDULES
+ *   dsv4_mmq_n() is the only packed matmul. Decode calls it with nt == 1
+ *   (dsv4_mmq) and prefill calls it with a block of token rows. Per format the
+ *   decoders and the block reduction trees live in dsv4_qmat_dec.h, so the
+ *   single-token and batched schedules cannot drift arithmetically. The
+ *   single-token path keeps the register-decode schedule; the batched path
+ *   decodes each weight block once and reuses it for every token row.
  *
  * WHY NOT DEQUANTISE FIRST
  *   A Flash routed expert is 13,369,344 bytes packed. Widened to f32 it is
@@ -36,7 +44,7 @@
  *   element instead of per block.
  *
  *   Activations arrive already in f32 here, so there is no act scale: this is a
- *   dequantised-weight GEMV.
+ *   dequantised-weight product.
  */
 #include <math.h>
 #include <stdio.h>
@@ -128,75 +136,6 @@ static inline __m256 load8_fp8(const uint8_t *wb, int i)
     return _mm256_castsi256_ps(bits);
 }
 
-/* The FP4 decoder and the 32-wide block sum are shared with the prefill
- * GEMM; see dsv4_qmat_dec.h. */
-
-/* ONE f32 -> f64 PASS OVER THE ACTIVATIONS, reused by every output row.
- *
- * x is the same vector for all `out` rows, so widening it inside the row loop
- * did the work `out` times over: a 2048x4096 expert matrix converted 2.1M
- * values where 1024 suffice. (double)float is exact, so hoisting it changes the
- * count and nothing else. The BF16 path, which still uses it, stays bitwise.
- *
- * malloc rather than a fixed array: Pro's widest reduce dimension is 16384, and
- * a kernel that is correct only up to some assumed maximum is precisely the
- * kind of thing this engine keeps finding in itself. */
-static double *widen_x(const float *x, int in)
-{
-    double *d = (double *)malloc((size_t)in * sizeof *d);
-    if (!d) {
-        fprintf(stderr, "dsv4_matmul: could not widen %d activations\n", in);
-        return NULL;
-    }
-    for (int i = 0; i < in; i++) d[i] = (double)x[i];
-    return d;
-}
-
-/* ---------------------------------------------------------------- kernels ---
- * bf16 is emitted here as `dsv4_matmul_bf16_avx2`, the only path the engine
- * dispatches to. Its scalar reference, the FP4 scalar body and the old
- * double-accumulator FP8 body live in tests/unit/test_matmul.c, where the
- * matmul gate compares against them. The production FP8 entry point is the
- * row-block hybrid path below.
- *
- * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
- * default compute team is four threads pinned to the four identical P-cores, so
- * there is nothing for a dynamic schedule to balance. It was introduced when
- * these loops also ran on the E-cores, where the P/E cost ratio left the fast
- * cores waiting at the barrier. That reason is gone: dynamic chunk 4 now only
- * adds a dispatch fetch per four rows. Interleaved 3-rep A/B in both orders
- * measured static at 0.945 s/token against dynamic's 0.9525, which is neutral
- * inside the noise; static is kept because it is simpler, not faster.
- *
- * This cannot change a result: a row's dot product depends only on its own
- * columns, and the reduction inside the row is untouched. Only which thread
- * computes which row changes, and rows do not interact. */
-#define GEN_BF16(SUF, DOT)                                                     \
-void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
-                           int in, int out)                                    \
-{                                                                              \
-    double *xd = widen_x(x, in);                                               \
-    if (!xd) return;                                                           \
-    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
-    for (int o = 0; o < out; o++) {                                            \
-        const uint16_t *row = W + (size_t)o * in;                              \
-        const float  *xb  = x;                                                 \
-        const double *xdb = xd; (void)xdb;                                     \
-        const int n = in;                                                      \
-        double acc;                                                            \
-        DOT(LOAD1_BF16, LOAD4_BF16);                                           \
-        y[o] = (float)acc;                                                     \
-    }                                                                          \
-    free(xd);                                                                  \
-}
-
-
-
-GEN_BF16(_avx2, BLOCK_DOT_V)
-void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
-                          const uint8_t *S, int in, int out,
-                          int blk_r, int blk_c);
-
 /* FP8 WITH A FLOAT-INNER BLOCK AND A DOUBLE FOLD.
  *
  * The old double-accumulator kernel lives in tests/unit/test_matmul.c. It
@@ -213,27 +152,46 @@ void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
 static inline double fp8_block_dot_f32_128(const uint8_t *wb,
                                            const float *xb)
 {
-    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
-    for (int i = 0; i < 128; i += 32) {
-        a0 = _mm256_fmadd_ps(load8_fp8(wb, i),
-                             _mm256_loadu_ps(xb + i), a0);
-        a1 = _mm256_fmadd_ps(load8_fp8(wb, i + 8),
-                             _mm256_loadu_ps(xb + i + 8), a1);
-        a2 = _mm256_fmadd_ps(load8_fp8(wb, i + 16),
-                             _mm256_loadu_ps(xb + i + 16), a2);
-        a3 = _mm256_fmadd_ps(load8_fp8(wb, i + 24),
-                             _mm256_loadu_ps(xb + i + 24), a3);
-    }
+    __m256 s;
+#define FP8_LOAD8(k) load8_fp8(wb, (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return (double)dsv4_hsum256(s);
+}
 
-    __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1),
-                             _mm256_add_ps(a2, a3));
-    __m128 lo = _mm256_castps256_ps128(s);
-    __m128 hi = _mm256_extractf128_ps(s, 1);
-    __m128 t = _mm_add_ps(lo, hi);
-    t = _mm_hadd_ps(t, t);
-    t = _mm_hadd_ps(t, t);
-    return (double)_mm_cvtss_f32(t);
+/* The same tree over the closed-form decoder. This is the fast path for a
+ * block with no subnormal and no NaN. */
+static inline double fp8_block_dot_f32_128_normal(const uint8_t *wb,
+                                                  const float *xb)
+{
+    __m256 s;
+#define FP8_LOAD8(k) fp8_8_normal(wb, (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return (double)dsv4_hsum256(s);
+}
+
+/* Keep the rare gather body OUT of the hot function. When it was `static
+ * inline`, GCC hoisted its vpmovzxbd loads and spilled eight YMM registers to
+ * the stack *before* the special/not-special branch, so the 98.2% fast path
+ * paid for the 1.8% slow path on every block. `perf annotate` showed those
+ * spills at 5-12% of the kernel's cycles. One call on a special block is
+ * nothing next to that. */
+static __attribute__((noinline)) double
+fp8_block_dot_f32_128_gather(const uint8_t *wb, const float *xb)
+{
+    return fp8_block_dot_f32_128(wb, xb);
+}
+
+/* The decode-once form: the batch kernels decode a block into wf[128] and run
+ * the same tree over it for every token. */
+static inline __m256 fp8_block_sum_wf(const float *wf, const float *xb)
+{
+    __m256 s;
+#define FP8_LOAD8(k) _mm256_loadu_ps(wf + (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return s;
 }
 
 /* Generic block width, for fixtures and any non-128 geometry. */
@@ -268,129 +226,10 @@ static inline double fp8_block_dot_f32(const uint8_t *wb, const float *xb,
     return acc;
 }
 
-/* Keep the rare gather body OUT of the hot function. When it was `static
- * inline`, GCC hoisted its vpmovzxbd loads and spilled eight YMM registers to
- * the stack *before* the special/not-special branch, so the 98.2% fast path
- * paid for the 1.8% slow path on every block. `perf annotate` showed those
- * spills at 5-12% of the kernel's cycles. One call on a special block is
- * nothing next to that. */
-static __attribute__((noinline)) double
-fp8_block_dot_f32_128_gather(const uint8_t *wb, const float *xb)
-{
-    return fp8_block_dot_f32_128(wb, xb);
-}
-
-static inline double fp8_block_dot_f32_128_normal(const uint8_t *wb,
-                                                  const float *xb)
-{
-    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
-    for (int i = 0; i < 128; i += 32) {
-        a0 = _mm256_fmadd_ps(fp8_8_normal(wb, i),
-                             _mm256_loadu_ps(xb + i), a0);
-        a1 = _mm256_fmadd_ps(fp8_8_normal(wb, i + 8),
-                             _mm256_loadu_ps(xb + i + 8), a1);
-        a2 = _mm256_fmadd_ps(fp8_8_normal(wb, i + 16),
-                             _mm256_loadu_ps(xb + i + 16), a2);
-        a3 = _mm256_fmadd_ps(fp8_8_normal(wb, i + 24),
-                             _mm256_loadu_ps(xb + i + 24), a3);
-    }
-    return (double)dsv4_hsum256(_mm256_add_ps(
-        _mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
-}
-
-/* Defined below; declared here because the hybrid falls back to it for blocks
- * that contain a subnormal or a NaN. */
-void dsv4_matmul_fp8_f32(float *y, const float *x, const uint8_t *W,
-                         const uint8_t *S, int in, int out,
-                         int blk_r, int blk_c);
-
-void dsv4_matmul_fp8_f32_hybrid(float *y, const float *x, const uint8_t *W,
-                                const uint8_t *S, int in, int out,
-                                int blk_r, int blk_c)
-{
-    const int sc = (in + blk_c - 1) / blk_c;
-    if (!(blk_c == 128 && (in & 127) == 0)) {
-        dsv4_matmul_fp8_f32(y, x, W, S, in, out, blk_r, blk_c);
-        return;
-    }
-    _Pragma("omp parallel for schedule(static) if (out > 64)")
-    for (int o = 0; o < out; o++) {
-        const uint8_t *rw = W + (size_t)o * in;
-        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
-        double total = 0.0;
-        int bi = 0;
-        for (int c0 = 0; c0 < in; c0 += 128) {
-            const uint8_t *wb = rw + c0;
-            const float *xb = x + c0;
-            const double acc = fp8_block_has_special(wb)
-                             ? fp8_block_dot_f32_128_gather(wb, xb)
-                             : fp8_block_dot_f32_128_normal(wb, xb);
-            total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);
-        }
-        y[o] = (float)total;
-    }
-}
-
-/* ROW-BLOCK SCHEDULING, SO THE SCALE ROW IS DECODED ONCE.
- *
- * FP8's scale grid is 128x128, so the same 64 scale bytes are used by 128
- * consecutive output rows. The row-wise loop decoded them 128 times -- that
- * scalar load + two-branch dsv4_e8m0_to_f32 showed up as `movzbl` at 15% of
- * the kernel's cycles in `perf annotate`. Decode the row's scales into a small
- * stack buffer once, then let every row in the block read a plain double.
- *
- * The arithmetic is untouched: each output row still sums its blocks in the
- * same order with the same scale, so this is bitwise identical to the hybrid
- * kernel, not merely within its L2 bound. Scheduling row blocks instead of
- * rows cannot change a result because rows do not interact. */
-void dsv4_matmul_fp8_f32_rows(float *y, const float *x, const uint8_t *W,
-                              const uint8_t *S, int in, int out,
-                              int blk_r, int blk_c)
-{
-    const int sc = (in + blk_c - 1) / blk_c;
-    if (!(blk_c == 128 && (in & 127) == 0 && blk_r == 128)) {
-        dsv4_matmul_fp8_f32_hybrid(y, x, W, S, in, out, blk_r, blk_c);
-        return;
-    }
-    /* 256 doubles covers every released geometry (Pro's widest reduce is
-     * 16384 = 128 blocks). Anything larger takes the general path instead of
-     * pretending a fixed maximum is universal. */
-    if (sc > 256) {
-        dsv4_matmul_fp8_f32_hybrid(y, x, W, S, in, out, blk_r, blk_c);
-        return;
-    }
-
-    const int nrb = (out + 127) / 128;
-    _Pragma("omp parallel for schedule(static) if (out > 64)")
-    for (int rb = 0; rb < nrb; rb++) {
-        const uint8_t *srow = S + (size_t)rb * sc;
-        double sdec[256];
-        for (int i = 0; i < sc; i++)
-            sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
-
-        const int o0 = rb * 128;
-        int o1 = o0 + 128;
-        if (o1 > out) o1 = out;
-        for (int o = o0; o < o1; o++) {
-            const uint8_t *rw = W + (size_t)o * in;
-            double total = 0.0;
-            int bi = 0;
-            for (int c0 = 0; c0 < in; c0 += 128) {
-                const uint8_t *wb = rw + c0;
-                const float *xb = x + c0;
-                const double acc = fp8_block_has_special(wb)
-                                 ? fp8_block_dot_f32_128_gather(wb, xb)
-                                 : fp8_block_dot_f32_128_normal(wb, xb);
-                total += acc * sdec[bi++];
-            }
-            y[o] = (float)total;
-        }
-    }
-}
-
-/* The reference gather kernel. Kept callable so the gate and matmul_variants
- * can compare the hybrid path against it bit for bit. */
+/* The reference gather kernel: exact f32 values from the 256-entry table, with
+ * no closed-form shortcut. Kept callable so the matmul gate can compare the
+ * production path against it bit for bit, including on blocks with subnormals
+ * and NaNs. Production is fp8_n(), not this. */
 void dsv4_matmul_fp8_f32(float *y, const float *x, const uint8_t *W,
                          const uint8_t *S, int in, int out,
                          int blk_r, int blk_c)
@@ -428,25 +267,6 @@ void dsv4_matmul_fp8_f32(float *y, const float *x, const uint8_t *W,
     }
 }
 
-/* The names the rest of the engine calls. */
-void dsv4_matmul_bf16(float *y, const float *x, const uint16_t *W,
-                      int in, int out)
-{
-    dsv4_matmul_bf16_avx2(y, x, W, in, out);
-}
-
-void dsv4_matmul_fp8(float *y, const float *x, const uint8_t *W,
-                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
-{
-    dsv4_matmul_fp8_f32_rows(y, x, W, S, in, out, blk_r, blk_c);
-}
-
-void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
-                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
-{
-    dsv4_matmul_fp4_avx2(y, x, W, S, in, out, blk_r, blk_c);
-}
-
 /* FP4 with a float inner block and a double fold.
  *
  * This is the CPU analogue of the GPU path's "float inner, double fold": the
@@ -458,7 +278,7 @@ void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
  *
  * Four independent float accumulators cover the 32 weights of one block, so
  * the FMAs have no serial dependency inside the block. x is already f32, so
- * this path also skips widen_x entirely. */
+ * this path never widens x. */
 static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
                                        const float *xb, int n)
 {
@@ -491,149 +311,20 @@ static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
     return acc;
 }
 
-static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
-                                          const float *xb)
-{
-    return dsv4_hsum256(fp4_block_sum32(row, base, xb));
-}
-
-/* Four 32-wide blocks at a time, so the horizontal reduction and the double
- * fold happen once per 128 weights instead of once per 32, and the scale row
- * is decoded once per output row rather than once per block.
- *
- * Why this is not just a micro-optimisation: the old loop ended every block
- * with `total += dot * scale`, a scalar double dependency chain of one
- * multiply and one add per 32 weights. At the real geometry that is 128
- * serial steps per output row. The four-lane double accumulator below keeps
- * four independent partial sums alive and only reduces them once at the end.
- *
- * The within-block arithmetic is unchanged (same four FMA accumulators, same
- * pair tree), but the horizontal reduction now sums the lanes in a different
- * order and the cross-block sum is grouped by block index modulo four. Both
- * are float-level rounding changes inside the FP4 kernel's existing L2-bound
- * contract, not a different dot product. The gate bounds it at 1e-6 and the
- * full-model ids must still agree.
- *
- * `sdec` is fixed rather than a VLA because -Wvla is on. 512 doubles covers
- * every released geometry (Pro's widest reduce dimension, 16384, is 512
- * blocks); anything wider takes the old single-block loop instead of
- * pretending the maximum is universal. */
-
-void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
-                          const uint8_t *S, int in, int out,
-                          int blk_r, int blk_c)
-{
-    const int sc = (in + blk_c - 1) / blk_c;
-
-    if (blk_c == 32 && (in & 31) == 0 && sc <= FP4_SC_MAX) {
-        _Pragma("omp parallel for schedule(static) if (out > 64)")
-        for (int o = 0; o < out; o++) {
-            const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
-            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
-            double sdec[FP4_SC_MAX];
-            for (int i = 0; i < sc; i++)
-                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
-
-            double total = 0.0;
-            __m256d acc4 = _mm256_setzero_pd();
-            int bi = 0;
-            int c0 = 0;
-            for (; c0 + 127 < in; c0 += 128, bi += 4) {
-                const __m256 s0 = fp4_block_sum32(row, c0, x + c0);
-                const __m256 s1 = fp4_block_sum32(row, c0 + 32, x + c0 + 32);
-                const __m256 s2 = fp4_block_sum32(row, c0 + 64, x + c0 + 64);
-                const __m256 s3 = fp4_block_sum32(row, c0 + 96, x + c0 + 96);
-
-                /* Four 8-lane sums -> four scalars in one xmm. The old path
-                 * did this with two vhaddps per block, eight Port-5 uops
-                 * here; this tree needs three vhaddps plus one extract/add. */
-                const __m256 h01 = _mm256_hadd_ps(s0, s1);
-                const __m256 h23 = _mm256_hadd_ps(s2, s3);
-                const __m256 h   = _mm256_hadd_ps(h01, h23);
-                const __m128 lo  = _mm256_castps256_ps128(h);
-                const __m128 hi  = _mm256_extractf128_ps(h, 1);
-                const __m128 b4  = _mm_add_ps(lo, hi);
-
-                /* No _mm256_fmadd_pd: the engine builds with
-                 * -ffp-contract=off, and the scalar fold this replaces was a
-                 * separate multiply and add. Keep the same rounding. */
-                acc4 = _mm256_add_pd(
-                    acc4,
-                    _mm256_mul_pd(_mm256_cvtps_pd(b4),
-                                  _mm256_loadu_pd(sdec + bi)));
-            }
-            for (; c0 < in; c0 += 32, bi++)
-                total += fp4_block_dot_f32_32(row, (int64_t)c0, x + c0) *
-                         sdec[bi];
-
-            const __m128d dlo = _mm256_castpd256_pd128(acc4);
-            const __m128d dhi = _mm256_extractf128_pd(acc4, 1);
-            const __m128d d2  = _mm_add_pd(dlo, dhi);
-            const __m128d d1  = _mm_unpackhi_pd(d2, d2);
-            total += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
-            y[o] = (float)total;
-        }
-        return;
-    }
-
-    if (blk_c == 32 && (in & 31) == 0) {
-        _Pragma("omp parallel for schedule(static) if (out > 64)")
-        for (int o = 0; o < out; o++) {
-            const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
-            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
-            double total = 0.0;
-            int bi = 0;
-            for (int c0 = 0; c0 < in; c0 += 32)
-                total += fp4_block_dot_f32_32(row, (int64_t)c0, x + c0) *
-                         (double)dsv4_e8m0_to_f32(srow[bi++]);
-            y[o] = (float)total;
-        }
-        return;
-    }
-
-    /* Fallback for hand-built fixtures and any future non-32 block width.
-     * The counter removes the per-block integer division. */
-    _Pragma("omp parallel for schedule(static) if (out > 64)")
-    for (int o = 0; o < out; o++) {
-        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
-        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
-        double total = 0.0;
-        int bi = 0;
-        for (int c0 = 0; c0 < in; c0 += blk_c) {
-            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;
-            const double acc = fp4_block_dot_f32(row, (int64_t)c0, x + c0, n);
-            total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);
-        }
-        y[o] = (float)total;
-    }
-}
-
 /* ---------------------------------------------------------------- dispatch --
  * The one call every weight matrix goes through. The branch is on a per-matrix
  * tag decided at bind time, outside the inner loops, so it costs nothing
  * measurable. A matrix carries its own block geometry precisely so that no
- * caller has to remember whether this one is 128x128 or 1x32. */
+ * caller has to remember whether this one is 128x128 or 1x32.
+ *
+ * Decode is not a second kernel: it is the nt == 1 case of dsv4_mmq_n(). The
+ * batch kernels below keep one token in flight when asked for one, so there is
+ * one set of format bodies, one reduction tree and one place a decode fix can
+ * land. test_matmul gates nt == 1 against the batch result and against the
+ * scalar/gather references. */
 void dsv4_mmq(float *y, const float *x, const DSV4QMat *m)
 {
-    switch (m->wdt) {
-    case DSV4_WBF16:
-        dsv4_matmul_bf16(y, x, (const uint16_t *)m->w, m->cols, m->rows);
-        break;
-    case DSV4_WFP8:
-        dsv4_matmul_fp8(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
-                        m->cols, m->rows, m->blk_r, m->blk_c);
-        break;
-    case DSV4_WFP4:
-        dsv4_matmul_fp4(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
-                        m->cols, m->rows, m->blk_r, m->blk_c);
-        break;
-    default:
-        /* Reaching here means a matrix was bound with a tag nothing implements.
-         * Producing zeros would be a running model with a missing projection. */
-        fprintf(stderr, "dsv4_mmq: matrix has unimplemented wdt %d "
-                        "(%dx%d)\n", m->wdt, m->rows, m->cols);
-        abort();
-    }
+    dsv4_mmq_n(y, x, m, 1);
 }
 
 /* ------------------------------------------------------- batched dense GEMM --
@@ -669,7 +360,19 @@ static inline void fp8_decode_block_128(const uint8_t *wb, float *wf)
     }
 }
 
-/* --------------------------------------------------------- batch kernels -- */
+/* --------------------------------------------------------- batch kernels --
+ * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
+ * default compute team is four threads pinned to the four identical P-cores, so
+ * there is nothing for a dynamic schedule to balance. It was introduced when
+ * these loops also ran on the E-cores, where the P/E cost ratio left the fast
+ * cores waiting at the barrier. That reason is gone: dynamic chunk 4 now only
+ * adds a dispatch fetch per four rows. Interleaved 3-rep A/B in both orders
+ * measured static at 0.945 s/token against dynamic's 0.9525, which is neutral
+ * inside the noise; static is kept because it is simpler, not faster.
+ *
+ * This cannot change a result: a row's dot product depends only on its own
+ * columns, and the reduction inside the row is untouched. Only which thread
+ * computes which row changes, and rows do not interact. */
 static void bf16_n(float *y, const float *x, const uint16_t *W,
                    int in, int out, int nt)
 {
@@ -697,103 +400,144 @@ static void bf16_n(float *y, const float *x, const uint16_t *W,
     free(xd);
 }
 
+/* FP8. One token keeps the register schedule: the block is decoded straight
+ * into accumulators, with the exact fallback for subnormal/NaN blocks. More
+ * than one token decodes the block once into wf[128] and runs the same tree
+ * over it per token. Both apply the scale to the block dot product in double,
+ * and both use FP8_BLOCK_SUM, so only the schedule differs. */
 static void fp8_n(float *y, const float *x, const uint8_t *W,
-                  const uint8_t *S, int in, int out, int nt)
+                  const uint8_t *S, int in, int out, int blk_r, int blk_c,
+                  int nt)
 {
     const int sc = in / 128;
     const int nrb = (out + 127) / 128;
 
-    _Pragma("omp parallel for schedule(static) if (nrb > 1)")
-    for (int rb = 0; rb < nrb; rb++) {
-        const uint8_t *srow = S + (size_t)rb * sc;
-        double sdec[256];
-        for (int i = 0; i < sc; i++)
-            sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
+    if (nt == 1 && blk_c == 128 && (in & 127) == 0 &&
+        blk_r == 128 && sc <= 256) {
+        _Pragma("omp parallel for schedule(static) if (out > 64)")
+        for (int rb = 0; rb < nrb; rb++) {
+            const uint8_t *srow = S + (size_t)rb * sc;
+            double sdec[256];
+            for (int i = 0; i < sc; i++)
+                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
 
-        const int o0 = rb * 128;
-        int o1 = o0 + 128;
-        if (o1 > out) o1 = out;
-
-        for (int o = o0; o < o1; o++) {
-            const uint8_t *rw = W + (size_t)o * in;
-            double total[DSV4_MAX_BATCH];
-            for (int t = 0; t < nt; t++) total[t] = 0.0;
-
-            int bi = 0;
-            for (int c0 = 0; c0 < in; c0 += 128, bi++) {
-                const uint8_t *wb = rw + c0;
-                float wf[128];
-                fp8_decode_block_128(wb, wf);
-
-                const double s = sdec[bi];
-                for (int t = 0; t < nt; t++) {
-                    const float *xb = x + (size_t)t * in + c0;
-                    __m256 a0 = _mm256_setzero_ps();
-                    __m256 a1 = _mm256_setzero_ps();
-                    __m256 a2 = _mm256_setzero_ps();
-                    __m256 a3 = _mm256_setzero_ps();
-                    for (int i = 0; i < 128; i += 32) {
-                        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + i),
-                                             _mm256_loadu_ps(xb + i), a0);
-                        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + i + 8),
-                                             _mm256_loadu_ps(xb + i + 8), a1);
-                        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + i + 16),
-                                             _mm256_loadu_ps(xb + i + 16), a2);
-                        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(wf + i + 24),
-                                             _mm256_loadu_ps(xb + i + 24), a3);
-                    }
-                    const double acc = dsv4_hsum256(_mm256_add_ps(
-                        _mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
-                    total[t] += acc * s;
+            const int o0 = rb * 128;
+            int o1 = o0 + 128;
+            if (o1 > out) o1 = out;
+            for (int o = o0; o < o1; o++) {
+                const uint8_t *rw = W + (size_t)o * in;
+                double total = 0.0;
+                int bi = 0;
+                for (int c0 = 0; c0 < in; c0 += 128) {
+                    const uint8_t *wb = rw + c0;
+                    const float *xb = x + c0;
+                    const double acc = fp8_block_has_special(wb)
+                                     ? fp8_block_dot_f32_128_gather(wb, xb)
+                                     : fp8_block_dot_f32_128_normal(wb, xb);
+                    total += acc * sdec[bi++];
                 }
+                y[o] = (float)total;
             }
-            for (int t = 0; t < nt; t++)
-                y[(size_t)t * out + o] = (float)total[t];
         }
+        return;
+    }
+
+    if (blk_c == 128 && (in & 127) == 0 && blk_r == 128 && sc <= 256) {
+        _Pragma("omp parallel for schedule(static) if (nrb > 1)")
+        for (int rb = 0; rb < nrb; rb++) {
+            const uint8_t *srow = S + (size_t)rb * sc;
+            double sdec[256];
+            for (int i = 0; i < sc; i++)
+                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
+
+            const int o0 = rb * 128;
+            int o1 = o0 + 128;
+            if (o1 > out) o1 = out;
+
+            for (int o = o0; o < o1; o++) {
+                const uint8_t *rw = W + (size_t)o * in;
+                double total[DSV4_MAX_BATCH];
+                for (int t = 0; t < nt; t++) total[t] = 0.0;
+
+                int bi = 0;
+                for (int c0 = 0; c0 < in; c0 += 128, bi++) {
+                    const uint8_t *wb = rw + c0;
+                    float wf[128];
+                    fp8_decode_block_128(wb, wf);
+
+                    const double s = sdec[bi];
+                    for (int t = 0; t < nt; t++) {
+                        const float *xb = x + (size_t)t * in + c0;
+                        total[t] += (double)dsv4_hsum256(
+                                        fp8_block_sum_wf(wf, xb)) * s;
+                    }
+                }
+                for (int t = 0; t < nt; t++)
+                    y[(size_t)t * out + o] = (float)total[t];
+            }
+        }
+        return;
+    }
+
+    /* Generic block geometry, for hand-built fixtures and any future shape.
+     * Same per-block scale fold and same order as the row reference. */
+    const int scg = (in + blk_c - 1) / blk_c;
+    _Pragma("omp parallel for schedule(static) if (out > 64)")
+    for (int o = 0; o < out; o++) {
+        const uint8_t *rw = W + (size_t)o * in;
+        const uint8_t *srow = S + (size_t)(o / blk_r) * scg;
+        double total[DSV4_MAX_BATCH];
+        for (int t = 0; t < nt; t++) total[t] = 0.0;
+
+        int bi = 0;
+        for (int c0 = 0; c0 < in; c0 += blk_c, bi++) {
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;
+            const double s = (double)dsv4_e8m0_to_f32(srow[bi]);
+            for (int t = 0; t < nt; t++)
+                total[t] += fp8_block_dot_f32(rw + c0,
+                                              x + (size_t)t * in + c0, n) * s;
+        }
+        for (int t = 0; t < nt; t++)
+            y[(size_t)t * out + o] = (float)total[t];
     }
 }
 
-/* Batched FP4 with the production kernel's arithmetic, not a new reduction
- * order. Each 128-weight group is decoded ONCE into wf[128], then every token
- * runs the same four block sums and the same four-lane double fold. The four
- * block sums are folded exactly as dsv4_matmul_fp4_avx2 folds them, so the
- * result for (row, token) is bitwise equal to nt separate GEMVs. */
+static inline double fp4_block_dot_f32_32(const uint8_t *row, int64_t base,
+                                          const float *xb)
+{
+    return (double)dsv4_hsum256(fp4_block_sum32(row, base, xb));
+}
+
+/* FP4. One token keeps the four-blocks-at-a-time register schedule. More than
+ * one token decodes each 128-weight group ONCE into wf[128], then runs the
+ * same four block sums and the same four-lane double fold per token. Both
+ * paths fold the block sums in the same order, so (row, token) is bitwise
+ * equal to nt one-token calls. */
 static void fp4_n(float *y, const float *x, const uint8_t *W,
                   const uint8_t *S, int in, int out, int blk_r, int blk_c,
                   int nt)
 {
     const int sc = (in + blk_c - 1) / blk_c;
 
-    _Pragma("omp parallel for schedule(static) if (out > 64)")
-    for (int o = 0; o < out; o++) {
-        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
-        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+    if (nt == 1 && blk_r > 0 && blk_c == 32 &&
+        (in & 31) == 0 && sc <= FP4_SC_MAX) {
+        _Pragma("omp parallel for schedule(static) if (out > 64)")
+        for (int o = 0; o < out; o++) {
+            const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+            double sdec[FP4_SC_MAX];
+            for (int i = 0; i < sc; i++)
+                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
 
-        double sdec[FP4_SC_MAX];
-        for (int i = 0; i < sc; i++)
-            sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
-
-        __m256d acc4[DSV4_MAX_BATCH];
-        double total[DSV4_MAX_BATCH];
-        for (int t = 0; t < nt; t++) {
-            acc4[t] = _mm256_setzero_pd();
-            total[t] = 0.0;
-        }
-
-        int bi = 0;
-        int c0 = 0;
-        for (; c0 + 127 < in; c0 += 128, bi += 4) {
-            float wf[128];
-            for (int i = 0; i < 128; i += 8)
-                _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
-
-            const __m256d sl = _mm256_loadu_pd(sdec + bi);
-            for (int t = 0; t < nt; t++) {
-                const float *xb = x + (size_t)t * in + c0;
-                const __m256 s0 = fp4_block_sum32_w(wf,      xb);
-                const __m256 s1 = fp4_block_sum32_w(wf + 32, xb + 32);
-                const __m256 s2 = fp4_block_sum32_w(wf + 64, xb + 64);
-                const __m256 s3 = fp4_block_sum32_w(wf + 96, xb + 96);
+            double total = 0.0;
+            __m256d acc4 = _mm256_setzero_pd();
+            int bi = 0;
+            int c0 = 0;
+            for (; c0 + 127 < in; c0 += 128, bi += 4) {
+                const __m256 s0 = fp4_block_sum32(row, c0, x + c0);
+                const __m256 s1 = fp4_block_sum32(row, c0 + 32, x + c0 + 32);
+                const __m256 s2 = fp4_block_sum32(row, c0 + 64, x + c0 + 64);
+                const __m256 s3 = fp4_block_sum32(row, c0 + 96, x + c0 + 96);
 
                 const __m256 h01 = _mm256_hadd_ps(s0, s1);
                 const __m256 h23 = _mm256_hadd_ps(s2, s3);
@@ -802,30 +546,111 @@ static void fp4_n(float *y, const float *x, const uint8_t *W,
                 const __m128 hi  = _mm256_extractf128_ps(h, 1);
                 const __m128 b4  = _mm_add_ps(lo, hi);
 
-                acc4[t] = _mm256_add_pd(
-                    acc4[t],
-                    _mm256_mul_pd(_mm256_cvtps_pd(b4), sl));
+                acc4 = _mm256_add_pd(
+                    acc4,
+                    _mm256_mul_pd(_mm256_cvtps_pd(b4),
+                                  _mm256_loadu_pd(sdec + bi)));
             }
-        }
-        for (; c0 < in; c0 += 32, bi++) {
-            float wf[32];
-            for (int i = 0; i < 32; i += 8)
-                _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
-            for (int t = 0; t < nt; t++) {
-                const __m256 s = fp4_block_sum32_w(
-                    wf, x + (size_t)t * in + c0);
-                total[t] += dsv4_hsum256(s) * sdec[bi];
-            }
-        }
+            for (; c0 < in; c0 += 32, bi++)
+                total += fp4_block_dot_f32_32(row, (int64_t)c0, x + c0) *
+                         sdec[bi];
 
-        for (int t = 0; t < nt; t++) {
-            const __m128d dlo = _mm256_castpd256_pd128(acc4[t]);
-            const __m128d dhi = _mm256_extractf128_pd(acc4[t], 1);
+            const __m128d dlo = _mm256_castpd256_pd128(acc4);
+            const __m128d dhi = _mm256_extractf128_pd(acc4, 1);
             const __m128d d2  = _mm_add_pd(dlo, dhi);
             const __m128d d1  = _mm_unpackhi_pd(d2, d2);
-            total[t] += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
-            y[(size_t)t * out + o] = (float)total[t];
+            total += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
+            y[o] = (float)total;
         }
+        return;
+    }
+
+    if (blk_r > 0 && blk_c == 32 && (in & 31) == 0 && sc <= FP4_SC_MAX) {
+        _Pragma("omp parallel for schedule(static) if (out > 64)")
+        for (int o = 0; o < out; o++) {
+            const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+            const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+
+            double sdec[FP4_SC_MAX];
+            for (int i = 0; i < sc; i++)
+                sdec[i] = (double)dsv4_e8m0_to_f32(srow[i]);
+
+            __m256d acc4[DSV4_MAX_BATCH];
+            double total[DSV4_MAX_BATCH];
+            for (int t = 0; t < nt; t++) {
+                acc4[t] = _mm256_setzero_pd();
+                total[t] = 0.0;
+            }
+
+            int bi = 0;
+            int c0 = 0;
+            for (; c0 + 127 < in; c0 += 128, bi += 4) {
+                float wf[128];
+                for (int i = 0; i < 128; i += 8)
+                    _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+
+                const __m256d sl = _mm256_loadu_pd(sdec + bi);
+                for (int t = 0; t < nt; t++) {
+                    const float *xb = x + (size_t)t * in + c0;
+                    const __m256 s0 = fp4_block_sum32_w(wf,      xb);
+                    const __m256 s1 = fp4_block_sum32_w(wf + 32, xb + 32);
+                    const __m256 s2 = fp4_block_sum32_w(wf + 64, xb + 64);
+                    const __m256 s3 = fp4_block_sum32_w(wf + 96, xb + 96);
+
+                    const __m256 h01 = _mm256_hadd_ps(s0, s1);
+                    const __m256 h23 = _mm256_hadd_ps(s2, s3);
+                    const __m256 h   = _mm256_hadd_ps(h01, h23);
+                    const __m128 lo  = _mm256_castps256_ps128(h);
+                    const __m128 hi  = _mm256_extractf128_ps(h, 1);
+                    const __m128 b4  = _mm_add_ps(lo, hi);
+
+                    acc4[t] = _mm256_add_pd(
+                        acc4[t],
+                        _mm256_mul_pd(_mm256_cvtps_pd(b4), sl));
+                }
+            }
+            for (; c0 < in; c0 += 32, bi++) {
+                float wf[32];
+                for (int i = 0; i < 32; i += 8)
+                    _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+                for (int t = 0; t < nt; t++) {
+                    const __m256 s = fp4_block_sum32_w(
+                        wf, x + (size_t)t * in + c0);
+                    total[t] += dsv4_hsum256(s) * sdec[bi];
+                }
+            }
+
+            for (int t = 0; t < nt; t++) {
+                const __m128d dlo = _mm256_castpd256_pd128(acc4[t]);
+                const __m128d dhi = _mm256_extractf128_pd(acc4[t], 1);
+                const __m128d d2  = _mm_add_pd(dlo, dhi);
+                const __m128d d1  = _mm_unpackhi_pd(d2, d2);
+                total[t] += _mm_cvtsd_f64(_mm_add_sd(d2, d1));
+                y[(size_t)t * out + o] = (float)total[t];
+            }
+        }
+        return;
+    }
+
+    /* Generic block geometry. Same scale fold as the fast path, one block at
+     * a time; only hand-built fixtures reach it. */
+    _Pragma("omp parallel for schedule(static) if (out > 64)")
+    for (int o = 0; o < out; o++) {
+        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);
+        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;
+        double total[DSV4_MAX_BATCH];
+        for (int t = 0; t < nt; t++) total[t] = 0.0;
+
+        int bi = 0;
+        for (int c0 = 0; c0 < in; c0 += blk_c, bi++) {
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;
+            const double s = (double)dsv4_e8m0_to_f32(srow[bi]);
+            for (int t = 0; t < nt; t++)
+                total[t] += fp4_block_dot_f32(row, (int64_t)c0,
+                                              x + (size_t)t * in + c0, n) * s;
+        }
+        for (int t = 0; t < nt; t++)
+            y[(size_t)t * out + o] = (float)total[t];
     }
 }
 
@@ -835,38 +660,17 @@ static void fp4_n(float *y, const float *x, const uint8_t *W,
  * walks as many tiles as the caller's token block needs. */
 static void mmq_n_tile(float *y, const float *x, const DSV4QMat *m, int nt)
 {
-    if (nt <= 1) {
-        dsv4_mmq(y, x, m);
-        return;
-    }
-
     switch (m->wdt) {
     case DSV4_WBF16:
         bf16_n(y, x, (const uint16_t *)m->w, m->cols, m->rows, nt);
         break;
     case DSV4_WFP8:
-        /* The fast body assumes the released 128x128 geometry and the fixed
-         * scale buffer. Anything else stays on the per-token GEMV. */
-        if (m->blk_c == 128 && (m->cols & 127) == 0 &&
-            m->blk_r == 128 && m->cols / 128 <= 256) {
-            fp8_n(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
-                  m->cols, m->rows, nt);
-        } else {
-            for (int t = 0; t < nt; t++)
-                dsv4_mmq(y + (size_t)t * m->rows,
-                         x + (size_t)t * m->cols, m);
-        }
+        fp8_n(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
+              m->cols, m->rows, m->blk_r, m->blk_c, nt);
         break;
     case DSV4_WFP4:
-        if (m->blk_r > 0 && m->blk_c == 32 && (m->cols & 31) == 0 &&
-            m->cols / 32 <= FP4_SC_MAX) {
-            fp4_n(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
-                  m->cols, m->rows, m->blk_r, m->blk_c, nt);
-        } else {
-            for (int t = 0; t < nt; t++)
-                dsv4_mmq(y + (size_t)t * m->rows,
-                         x + (size_t)t * m->cols, m);
-        }
+        fp4_n(y, x, (const uint8_t *)m->w, (const uint8_t *)m->s,
+              m->cols, m->rows, m->blk_r, m->blk_c, nt);
         break;
     default:
         fprintf(stderr, "dsv4_mmq_n: matrix has unimplemented wdt %d "
@@ -890,4 +694,24 @@ void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
         mmq_n_tile(y + (size_t)off * (size_t)m->rows,
                    x + (size_t)off * (size_t)m->cols, m, t);
     }
+}
+
+/* The per-format names the gates and older callers use. They are the nt == 1
+ * case of the same bodies, not a separate implementation. */
+void dsv4_matmul_bf16(float *y, const float *x, const uint16_t *W,
+                      int in, int out)
+{
+    bf16_n(y, x, W, in, out, 1);
+}
+
+void dsv4_matmul_fp8(float *y, const float *x, const uint8_t *W,
+                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
+{
+    fp8_n(y, x, W, S, in, out, blk_r, blk_c, 1);
+}
+
+void dsv4_matmul_fp4(float *y, const float *x, const uint8_t *W,
+                     const uint8_t *S, int in, int out, int blk_r, int blk_c)
+{
+    fp4_n(y, x, W, S, in, out, blk_r, blk_c, 1);
 }
