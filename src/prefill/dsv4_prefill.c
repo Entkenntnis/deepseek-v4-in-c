@@ -36,7 +36,7 @@
 #include "dsv4_prefill.h"
 #include "dsv4_matmul.h"
 
-/* Primitives defined in src/model/dsv4_layer.c and src/core/dsv4_*.c. */
+/* Primitives defined in src/model/dsv4_layer.c and src/compute/dsv4_*.c. */
 void dsv4_rmsnorm(float *, const float *, const float *, int, float);
 void dsv4_swiglu(float *, const float *, const float *, int, float);
 void dsv4_route(int *, float *, float *, float *, const float *,

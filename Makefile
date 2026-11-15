@@ -4,22 +4,27 @@
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
             -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off
-INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party -Isrc/core -Isrc/io \
-            -Isrc/cache -Isrc/model -Isrc/tokenizer -Isrc/prefill
+INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party -Isrc/compute \
+            -Isrc/runtime -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer \
+            -Isrc/prefill
 LDFLAGS  ?= -lm -fopenmp -pthread
 DEPFLAGS := -MMD -MP
 
 BIN := bin
 OBJ := build/obj
 
-ENGINE_SRC := $(wildcard src/core/*.c src/io/*.c src/cache/*.c src/model/*.c \
-                        src/tokenizer/*.c src/prefill/*.c)
-ENGINE_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(ENGINE_SRC))
-SERVE_OBJ  := $(OBJ)/src/cli/dsv4_serve.o
+COMPUTE_SRC := $(wildcard src/compute/*.c)
+RUNTIME_SRC := $(wildcard src/runtime/*.c)
+ENGINE_SRC  := $(COMPUTE_SRC) $(RUNTIME_SRC) \
+               $(wildcard src/io/*.c src/cache/*.c src/model/*.c \
+                         src/tokenizer/*.c src/prefill/*.c)
+ENGINE_OBJ  := $(patsubst src/%.c,$(OBJ)/src/%.o,$(ENGINE_SRC))
+SERVE_OBJ   := $(OBJ)/src/cli/dsv4_serve.o
 
-CORE_SRC   := $(wildcard src/core/*.c)
-CORE_OBJ   := $(patsubst src/%.c,$(OBJ)/src/%.o,$(CORE_SRC))
-BENCH_OBJ  := $(OBJ)/bench/bench.o
+COMPUTE_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(COMPUTE_SRC))
+RUNTIME_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(RUNTIME_SRC))
+BENCH_SRC   := $(wildcard bench/*.c)
+BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
 
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
@@ -46,7 +51,7 @@ $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/bench: $(BENCH_OBJ) $(CORE_OBJ)
+$(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
