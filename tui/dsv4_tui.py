@@ -352,8 +352,8 @@ class DemoBackend:
         }
 
     def _prof(self, elapsed: float) -> dict:
-        # Proportions roughly matching BENCHMARK.md: disk is the biggest single
-        # component, then attention, then expert matmul.
+        # Proportions roughly matching the decode profile: disk is the biggest
+        # single component, then attention, then expert matmul.
         p = {
             "hc": elapsed * 0.04,
             "attn": elapsed * 0.21,

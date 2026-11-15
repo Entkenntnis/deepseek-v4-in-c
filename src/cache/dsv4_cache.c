@@ -662,8 +662,8 @@ const DSV4ExpertW *dsv4_cache_get(DSV4Cache *c, int layer, int expert)
  * dsv4_cache_get_many_begin is expected to be running a full-width OpenMP
  * matmul between begin and end, and an inner parallel region opened from
  * inside that would either collapse to a single thread -- taking the reads
- * back to queue depth one, which bench/cache_bw.c measures as a 25% loss --
- * or oversubscribe every core against the very matmul it is meant to hide
+ * back to queue depth one, which measured as a 25% loss -- or oversubscribe
+ * every core against the very matmul it is meant to hide
  * behind.
  *
  * A pool and not a thread per batch: 43 layers times 26 tokens is ~1,100
@@ -772,8 +772,8 @@ static void reader_pool_start(DSV4Cache *c)
     /* HOW WIDE SHOULD THE POOL BE? topk. THE PLAUSIBLE ARGUMENT FOR LESS IS
      * WRONG, AND IT WAS MEASURED RATHER THAN ARGUED.
      *
-     * The argument: bench/cache_bw.c's queue-depth sweep says this drive
-     * plateaus by QD2-4 and is flat to 32, so readers past the plateau return
+     * The argument: the queue-depth sweep says this drive plateaus by QD2-4
+     * and is flat to 32, so readers past the plateau return
      * no bandwidth -- while the A/B that landed the overlap measured the expert
      * matmul 34% SLOWER during streaming, DMA contending with a memory-bound
      * FP4 kernel. So a narrower pool should buy back matmul time for free.

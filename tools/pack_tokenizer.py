@@ -65,8 +65,9 @@ def byte_level_alphabet():
 def main():
     model = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1
                                else "~/models/dsv4-flash")
-    out = pathlib.Path(sys.argv[2] if len(sys.argv) > 2
-                       else "tests/fixtures/tok/tokenizer.bin")
+    out = pathlib.Path(os.path.expanduser(
+        sys.argv[2] if len(sys.argv) > 2
+        else "~/colibri-models/dsv4-tok-flash.bin"))
     out.parent.mkdir(parents=True, exist_ok=True)
 
     tj = json.loads(open(os.path.join(model, "tokenizer.json"),

@@ -7,8 +7,8 @@
  *     CPUs 0-3   P-cores (Lion Cove), 4.7-4.8 GHz
  *     CPUs 4-7   LP E-cores (Skymont), 3.7 GHz
  *
- * The measurements behind the defaults live in BENCHMARK.md. In short: E-cores
- * are 2.4x slower at the FP4 expert kernel and worse still at the FP64 mHC
+ * The measurements behind the defaults, in short: E-cores are 2.4x slower at
+ * the FP4 expert kernel and worse still at the FP64 mHC
  * dot products, while FP8 attention is nearly as fast on them. The compute team
  * therefore runs on the P-cores and the expert-reader pthreads can be sent to
  * the E-cores, where they mostly sleep in pread().

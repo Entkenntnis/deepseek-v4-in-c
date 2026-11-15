@@ -4,8 +4,8 @@
 
 WHY THIS EXISTS
     colibri reports "71.6% predictable one layer ahead" and ships a prefetcher
-    on the strength of it. REFINEMENT_PLAN.md item 10 says the same idea is
-    worth testing here before any engine code is written, because the objection
+    on the strength of it. The same idea is worth testing here before any engine
+    code is written, because the objection
     raised in-thread is real: DeepSeek trains for load balance across experts on
     purpose, so routing may simply not repeat. That is a property of the model
     and the input, not something to reason about from first principles.

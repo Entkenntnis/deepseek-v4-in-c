@@ -79,7 +79,7 @@ static double pnow(void)
  * contains the router, the shared expert and the routed experts at once. That
  * is not enough to tell a kernel problem from a scheduling problem, so the
  * prefill path carries its own timers. `f_*` are GFLOP (2 x MAC) for the kernel
- * family, which is what makes the seconds comparable with bench/matmul_bw:
+ * family, which is what makes the seconds comparable across families:
  *
  *     effective GF/s = f_<family> / seconds in <family>
  *

@@ -113,8 +113,8 @@ static inline __m256d load4_bf16(const uint16_t *row, int i)
  * The scalar definition (dsv4_e4m3_to_f32 in dsv4_quant.h) is ~20 ALU ops per
  * weight once GCC inlines it: sign mask, exponent shift, bias add, mantissa
  * shift, a branch for subnormals and one for NaNs. The useful operation next to
- * it is one quarter of a vfmadd. Measured with bench/fp8_decode.c at Flash's
- * geometries, replacing the computed decode with four loads from this table is
+ * it is one quarter of a vfmadd. Measured at Flash's geometries, replacing the
+ * computed decode with four loads from this table is
  * 6.7-10x faster (45-59 GF/s against 3.5-7 GF/s) and bitwise identical.
  *
  * The table is generated from dsv4_e4m3_to_f32 and the matmul gate compares
@@ -273,9 +273,9 @@ static double *widen_x(const float *x, int in)
 /* ---------------------------------------------------------------- kernels ---
  * bf16 is emitted here as `dsv4_matmul_bf16_avx2`, the only path the engine
  * dispatches to. Its scalar reference, the FP4 scalar body and the old
- * double-accumulator FP8 body live in bench/matmul_reference.c, where the
- * gates and microbenchmarks compare against them. The production FP8 entry
- * point is the row-block hybrid path below.
+ * double-accumulator FP8 body live in tests/unit/test_matmul.c, where the
+ * matmul gate compares against them. The production FP8 entry point is the
+ * row-block hybrid path below.
  *
  * WHY STATIC SCHEDULING. The rows are independent and equal in cost, and the
  * default compute team is four threads pinned to the four identical P-cores, so
@@ -317,7 +317,7 @@ void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
 
 /* FP8 WITH A FLOAT-INNER BLOCK AND A DOUBLE FOLD.
  *
- * The old double-accumulator kernel lives in bench/matmul_reference.c. It
+ * The old double-accumulator kernel lives in tests/unit/test_matmul.c. It
  * converts every weight f32 -> f64 (four `vcvtps2pd` per 16 weights).
  * `perf annotate` put ~33% of the FP8 kernel's cycles on that conversion, and
  * the FP8 kernel is ~52% of all decode compute. FP4 already took the same trade
@@ -327,10 +327,8 @@ void dsv4_matmul_fp4_avx2(float *y, const float *x, const uint8_t *W,
  *
  * This is deliberately NOT bitwise-equal to the scalar double reference. The
  * factory gate bounds the L2 relative error (measured ~8e-8), exactly as it
- * already does for FP4. bench/matmul_variants A/Bs the two kernels. */
-/* The horizontal sum used by the production float-inner kernels. The
- * experiment variant that replaces the two vhaddps with an add/shuffle tree
- * lives in bench/matmul_experiments.c. */
+ * already does for FP4. */
+/* The horizontal sum used by the production float-inner kernels. */
 static inline float hsum_old(__m256 s)
 {
     __m128 lo = _mm256_castps256_ps128(s);

@@ -57,6 +57,134 @@ void dsv4_matmul_fp8_f32(float *, const float *, const uint8_t *,
                          const uint8_t *, int, int, int, int);
 #endif
 
+/* ------------------------------------------------------------- oracle ---
+ * Scalar double-precision reference bodies. They live in this translation
+ * unit so the gate compares the production kernels against an independent
+ * implementation without a separate build target. */
+#define BLOCK_DOT_S(LOAD)                                                      \
+    do {                                                                       \
+        double a[16] = {0};                                                    \
+        int i = 0;                                                             \
+        for (; i + 15 < n; i += 16)                                            \
+            for (int l = 0; l < 16; l++)                                       \
+                a[l] = fma(LOAD(i + l), (double)xb[i + l], a[l]);              \
+        double b0 = (a[0] + a[4]) + (a[8]  + a[12]);                           \
+        double b1 = (a[1] + a[5]) + (a[9]  + a[13]);                           \
+        double b2 = (a[2] + a[6]) + (a[10] + a[14]);                           \
+        double b3 = (a[3] + a[7]) + (a[11] + a[15]);                           \
+        acc = (b0 + b1) + (b2 + b3);                                           \
+        for (; i < n; i++) acc = fma(LOAD(i), (double)xb[i], acc);             \
+    } while (0)
+
+static inline double bf16d(uint16_t h)
+{
+    union { uint32_t u; float f; } v;
+    v.u = (uint32_t)h << 16;
+    return (double)v.f;
+}
+
+#define LOAD1_BF16(k) bf16d(row[k])
+#define LOAD1_FP8(k)  ((double)dsv4_e4m3_to_f32(wb[k]))
+#define LOAD1_FP4(k)  ((double)dsv4_fp4_at(row, (int64_t)c0 + (k)))
+
+static double *widen_x(const float *x, int in)
+{
+    double *d = (double *)malloc((size_t)in * sizeof *d);
+    if (!d) {
+        fprintf(stderr, "dsv4_matmul: could not widen %d activations\n", in);
+        return NULL;
+    }
+    for (int i = 0; i < in; i++) d[i] = (double)x[i];
+    return d;
+}
+
+#define BLOCK_DOT_S2(LOAD1, ...) BLOCK_DOT_S(LOAD1)
+
+#define GEN_FP8_BODY(NAME, DOT)                                                \
+void NAME(float *y, const float *x, const uint8_t *W,                          \
+                          const uint8_t *S, int in, int out,                   \
+                          int blk_r, int blk_c)                                \
+{                                                                              \
+    const int sc = (in + blk_c - 1) / blk_c;                                   \
+    double *xd = widen_x(x, in);                                               \
+    if (!xd) return;                                                           \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
+    for (int o = 0; o < out; o++) {                                            \
+        const uint8_t *rw = W + (size_t)o * in;                                \
+        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;                    \
+        double total = 0.0;                                                    \
+        int bi = 0;                                                            \
+        for (int c0 = 0; c0 < in; c0 += blk_c) {                               \
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;               \
+            const uint8_t *wb  = rw + c0;                                      \
+            const float   *xb  = x + c0;                                       \
+            const double  *xdb = xd + c0; (void)xdb;                           \
+            double acc;                                                        \
+            DOT(LOAD1_FP8);                                                    \
+            /* One multiply per block, as kernel.py does -- not per element. */\
+            total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);               \
+        }                                                                      \
+        y[o] = (float)total;                                                   \
+    }                                                                          \
+    free(xd);                                                                  \
+}
+
+#define GEN_BF16(SUF, DOT)                                                     \
+void dsv4_matmul_bf16##SUF(float *y, const float *x, const uint16_t *W,        \
+                           int in, int out)                                    \
+{                                                                              \
+    double *xd = widen_x(x, in);                                               \
+    if (!xd) return;                                                           \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
+    for (int o = 0; o < out; o++) {                                            \
+        const uint16_t *row = W + (size_t)o * in;                              \
+        const float  *xb  = x;                                                 \
+        const double *xdb = xd; (void)xdb;                                     \
+        const int n = in;                                                      \
+        double acc;                                                            \
+        DOT(LOAD1_BF16, LOAD4_BF16);                                           \
+        y[o] = (float)acc;                                                     \
+    }                                                                          \
+    free(xd);                                                                  \
+}
+
+#define GEN_FP4_SCALAR(SUF)                                                    \
+void dsv4_matmul_fp4##SUF(float *y, const float *x, const uint8_t *W,          \
+                          const uint8_t *S, int in, int out,                   \
+                          int blk_r, int blk_c)                                \
+{                                                                              \
+    const int sc = (in + blk_c - 1) / blk_c;                                   \
+    double *xd = widen_x(x, in);                                               \
+    if (!xd) return;                                                           \
+    _Pragma("omp parallel for schedule(static) if (out > 64)")                  \
+    for (int o = 0; o < out; o++) {                                            \
+        /* Stored row is in/2 bytes wide. Getting this stride wrong reads half  \
+         * a row of the wrong values and still produces finite numbers. */     \
+        const uint8_t *row = W + (size_t)o * ((size_t)in / 2);                 \
+        const uint8_t *srow = S + (size_t)(o / blk_r) * sc;                    \
+        double total = 0.0;                                                    \
+        int bi = 0;                                                            \
+        for (int c0 = 0; c0 < in; c0 += blk_c) {                               \
+            const int n = (in - c0 < blk_c) ? (in - c0) : blk_c;               \
+            const float  *xb  = x + c0;                                        \
+            const double *xdb = xd + c0; (void)xdb;                            \
+            double acc;                                                        \
+            BLOCK_DOT_S2(LOAD1_FP4);                                           \
+            total += acc * (double)dsv4_e8m0_to_f32(srow[bi++]);               \
+        }                                                                      \
+        y[o] = (float)total;                                                   \
+    }                                                                          \
+    free(xd);                                                                  \
+}
+
+/* The scalar bf16 body ignores the four-wide loader, so it can be a no-op. */
+#undef LOAD4_BF16
+#define LOAD4_BF16(k) 0
+
+GEN_BF16(_scalar, BLOCK_DOT_S2)
+GEN_FP4_SCALAR(_scalar)
+GEN_FP8_BODY(dsv4_matmul_fp8_scalar, BLOCK_DOT_S2)
+
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \
     if (!(cond)) { printf("  FAIL  "); printf(__VA_ARGS__); printf("\n");      \

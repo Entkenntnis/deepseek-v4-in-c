@@ -3,7 +3,6 @@
  * Sized for exactly what this project reads and no more:
  *   - safetensors headers (the tensor index at the front of each shard)
  *   - config.json and tokenizer_config.json
- *   - the reference fixtures under tests/fixtures/ (prompt_ids / full_ids)
  *
  * It is deliberately incomplete: no \uXXXX escapes, no exotic number syntax. Those do
  * not occur in the inputs above, and supporting them would add parsing surface to code
