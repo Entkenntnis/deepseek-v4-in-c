@@ -4,22 +4,25 @@
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
             -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off
-INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party -Isrc/compute \
-            -Isrc/runtime -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer \
-            -Isrc/prefill
+INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party \
+            -Isrc/00_base -Isrc/10_compute -Isrc/20_runtime -Isrc/30_tokenizer \
+            -Isrc/40_io -Isrc/50_loader -Isrc/60_cache -Isrc/70_decode \
+            -Isrc/80_prefill
 LDFLAGS  ?= -lm -fopenmp -pthread
 DEPFLAGS := -MMD -MP
+
+# Plain `make` has always run the test suite; keep that behaviour.
+.DEFAULT_GOAL := test
 
 BIN := bin
 OBJ := build/obj
 
-COMPUTE_SRC := $(wildcard src/compute/*.c)
-RUNTIME_SRC := $(wildcard src/runtime/*.c)
-ENGINE_SRC  := $(COMPUTE_SRC) $(RUNTIME_SRC) \
-               $(wildcard src/io/*.c src/cache/*.c src/model/*.c \
-                         src/tokenizer/*.c src/prefill/*.c)
+COMPUTE_SRC := $(wildcard src/10_compute/*.c)
+RUNTIME_SRC := $(wildcard src/20_runtime/*.c)
+ENGINE_SRC  := $(filter-out src/90_cli/%,$(wildcard src/*/*.c))
 ENGINE_OBJ  := $(patsubst src/%.c,$(OBJ)/src/%.o,$(ENGINE_SRC))
-SERVE_OBJ   := $(OBJ)/src/cli/dsv4_serve.o
+CLI_SRC     := $(wildcard src/90_cli/*.c)
+SERVE_OBJ   := $(patsubst src/%.c,$(OBJ)/src/%.o,$(CLI_SRC))
 
 COMPUTE_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(COMPUTE_SRC))
 RUNTIME_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(RUNTIME_SRC))
@@ -30,8 +33,11 @@ TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 
-.PHONY: test serve tui bench e2e clean
+.PHONY: test serve tui bench e2e clean check
 .SECONDARY: $(TEST_OBJ)
+
+check:
+	python3 tools/check_src.py
 
 test: $(TEST_BIN)
 	@set -e; for t in $(TEST_BIN); do echo; ./$$t; done

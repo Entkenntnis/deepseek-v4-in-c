@@ -3,7 +3,7 @@
  *
  * One process, one table, no disk. Every weight matrix is allocated in RAM and
  * filled with a deterministic, realistic fixture before it is timed. The
- * benchmark links against src/compute and src/runtime only; it never opens a
+ * benchmark links against src/10_compute and src/20_runtime only; it never opens a
  * checkpoint, a trunk or the expert cache. A regression here is a CPU/kernel
  * regression, not an I/O one.
  *
