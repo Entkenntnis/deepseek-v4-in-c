@@ -74,6 +74,11 @@ void dsv4_prefill_free(DSV4Prefill *p);
  * range starts writing KV/compressor state there is no way back. */
 int  dsv4_prefill_reserve(DSV4Prefill *p, int n_tokens);
 
+/* Release the block-sized buffers but keep the prefill engine usable. Call once
+ * a range has finished: keeping them pinned turns the longest prompt ever seen
+ * into a permanent memory high-water mark. */
+void dsv4_prefill_release(DSV4Prefill *p);
+
 /* Run tokens ids[0..n-1] through every layer as one block, at absolute
  * positions pos0..pos0+n-1. On return `h_out` is the last token's residual
  * stream, ready for the output head.

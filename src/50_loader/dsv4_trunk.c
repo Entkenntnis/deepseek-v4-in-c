@@ -71,27 +71,37 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
         npin++;
     }
     tr->npin = npin;
-    tr->nslot = 1 + (int)(left / tr->slot_bytes);
-    if (tr->nslot < 1) tr->nslot = 1;
     /* Never more slots than unpinned layers to put in them: a generous budget
      * otherwise asks for thousands of slots and the allocation fails, so an
-     * over-provisioned machine could not open the trunk at all. */
+     * over-provisioned machine could not open the trunk at all.
+     *
+     * Zero is the right answer when every layer is pinned. The old clamp kept
+     * one slot "just in case", which allocated 165 MB on Flash that bind() can
+     * never touch (its ring branch requires L >= npin) and charged it against
+     * the budget, costing the expert cache slots. */
     {
         const int tail = tr->n_layers - tr->npin;
-        const int cap = tail > 0 ? tail : 1;
-        if (tr->nslot > cap) tr->nslot = cap;
+        if (tail <= 0) {
+            tr->nslot = 0;
+        } else {
+            tr->nslot = 1 + (int)(left / tr->slot_bytes);
+            if (tr->nslot < 1) tr->nslot = 1;
+            if (tr->nslot > tail) tr->nslot = tail;
+        }
     }
 
     tr->pin = (unsigned char **)calloc((size_t)(npin ? npin : 1), sizeof(void *));
-    tr->layer_of = (int *)malloc((size_t)tr->nslot * sizeof(int));
+    tr->layer_of = tr->nslot
+                 ? (int *)malloc((size_t)tr->nslot * sizeof(int)) : NULL;
     tr->slot_of  = (int32_t *)malloc((size_t)tr->n_layers * sizeof(int32_t));
-    if (!tr->pin || !tr->layer_of || !tr->slot_of) {
+    if (!tr->pin || (tr->nslot && !tr->layer_of) || !tr->slot_of) {
         dsv4_trunk_close(tr); return -1;
     }
     for (int i = 0; i < tr->nslot; i++) tr->layer_of[i] = -1;
     for (int i = 0; i < tr->n_layers; i++) tr->slot_of[i] = -1;
 
-    if (posix_memalign((void **)&tr->ring, DSV4_TRUNK_ALIGN,
+    if (tr->nslot > 0 &&
+        posix_memalign((void **)&tr->ring, DSV4_TRUNK_ALIGN,
                        (size_t)tr->nslot * (size_t)tr->slot_bytes) != 0) {
         dsv4_trunk_close(tr); return -1;
     }

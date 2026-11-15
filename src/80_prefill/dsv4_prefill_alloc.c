@@ -44,6 +44,45 @@ static int grow_i(int **pp, int cap, size_t per)
     return 0;
 }
 
+/* Per-token prefill state. Sized from what the block path actually reads:
+ * attention's compressor/indexer working rows plus the one accumulator that
+ * must survive the whole layer. Sizing this like the decode DSV4Scratch wasted
+ * 5.7x the memory and made a long prompt look far more expensive than it is. */
+static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c, int max_pos)
+{
+    memset(s, 0, sizeof *s);
+    const size_t hd    = (size_t)c->head_dim;
+    const size_t nidx  = (size_t)c->sliding_window + (size_t)c->index_topk;
+    /* Only a ratio-4 layer runs the indexer, so n_compressed <= max_pos/4. */
+    const size_t ncomp = (size_t)max_pos / 4 + 1;
+    const size_t nf    = hd + ncomp + nidx
+                       + (size_t)c->topk * (size_t)c->hidden;
+
+    float *a = (float *)calloc(nf, sizeof(float));
+    if (!a) return -1;
+    s->arena = a;
+
+    float *p = a;
+    s->kv = p;           p += hd;
+    s->idx_scores = p;   p += ncomp;
+    s->attn_scratch = p; p += nidx;
+    s->expert_acc = p;   p += (size_t)c->topk * (size_t)c->hidden;
+    s->idx_cap = (int)ncomp;
+    s->expert_acc_stride = c->hidden;
+
+    s->idxs = (int *)calloc(nidx, sizeof(int));
+    if (!s->idxs) { free(a); memset(s, 0, sizeof *s); return -1; }
+    return 0;
+}
+
+static void tok_free(DSV4PrefillTok *s)
+{
+    if (!s) return;
+    free(s->arena);
+    free(s->idxs);
+    memset(s, 0, sizeof *s);
+}
+
 int dsv4_prefill_reserve(DSV4Prefill *p, int n)
 {
     if (!p || n <= 0) return -1;
@@ -101,15 +140,14 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
         return -1;
 
     if (p->scratch_cap < cap) {
-        DSV4Scratch *ns = (DSV4Scratch *)xrealloc(
+        DSV4PrefillTok *ns = (DSV4PrefillTok *)xrealloc(
             p->scratch, (size_t)cap * sizeof *ns);
         if (!ns) return -1;
         p->scratch = ns;
         for (int t = p->scratch_cap; t < cap; t++) {
-            memset(&p->scratch[t], 0, sizeof p->scratch[t]);
-            if (dsv4_scratch_init(&p->scratch[t], c, p->opt.max_pos) != 0) {
-                for (int j = p->scratch_cap; j <= t; j++)
-                    dsv4_scratch_free(&p->scratch[j]);
+            if (tok_init(&p->scratch[t], c, p->opt.max_pos) != 0) {
+                for (int j = p->scratch_cap; j < t; j++)
+                    tok_free(&p->scratch[j]);
                 return -1;
             }
         }
@@ -124,10 +162,16 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
         4 * (size_t)c->head_dim +
         (size_t)c->index_n_heads * (size_t)c->index_head_dim +
         (size_t)c->index_n_heads;
-    fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block "
-                    "buffers; matmul tile <=%d rows\n",
+    const size_t nidx = (size_t)c->sliding_window + (size_t)c->index_topk;
+    const size_t tok_f = (size_t)c->head_dim + (size_t)p->opt.max_pos / 4 + 1
+                       + nidx + (size_t)c->topk * (size_t)d;
+    const size_t tok_bytes = sizeof(DSV4PrefillTok) + tok_f * sizeof(float)
+                           + nidx * sizeof(int);
+    fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block + "
+                    "%.1f MB token state (%.1f KB/token); matmul tile <=%d rows\n",
             cap, (double)cap * (double)per_tok * sizeof(float) / 1048576.0,
-            DSV4_MAX_BATCH);
+            (double)cap * (double)tok_bytes / 1048576.0,
+            (double)tok_bytes / 1024.0, DSV4_MAX_BATCH);
     return 0;
 }
 
@@ -166,25 +210,51 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     return 0;
 }
 
-void dsv4_prefill_free(DSV4Prefill *p)
+/* Drop everything scaled by the block length. Called after each turn: prefill
+ * is the only user of these buffers, and the next turn's allocation costs
+ * milliseconds against a prefill that costs seconds. Keeps p->cap at 0 so a
+ * long prompt cannot become a permanent high-water mark. */
+void dsv4_prefill_release(DSV4Prefill *p)
 {
     if (!p) return;
     if (p->scratch) {
         for (int t = 0; t < p->scratch_cap; t++)
-            dsv4_scratch_free(&p->scratch[t]);
+            tok_free(&p->scratch[t]);
         free(p->scratch);
+        p->scratch = NULL;
     }
     free(p->H); free(p->x1); free(p->resid); free(p->post); free(p->comb);
     free(p->mixes); free(p->qr); free(p->q); free(p->kv); free(p->o);
     free(p->ogrp); free(p->xg); free(p->yg); free(p->gate);
     free(p->gate_orig); free(p->topk_idx); free(p->topk_w); free(p->sh_gate);
     free(p->sh_up); free(p->sh_mid); free(p->sh_out);
-    free(p->out); free(p->xh);
-    free(p->ex_tok); free(p->ex_k); free(p->ex_count); free(p->ex_order);
-    free(p->ex_off); free(p->ex_fill); free(p->ex_seen);
+    free(p->out);
+    free(p->ex_tok); free(p->ex_k);
     free(p->ex_x); free(p->ex_gate); free(p->ex_up); free(p->ex_mid);
     free(p->ex_out);
     free(p->comp_kv_b); free(p->comp_sc_b);
     free(p->idx_qb); free(p->idx_wb);
+
+    p->H = p->x1 = p->resid = p->post = p->comb = p->mixes = NULL;
+    p->qr = p->q = p->kv = p->o = p->ogrp = p->xg = p->yg = NULL;
+    p->gate = p->gate_orig = NULL; p->topk_idx = NULL; p->topk_w = NULL;
+    p->sh_gate = p->sh_up = p->sh_mid = p->sh_out = NULL;
+    p->out = NULL;
+    p->ex_tok = p->ex_k = NULL; p->ex_x = NULL;
+    p->ex_gate = p->ex_up = p->ex_mid = p->ex_out = NULL;
+    p->comp_kv_b = p->comp_sc_b = NULL;
+    p->idx_qb = p->idx_wb = NULL;
+    p->cap = 0;
+    p->scratch_cap = 0;
+    p->n = 0;
+}
+
+void dsv4_prefill_free(DSV4Prefill *p)
+{
+    if (!p) return;
+    dsv4_prefill_release(p);
+    free(p->xh);
+    free(p->ex_count); free(p->ex_order); free(p->ex_off);
+    free(p->ex_fill); free(p->ex_seen);
     free(p);
 }

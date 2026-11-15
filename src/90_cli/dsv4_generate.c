@@ -79,6 +79,7 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
         fprintf(stderr, "serve: cannot allocate a %d-token prefill block; "
                         "falling back to the per-token path for this turn\n",
                 n_added);
+        dsv4_prefill_release(e->pf);
         use_batched = 0;
     }
     dsv4_emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat",
@@ -94,9 +95,14 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
     e->prefill_tokens = 0;
     const double tp0 = dsv4_now_s();
     if (use_batched) {
-        if (dsv4_prefill_range(e->pf, e->ids + start_pos, n_added, start_pos,
-                               e->cs_d, e->sn_d, e->cs_c, e->sn_c,
-                               e->h) != 0) {
+        const int rc = dsv4_prefill_range(e->pf, e->ids + start_pos, n_added,
+                                          start_pos, e->cs_d, e->sn_d,
+                                          e->cs_c, e->sn_c, e->h);
+        /* This turn is the only user of the block buffers. Drop them now
+         * instead of turning the longest prompt ever seen into a permanent
+         * high-water mark for the resident engine. */
+        dsv4_prefill_release(e->pf);
+        if (rc != 0) {
             dsv4_emit_error("block prefill failed at position %d; reset the "
                             "context before continuing", start_pos);
             return;

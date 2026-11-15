@@ -26,6 +26,7 @@ void dsv4_engine_free(Engine *e)
 
 int dsv4_engine_reset_context(Engine *e)
 {
+    dsv4_prefill_release(e->pf);
     for (int L = 0; L < e->c.n_layers; L++) {
         dsv4_state_free(&e->lst[L]);
         if (dsv4_state_init(&e->lst[L], &e->c, L, e->maxpos) != 0) return -1;

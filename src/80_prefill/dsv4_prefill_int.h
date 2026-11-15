@@ -37,6 +37,25 @@ typedef struct {
     int             n;
 } DSV4PMJob;
 
+/* Per-token state the sequential prefill stages still need.
+ *
+ * Deliberately NOT a DSV4Scratch: that type carries the whole decode working
+ * set (mHC, q/kv/o, router, shared expert, ...), none of which the block path
+ * uses. Only expert_acc has to be per token -- it stays live from routing until
+ * the weighted sum after the expert-union pass. Everything else here is consumed
+ * inside the per-token attention loop, and the count==1 expert path borrows the
+ * block-wide ex_* rows instead of owning more buffers. */
+typedef struct {
+    float *kv;              /* [head_dim] compressor output                  */
+    float *idx_scores;      /* [max_pos/4 + 1] compressed-row scores         */
+    int    idx_cap;
+    int   *idxs;            /* [sliding_window + index_topk]                  */
+    float *attn_scratch;    /* [sliding_window + index_topk]                  */
+    float *expert_acc;      /* [topk][hidden]                                 */
+    int    expert_acc_stride;
+    void  *arena;           /* one allocation backing the float buffers       */
+} DSV4PrefillTok;
+
 struct DSV4Prefill {
     const DSV4Cfg   *c;
     DSV4Trunk       *tr;
@@ -45,7 +64,7 @@ struct DSV4Prefill {
     const DSV4ModelW *mw;
     DSV4PrefillOpts  opt;
     int              cap;          /* allocated token rows in the block buffers */
-    int              scratch_cap;  /* allocated DSV4Scratch entries */
+    int              scratch_cap;  /* allocated DSV4PrefillTok entries */
     int              n;            /* tokens in the block being run */
 
     float *H;          /* [B][hc*hidden] */
@@ -70,7 +89,7 @@ struct DSV4Prefill {
     float *sh_out;     /* [B][hidden] */
     float *out;        /* [B][hidden] */
     float *xh;         /* [hidden] embed scratch */
-    DSV4Scratch *scratch; /* [B] per-token scratch for the sequential parts */
+    DSV4PrefillTok *scratch; /* [B] per-token state for the sequential parts */
 
     /* Expert-union scheduling: one bucket per expert for the whole layer. */
     int   *ex_tok, *ex_k;    /* [B*topk] request -> token and k              */
@@ -112,8 +131,8 @@ int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                       int n, const int32_t *ids);
 
 void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
-                         const DSV4ExpertW *e, DSV4Scratch *s,
-                         int hidden, int inter, float limit);
+                         const DSV4ExpertW *e, int hidden, int inter,
+                         float limit);
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
                                 int count, const int *tok, const int *ks);
 int  dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n);

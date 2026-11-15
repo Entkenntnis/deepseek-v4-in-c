@@ -12,20 +12,27 @@
 /* Routed-expert matmul, timed per matrix so FP4 MM is not confused with the
  * SwiGLU that sits between w1/w3 and w2. */
 void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
-                         const DSV4ExpertW *e, DSV4Scratch *s,
-                         int hidden, int inter, float limit)
+                         const DSV4ExpertW *e, int hidden, int inter,
+                         float limit)
 {
+    /* The count==1 path runs one token at a time, so it borrows row 0 of the
+     * block-wide expert work buffers instead of making every token carry its
+     * own three moe_inter-sized temporaries. */
+    float *gate = p->ex_gate;
+    float *up   = p->ex_up;
+    float *mid  = p->ex_mid;
+
     double t0 = dsv4_now_s();
-    dsv4_mmq(s->expert_gate, x, &e->w1);
-    dsv4_mmq(s->expert_up,   x, &e->w3);
+    dsv4_mmq(gate, x, &e->w1);
+    dsv4_mmq(up,   x, &e->w3);
     p->st.expert_mm += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();
-    dsv4_swiglu(s->expert_out, s->expert_gate, s->expert_up, inter, limit);
+    dsv4_swiglu(mid, gate, up, inter, limit);
     p->st.expert_swiglu += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();
-    dsv4_mmq(out, s->expert_out, &e->w2);
+    dsv4_mmq(out, mid, &e->w2);
     p->st.expert_mm += dsv4_now_s() - t0;
 
     /* w1 [inter,hidden], w3 [inter,hidden], w2 [hidden,inter] -> 6*inter*hidden
@@ -46,9 +53,9 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
 
     if (count == 1) {
         const int t = tok[0], k = ks[0];
-        DSV4Scratch *s = &p->scratch[t];
+        DSV4PrefillTok *s = &p->scratch[t];
         dsv4_prefill_expert(p, s->expert_acc + (size_t)k * s->expert_acc_stride,
-                            p->x1 + (size_t)t * d, ew, s, d, rinter,
+                            p->x1 + (size_t)t * d, ew, d, rinter,
                             c->swiglu_limit);
         p->t_moe += dsv4_now_s() - tm0;
         return;
@@ -82,7 +89,7 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     t0 = dsv4_now_s();
     for (int j = 0; j < count; j++) {
         const int t = tok[j], k = ks[j];
-        DSV4Scratch *s = &p->scratch[t];
+        DSV4PrefillTok *s = &p->scratch[t];
         memcpy(s->expert_acc + (size_t)k * s->expert_acc_stride,
                p->ex_out + (size_t)j * d, (size_t)d * sizeof(float));
     }

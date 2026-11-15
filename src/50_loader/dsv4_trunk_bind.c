@@ -101,6 +101,11 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w)
         /* Round-robin, not LRU: a cyclic scan defeats LRU entirely, and
          * round-robin over the unpinned tail makes the hit rate exactly
          * npin/n_layers rather than zero. */
+        if (tr->nslot <= 0) {
+            fprintf(stderr, "dsv4_trunk: layer %d is neither pinned nor has a "
+                            "ring slot\n", L);
+            return -1;
+        }
         const int slot = tr->next_slot;
         tr->next_slot = (tr->next_slot + 1) % tr->nslot;
         if (tr->layer_of[slot] >= 0) tr->slot_of[tr->layer_of[slot]] = -1;
