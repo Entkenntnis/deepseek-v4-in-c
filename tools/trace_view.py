@@ -9,7 +9,7 @@ one event, relative to the token's start:
 
 Examples:
     python3 tools/trace_view.py t.log --summary
-    python3 tools/trace_view.py t.log --timeline --layer 12
+    python3 tools/trace_view.py t.log --timeline --layer 12 --width 140
     python3 tools/trace_view.py t.log --note order.txt
     python3 tools/trace_view.py t.log --all-tokens --summary
 """
@@ -142,16 +142,17 @@ def print_summary(tokens, every):
                   f"{st['tail_ms']:8.3f} {st['layer_ms']:8.3f}")
 
 def pick_layer(tokens, want):
-    evs = tokens[0]["ev"]
-    layers = sorted(by_layer(evs))
+    layers = sorted(by_layer(tokens[0]["ev"]))
     if not layers:
         return None
-    if want is None:
-        return layers[0]
-    return want
+    return layers[0] if want is None else want
 
 
-def print_timeline(tokens, layer, width=100):
+def _col(t, t0, span, width):
+    return max(0, min(width - 1, int((t - t0) / span * (width - 1))))
+
+
+def print_timeline(tokens, layer, width=118):
     toks = [t for t in tokens if by_layer(t["ev"]).get(layer)]
     if not toks:
         print(f"trace_view: no events for layer {layer}", file=sys.stderr)
@@ -162,37 +163,187 @@ def print_timeline(tokens, layer, width=100):
     t0 = min(e["t"] for e in evs)
     tend = max([e["t"] for e in evs] + [t0 + st["layer_ms"] / 1000.0])
     span = max(tend - t0, 1e-9)
+    ks = sorted({e["k"] for e in evs if e["k"] >= 0})
+
+    info = {}
+    for k in ks:
+        kev = [e for e in evs if e["k"] == k]
+        hits = [e for e in kev if e["kind"] == "H"]
+        pubs = [e for e in kev if e["kind"] == "P"
+                and e["tag"] in ("read", "prefetch")]
+        if hits:
+            tags = {e["tag"] for e in hits}
+            state = ("hit/pf-wait" if "pf-wait" in tags else
+                     "hit/prefetch" if "prefetch" in tags else
+                     "hit/dup" if "dup" in tags else "hit")
+        else:
+            state = "miss"
+        info[k] = {
+            "hits": hits, "pubs": pubs,
+            "qs": [e for e in kev if e["kind"] == "Q"],
+            "expert": next((e["expert"] for e in kev
+                            if e["kind"] in ("H", "Q", "C")
+                            and e["expert"] >= 0), -1),
+            "reader": next((e["reader"] for e in pubs if e["reader"] >= 0), -1),
+            "state": state,
+            "R": next((e for e in kev if e["kind"] == "R"), None),
+        }
 
     rows = collections.defaultdict(lambda: [" "] * width)
     main = rows["main"]
-    marker = {"H": "H", "Q": "q", "R": "r", "P": "P", "C": "C", "M": "m",
-              "G": "g", "c": "c", "S": "S"}
-    for e in evs:
-        col = min(width - 1, int((e["t"] - t0) / span * (width - 1)))
-        if e["kind"] in ("W", "K", "Z", "F", "E"):
-            main[col] = {"W": "w", "K": "k", "Z": "z", "F": "F",
-                         "E": "E"}[e["kind"]]
-        else:
-            row = -1 if e["kind"] == "S" else e["k"]
-            rows[row][col] = marker.get(e["kind"], "?")
-    # Publish and hit markers are the important ones at a coarse column; let
-    # them win over a matmul that landed in the same bucket.
-    for e in evs:
-        if e["kind"] not in ("P", "H"):
-            continue
-        col = min(width - 1, int((e["t"] - t0) / span * (width - 1)))
-        rows[e["k"]][col] = e["kind"]
 
-    ks = sorted([k for k in rows if k != "main"])
+    def put(row, t, ch):
+        row[_col(t, t0, span, width)] = ch
+
+    # Reader lanes: which k each thread is serving between its R and P.
+    for e in evs:
+        if e["kind"] != "R":
+            continue
+        d = info[e["k"]]
+        pe = next((p for p in d["pubs"] if p["reader"] == e["reader"]), None)
+        end = pe["t"] if pe else e["t"] + 1e-6
+        rr = rows[f"r{e['reader']}"]
+        ch = "p" if (pe and pe["tag"] == "prefetch") else str(e["k"])
+        for c in range(_col(e["t"], t0, span, width),
+                       _col(end, t0, span, width) + 1):
+            rr[c] = ch
+
+    # Expert lanes: queue, read, then the three matmuls of its compute.
+    for k in ks:
+        d = info[k]
+        rr = rows[f"k{k}"]
+        if d["R"] and d["pubs"]:
+            for c in range(_col(d["R"]["t"], t0, span, width),
+                           _col(d["pubs"][0]["t"], t0, span, width) + 1):
+                rr[c] = "~"
+        for q in d["qs"]:
+            put(rr, q["t"], "q")
+        for e in evs:
+            if e["kind"] == "M" and e["k"] == k:
+                ch = {"w1": "1", "w3": "3", "w2": "2"}.get(e["tag"], "#")
+                for c in range(_col(e["t"], t0, span, width),
+                               _col(e["t"] + e["ms"] / 1000.0,
+                                    t0, span, width) + 1):
+                    rr[c] = ch
+            elif e["kind"] == "G" and e["k"] == k:
+                put(rr, e["t"], "s")
+
+    # P and H must survive a matmul that lands in the same column.
+    for k in ks:
+        for h in info[k]["hits"]:
+            put(rows[f"k{k}"], h["t"], "H")
+        for p in info[k]["pubs"]:
+            put(rows[f"k{k}"], p["t"], "P")
+
+    # Shared expert lane.
+    srow = rows["shared"]
+    for e in evs:
+        if e["kind"] == "M" and e["k"] < 0:
+            ch = {"w1": "1", "w3": "3", "w2": "2"}.get(e["tag"], "#")
+            for c in range(_col(e["t"], t0, span, width),
+                           _col(e["t"] + e["ms"] / 1000.0,
+                                t0, span, width) + 1):
+                srow[c] = ch
+        elif e["kind"] == "G" and e["k"] < 0:
+            put(srow, e["t"], "s")
+        elif e["kind"] == "S":
+            # Old traces stamped S at the shared block's start, new ones at its
+            # end. Place it after the matmuls either way.
+            sm_end = max((m["t"] + m["ms"] / 1000.0 for m in evs
+                          if m["kind"] == "M" and m["k"] < 0), default=e["t"])
+            at = (e["t"] + e["ms"] / 1000.0
+                  if e["t"] < sm_end - 1e-9 else e["t"])
+            put(srow, at, "S")
+
+    # Main lane: fill compute first, then draw the blocking windows on top.
+    for e in evs:
+        if e["kind"] == "M":
+            for c in range(_col(e["t"], t0, span, width),
+                           _col(e["t"] + e["ms"] / 1000.0,
+                                t0, span, width) + 1):
+                if main[c] == " ":
+                    main[c] = "+"
+    ordered = sorted(evs, key=lambda e: e["t"])
+    for i, e in enumerate(ordered):
+        if e["kind"] == "W":
+            end = next((o for o in ordered[i + 1:]
+                        if o["kind"] in ("K", "Z")), None)
+            if end:
+                for c in range(_col(e["t"], t0, span, width),
+                               _col(end["t"], t0, span, width) + 1):
+                    main[c] = "w"
+                put(main, end["t"], "k" if end["kind"] == "K" else "z")
+        elif e["kind"] == "F":
+            put(main, e["t"], "F")
+        elif e["kind"] == "E":
+            put(main, e["t"], "E")
+
+    # Time axis, with a step that keeps roughly eight labels.
+    axis = [" "] * width
+    raw = span * 1000.0 / 8.0
+    step = min((0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100),
+               key=lambda c: abs(c - raw))
+    for i in range(int(span * 1000.0 / step) + 1):
+        ms = i * step
+        c = _col(t0 + ms / 1000.0, t0, span, width)
+        lab = f"{ms:g}"
+        if c + len(lab) >= width:
+            continue
+        if any(axis[j] != " " for j in range(c, c + len(lab))):
+            continue
+        for j, ch in enumerate(lab):
+            axis[c + j] = ch
+
     print(f"token {tok['token']} pos {tok['pos']}  layer {layer}  "
           f"start +{t0 * 1000.0:.3f} ms  span {span * 1000.0:.3f} ms  "
           f"({width} cols, {(span * 1000.0) / width:.3f} ms/col)")
+    print()
+    out = []
     for k in ks:
-        label = "shared" if k < 0 else f"k{k}"
-        print(f"{label:>6} |{''.join(rows[k])}|")
-    print(f"{'main':>6} |{''.join(main)}|   w=wait k=wake z=end F=barrier")
-    print(f"{'':>6}  H=hit q=queue r=read P=publish C=compute m=matmul "
-          f"c=done S=shared")
+        d = info[k]
+        out.append((f"k{k} e{d['expert']} {d['state']}", rows[f"k{k}"]))
+    out.append(("shared expert", srow))
+    out.append(("main (compute thread)", main))
+    for r in sorted((x for x in rows if x.startswith("r")),
+                    key=lambda s: int(s[1:])):
+        out.append((r, rows[r]))
+    out.append(("ms", axis))
+    # Wide enough for the longest label ("k0 e115 hit/prefetch"), so every
+    # row's opening '|' is in the same column.
+    lw = max(len(label) for label, _ in out)
+    for label, cells in out:
+        print(f"{label:>{lw}} |{''.join(cells)}|")
+    print()
+    print("Legende  H = Hit, sofort nutzbar      q = Read in Queue            "
+          "~ = pread laeuft")
+    print("         P = Read fertig/publiziert   1/3/2 = w1/w3/w2-Matmul      "
+          "s = SwiGLU")
+    print("         S = Shared fertig            w = wartet in wait_any       "
+          "k = wait_any liefert k")
+    print("         z = wait_any leer            F = end()-Barriere            "
+          "E = Layer fertig")
+    print("         main: + = Compute-Thread rechnet (irgendein Expert/Shared)")
+    print("         Reader-Zeile: Ziffer = welchen k dieser Thread liest, "
+          "p = Prefetch-Read")
+    print()
+
+    print(f"{'k':>2} {'expert':>6} {'state':>12} {'reader':>6} "
+          f"{'read start':>10} {'read end':>9} {'read ms':>8} "
+          f"{'w1':>6} {'w3':>6} {'w2':>6}")
+    for k in ks:
+        d = info[k]
+        rs = (d["R"]["t"] - t0) * 1000.0 if d["R"] else None
+        re = (d["pubs"][0]["t"] - t0) * 1000.0 if d["pubs"] else None
+        s_rs = f"{rs:.3f}" if rs is not None else "-"
+        s_re = f"{re:.3f}" if re is not None else "-"
+        s_len = f"{re - rs:.3f}" if rs is not None and re is not None else "-"
+        rdr = f"r{d['reader']}" if d["reader"] >= 0 else "-"
+        def mm(which):
+            return next((e["ms"] for e in evs if e["kind"] == "M"
+                         and e["k"] == k and e["tag"] == which), 0.0)
+        print(f"{k:>2} {d['expert']:>6} {d['state']:>12} {rdr:>6} "
+              f"{s_rs:>10} {s_re:>9} {s_len:>8} "
+              f"{mm('w1'):>6.3f} {mm('w3'):>6.3f} {mm('w2'):>6.3f}")
 
 
 def fmt_event(e):
@@ -270,6 +421,8 @@ def main():
     p.add_argument("--all-tokens", action="store_true",
                    help="summary over every traced token")
     p.add_argument("--timeline", action="store_true", help="ASCII interleaving")
+    p.add_argument("--width", type=int, default=118,
+                   help="columns for --timeline (default 118)")
     p.add_argument("--note", nargs="?", const="-", default=None,
                    metavar="FILE", help="chronological digest ('-' = stdout)")
     a = p.parse_args()
@@ -295,7 +448,7 @@ def main():
     if a.timeline:
         layer = pick_layer([sel], a.layer)
         if layer is not None:
-            print_timeline([sel], layer)
+            print_timeline([sel], layer, max(40, a.width))
             did = True
     if a.note is not None:
         if a.note == "-":
