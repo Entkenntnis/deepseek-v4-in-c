@@ -1575,7 +1575,7 @@ class App:
             total = int(p.get("tokens_total") or self.prompt_tokens or 0)
             done = tokens
             if stage == "layer":
-                status = f"layers {layer}/{layers}"
+                status = f"layer {layer}/{layers}"
             elif stage == "head":
                 status = "output head"
             elif stage == "done":
@@ -1587,9 +1587,7 @@ class App:
             (" PREFILL", "section"),
             (f" {status}", "muted" if status == "done" else "active")]
         if total:
-            seg.append((f"  {done}/{total} tok", "value"))
-        if size > 1:
-            seg.append((f"  block {size}", "dim"))
+            seg.append((f"  {total} tokens", "value"))
         emit(*seg)
 
         if final:
