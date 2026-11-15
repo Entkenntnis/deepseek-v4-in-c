@@ -94,6 +94,11 @@ void dsv4_usage(const char *me)
             "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
             "       [--reader-pin off|all|p|e] [--stream-miss N (default 6)]\n"
             "\n"
+            "  Trace the routed-expert scheduling of decode tokens:\n"
+            "       [--trace FILE] [--trace-from TOKEN (default 0)]\n"
+            "       [--trace-tokens N (default 4, 0 = all)]\n"
+            "       [--trace-layers A-B]\n"
+            "\n"
             "Speaks JSON lines on stdin/stdout. Start it from the TUI:\n"
             "  python3 tui/dsv4_tui.py\n", me);
 }

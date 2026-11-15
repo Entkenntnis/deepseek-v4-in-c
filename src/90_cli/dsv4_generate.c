@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "dsv4_serve_int.h"
+#include "dsv4_trace.h"
 
 void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
                           int emit_layers)
@@ -164,8 +165,11 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
             break;
         }
 
-        if (dsv4_forward(e, id, pos, 1, emit_layers, "gen",
-                         dsv4_now_s() - t0, &top) != 0) {
+        dsv4_trace_token_begin(pos, "gen");
+        const int frc = dsv4_forward(e, id, pos, 1, emit_layers, "gen",
+                                     dsv4_now_s() - t0, &top);
+        dsv4_trace_token_end();
+        if (frc != 0) {
             e->pending_forward = 1;   /* the emitted token is not in the KV yet */
             stop = "error";
             break;

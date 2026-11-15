@@ -14,6 +14,7 @@ typedef struct DSV4Slot {
      * same expert can wait for this load instead of issuing a duplicate read. */
     int      layer, expert;
     int      pending;
+    uint8_t  origin;           /* 0 empty, 1 hash prefetch, 2 a miss read */
     uint64_t stamp;            /* for LRU */
     DSV4ExpertW w;             /* points into `bytes` */
     unsigned char *bytes;      /* 4096-aligned; O_DIRECT reads land here */

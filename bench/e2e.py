@@ -62,6 +62,18 @@ def parse_args():
     p.add_argument("--readers", type=int, default=6)
     p.add_argument("--reader-pin", default="off", choices=("off", "all", "p", "e"))
     p.add_argument("--stream-miss", type=int, default=6)
+    p.add_argument("--trace", default=None, metavar="FILE",
+                   help="write a per-token expert-scheduling trace to FILE")
+    p.add_argument("--trace-run", type=int, default=2,
+                   help="1-based run to trace (default 2, the first measured; "
+                        "an early stop=eos shifts later runs)")
+    p.add_argument("--trace-tokens", type=int, default=4,
+                   help="decode tokens to trace in that run (default 4)")
+    p.add_argument("--trace-layers", default=None, metavar="A-B",
+                   help="only record these layers")
+    p.add_argument("--trace-view", action="store_true",
+                   help="run tools/trace_view.py --summary --all-tokens "
+                        "after the turn")
     p.add_argument("--golden", default=DEFAULT_GOLDEN)
     p.add_argument("--update-golden", action="store_true")
     p.add_argument("--json", action="store_true", dest="as_json",
@@ -72,7 +84,7 @@ def parse_args():
 
 
 def build_command(a):
-    return [
+    cmd = [
         str(a.binary),
         "--model", str(a.model),
         "--trunk", str(a.trunk),
@@ -85,6 +97,15 @@ def build_command(a):
         "--reader-pin", a.reader_pin,
         "--stream-miss", str(a.stream_miss),
     ]
+    if a.trace:
+        # Decode forwards per run are gen - 1: the last emitted token is not
+        # fed back. Traced indices count forwards, not emitted tokens.
+        cmd += ["--trace", str(a.trace),
+                "--trace-from", str(max(0, (a.trace_run - 1) * (a.gen - 1))),
+                "--trace-tokens", str(a.trace_tokens)]
+        if a.trace_layers:
+            cmd += ["--trace-layers", a.trace_layers]
+    return cmd
 
 
 def send(proc, obj):
@@ -258,6 +279,9 @@ def main():
     if a.runs < 2:
         print("e2e: --runs must be at least 2 (one warm-up plus a measured run)",
               file=sys.stderr)
+        return 2
+    if a.trace and not 1 <= a.trace_run <= a.runs:
+        print("e2e: --trace-run must be within 1..--runs", file=sys.stderr)
         return 2
     if not Path(a.binary).is_file():
         print(f"e2e: {a.binary} not found; run `make serve` first", file=sys.stderr)
@@ -435,6 +459,14 @@ def main():
             print(status)
         else:
             print(f"golden: {status}", file=sys.stderr)
+
+    if a.trace:
+        print(f"trace: {a.trace} (run {a.trace_run}, "
+              f"{a.trace_tokens} token(s))", file=sys.stderr)
+        if a.trace_view:
+            view = REPO / "tools" / "trace_view.py"
+            subprocess.run([sys.executable, str(view), str(a.trace),
+                            "--summary", "--all-tokens"], check=False)
 
     # Warn about the thing the user wants to trust: run-to-run stability.
     if len(measured) >= 2:

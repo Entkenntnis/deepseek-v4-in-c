@@ -7,6 +7,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
 #include "dsv4_prof.h"
+#include "dsv4_trace.h"
 
 /* Reserve a slot for (layer, expert). Caller holds rmx. Prefers an empty slot,
  * then LRU, and never takes a slot another request in this call owns. */
@@ -30,6 +31,7 @@ int dsv4_cache_claim_slot(DSV4Cache *c, int layer, int expert,
     if (s->layer >= 0) c->evictions++;
     s->layer = layer;
     s->expert = expert;
+    s->origin = 0;
     s->pending = 1;
     s->stamp = ++c->clock;
     return victim;
@@ -40,6 +42,7 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               DSV4CacheBatch *b)
 {
     if (n > DSV4_MAX_PREFETCH) { b->rc = -1; return -1; }
+    const double t_begin = dsv4_now_s();
 
     int claimed[DSV4_MAX_PREFETCH], nclaim = 0;
     b->layer = layer;
@@ -75,6 +78,11 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             b->dup_k[b->ndup] = k;
             b->dup_j[b->ndup] = dup;
             b->ndup++;
+            if (dsv4_trace_active())
+                dsv4_trace_ev(&(DSV4TraceEv){ .kind = DSV4_TR_HIT, .layer = layer,
+                                              .k = k, .expert = e,
+                                              .slot = b->slot_of[dup],
+                                              .tag = "dup" });
             continue;
         }
 
@@ -83,11 +91,13 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             if (c->slot[i].layer == layer && c->slot[i].expert == e) {
                 found = i; break;
             }
+        double pf_wait_ms = -1.0;
         if (found >= 0 && c->slot[found].pending) {
             const double t0 = dsv4_now_s();
             while (c->slot[found].pending)
                 pthread_cond_wait(&c->rdone, &c->rmx);
-            c->pf_wait_s += dsv4_now_s() - t0;
+            pf_wait_ms = (dsv4_now_s() - t0) * 1000.0;
+            c->pf_wait_s += pf_wait_ms / 1000.0;
             if (c->slot[found].layer != layer || c->slot[found].expert != e)
                 found = -1;
         }
@@ -96,6 +106,12 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
             c->hits++;
             out[k] = &c->slot[found].w;      /* resident: safe to use NOW */
             claimed[nclaim++] = found;
+            if (dsv4_trace_active())
+                dsv4_trace_ev(&(DSV4TraceEv){
+                    .kind = DSV4_TR_HIT, .layer = layer, .k = k, .expert = e,
+                    .slot = found, .ms = pf_wait_ms > 0.0 ? pf_wait_ms : 0.0,
+                    .tag = pf_wait_ms >= 0.0 ? "pf-wait"
+                           : c->slot[found].origin == 1 ? "prefetch" : "resident" });
             continue;
         }
 
@@ -115,6 +131,11 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
         b->got[b->ntodo]    = 0;
         b->ntodo++;
     }
+
+    if (dsv4_trace_active())
+        dsv4_trace_ev(&(DSV4TraceEv){ .kind = DSV4_TR_BATCH, .layer = layer,
+                                      .n = n, .ntodo = b->ntodo,
+                                      .k = b->ndup, .at = t_begin });
 
     if (b->ntodo > 0 && c->nrth > 0) {
         int first = b->ntodo;
@@ -180,8 +201,15 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
             }
             sl->layer  = b->layer_of[j];
             sl->expert = b->expert_of[j];
+            sl->origin = 2;
             c->misses++;
             out[b->k_of[j]] = &sl->w;
+            if (dsv4_trace_active())
+                dsv4_trace_ev(&(DSV4TraceEv){
+                    .kind = DSV4_TR_PUBLISHED, .layer = b->layer_of[j],
+                    .k = b->k_of[j], .expert = b->expert_of[j],
+                    .slot = b->slot_of[j], .reader = -1,
+                    .bytes = (long long)b->got[j], .tag = "read" });
         }
     }
     for (int d = 0; d < b->ndup; d++) {
