@@ -39,6 +39,26 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
     if (dsv4_prefill_pm_stats(p, p->q, p->qr, &w->attn.wq_b, n,
                               &p->st.proj_qkv, &p->st.f_qkv)) return -1;
 
+    /* COMPRESSOR PROJECTIONS ARE GEMMs, NOT GEMVs. They read x1 and carry no
+     * position dependency, so the block's weights are read once and used for
+     * every token instead of being streamed again per token (measured 55 GF/s
+     * against ~150 for the same shapes batched). compress_step below still
+     * runs per token and reads its row. */
+    if (comp) {
+        if (dsv4_prefill_pm_stats(p, p->comp_kv_b, p->x1, &w->attn.comp.wkv,
+                                  n, &p->st.comp_proj, &p->st.f_comp))
+            return -1;
+        if (dsv4_prefill_pm_stats(p, p->comp_sc_b, p->x1, &w->attn.comp.wgate,
+                                  n, &p->st.comp_proj, &p->st.f_comp))
+            return -1;
+    }
+
+    /* The indexer projections are position independent too, but they are only
+     * needed once the layer has compressed rows. avail grows with t, so the
+     * first token that needs them batches the whole remaining suffix; earlier
+     * blocks of a fresh prompt would otherwise pay for rows nobody reads. */
+    int idx_batched = 0;
+
     for (int t = 0; t < n; t++) {
         const int pos = pos0 + t;
         float *qt = p->q + (size_t)t * (size_t)H * hd;
@@ -64,20 +84,11 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
 
         if (comp) {
             const int ratio = w->compress_ratio;
-            ts = dsv4_now_s();
-            dsv4_mmq(p->scratch[t].comp_kv_in, p->x1 + (size_t)t * d,
-                     &w->attn.comp.wkv);
-            dsv4_mmq(p->scratch[t].comp_sc_in, p->x1 + (size_t)t * d,
-                     &w->attn.comp.wgate);
-            p->st.comp_proj += dsv4_now_s() - ts;
-            p->st.f_comp += 2.0 * ((double)w->attn.comp.wkv.rows *
-                                   (double)w->attn.comp.wkv.cols +
-                                   (double)w->attn.comp.wgate.rows *
-                                   (double)w->attn.comp.wgate.cols) * 1e-9;
+            const float *ckv = p->comp_kv_b + (size_t)t * 2 * hd;
+            const float *csc = p->comp_sc_b + (size_t)t * 2 * hd;
             ts = dsv4_now_s();
             if (dsv4_compress_step(p->scratch[t].kv,
-                                   p->scratch[t].comp_kv_in,
-                                   p->scratch[t].comp_sc_in,
+                                   ckv, csc,
                                    w->attn.comp.ape, st->comp_kv,
                                    st->comp_score, pos, ratio, hd)) {
                 dsv4_rmsnorm(p->scratch[t].kv, p->scratch[t].kv,
@@ -105,31 +116,35 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
             int take = avail;
             if (w->has_idx) {
                 const double ti = dsv4_now_s();
-                ts = dsv4_now_s();
-                dsv4_mmq(p->scratch[t].idx_q, p->qr + (size_t)t * ql,
-                         &w->attn.idx.wq_b);
-                p->st.idx_proj += dsv4_now_s() - ts;
+                if (!idx_batched) {
+                    const int rem = n - t;
+                    ts = dsv4_now_s();
+                    if (dsv4_prefill_pm_stats(
+                            p, p->idx_qb + (size_t)t * c->index_n_heads *
+                                           c->index_head_dim,
+                            p->qr + (size_t)t * ql, &w->attn.idx.wq_b, rem,
+                            &p->st.idx_proj, &p->st.f_idx)) return -1;
+                    if (dsv4_prefill_pm_stats(
+                            p, p->idx_wb + (size_t)t * c->index_n_heads,
+                            p->x1 + (size_t)t * d,
+                            &w->attn.idx.weights_proj, rem,
+                            &p->st.idx_proj, &p->st.f_idx)) return -1;
+                    idx_batched = 1;
+                }
+                float *iq = p->idx_qb + (size_t)t * c->index_n_heads *
+                                        c->index_head_dim;
+                const float *iw = p->idx_wb + (size_t)t * c->index_n_heads;
                 ts = dsv4_now_s();
                 for (int h = 0; h < c->index_n_heads; h++)
-                    dsv4_rope_apply(p->scratch[t].idx_q +
-                                        (size_t)h * c->index_head_dim,
+                    dsv4_rope_apply(iq + (size_t)h * c->index_head_dim,
                                     c->index_head_dim, rd, cs, sn, pos,
                                     rd / 2, 0);
                 p->st.idx_rope += dsv4_now_s() - ts;
                 ts = dsv4_now_s();
-                dsv4_mmq(p->scratch[t].idx_w, p->x1 + (size_t)t * d,
-                         &w->attn.idx.weights_proj);
-                p->st.idx_proj += dsv4_now_s() - ts;
-                p->st.f_idx += 2.0 * ((double)w->attn.idx.wq_b.rows *
-                                      (double)w->attn.idx.wq_b.cols +
-                                      (double)w->attn.idx.weights_proj.rows *
-                                      (double)w->attn.idx.weights_proj.cols)
-                             * 1e-9;
-                ts = dsv4_now_s();
                 dsv4_indexer_score(p->scratch[t].idx_scores,
-                                   p->scratch[t].idx_q,
+                                   iq,
                                    kvc + (size_t)c->sliding_window * hd,
-                                   p->scratch[t].idx_w, c->index_n_heads,
+                                   iw, c->index_n_heads,
                                    c->index_head_dim, avail);
                 take = avail < c->index_topk ? avail : c->index_topk;
                 dsv4_topk(p->scratch[t].idxs + n_idx,

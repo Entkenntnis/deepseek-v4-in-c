@@ -83,6 +83,14 @@ struct DSV4Prefill {
     float *ex_gate, *ex_up, *ex_mid; /* [B][moe_inter] expert working set   */
     float *ex_out;           /* [B][hidden] expert output before scatter     */
 
+    /* Per-token projections that carry no position dependency are GEMMs too.
+     * The compressor and indexer weights are read once per block instead of
+     * once per token: [B][2*head_dim] twice, then [B][index heads*dim] and
+     * [B][index heads]. The sequential parts (compress_step, RoPE, scoring)
+     * stay per token and read these rows by index. */
+    float *comp_kv_b, *comp_sc_b;
+    float *idx_qb, *idx_wb;
+
     double t_total, t_attn, t_idx, t_gate, t_shared, t_moe;
     double t_io, t_trunk, t_bind, t_hc;
 

@@ -90,6 +90,16 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
         grow_f(&p->ex_out, cap, (size_t)d))
         return -1;
 
+    /* The compressor and indexer projections are position independent, so
+     * they run as one block-wide GEMM each. Sizes mirror dsv4_scratch_init:
+     * see DSV4LayerState's comp_kv_in / idx_q / idx_w fields. */
+    if (grow_f(&p->comp_kv_b, cap, 2 * (size_t)c->head_dim) ||
+        grow_f(&p->comp_sc_b, cap, 2 * (size_t)c->head_dim) ||
+        grow_f(&p->idx_qb, cap,
+               (size_t)c->index_n_heads * (size_t)c->index_head_dim) ||
+        grow_f(&p->idx_wb, cap, (size_t)c->index_n_heads))
+        return -1;
+
     if (p->scratch_cap < cap) {
         DSV4Scratch *ns = (DSV4Scratch *)xrealloc(
             p->scratch, (size_t)cap * sizeof *ns);
@@ -110,7 +120,10 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
     const size_t per_tok = 2 * hcd + 5 * (size_t)d + (size_t)hc +
         (size_t)hc * hc + (size_t)mix_hc + qr_n + 3 * hdall +
         (size_t)c->head_dim + 2 * og + 2 * (size_t)c->n_experts +
-        4 * (size_t)c->topk + 3 * inter + 3 * rinter;
+        4 * (size_t)c->topk + 3 * inter + 3 * rinter +
+        4 * (size_t)c->head_dim +
+        (size_t)c->index_n_heads * (size_t)c->index_head_dim +
+        (size_t)c->index_n_heads;
     fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block "
                     "buffers; matmul tile <=%d rows\n",
             cap, (double)cap * (double)per_tok * sizeof(float) / 1048576.0,
@@ -171,5 +184,7 @@ void dsv4_prefill_free(DSV4Prefill *p)
     free(p->ex_off); free(p->ex_fill); free(p->ex_seen);
     free(p->ex_x); free(p->ex_gate); free(p->ex_up); free(p->ex_mid);
     free(p->ex_out);
+    free(p->comp_kv_b); free(p->comp_sc_b);
+    free(p->idx_qb); free(p->idx_wb);
     free(p);
 }
