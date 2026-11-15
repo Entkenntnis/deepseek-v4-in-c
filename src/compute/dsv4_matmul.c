@@ -16,9 +16,10 @@
  *
  * THE REDUCTION ORDER IS PART OF THE CONTRACT
  *   The scalar reference and the vector paths accumulate in a fixed tree.
- *   BF16 is bitwise equal to that reference; FP4 and FP8 form one scale block
- *   in float and fold it in double, so the matmul gate bounds them in L2
- *   (measured ~7-8e-8). -ffp-contract=off keeps the compiler out of it.
+ *   BF16 is bitwise equal to that reference; FP4 and FP8 form and accumulate
+ *   their block sums in float with four partials and a pairwise final tree, so
+ *   the matmul gate bounds them in L2 (measured ~6-8e-8). The scalar reference
+ *   stays double. -ffp-contract=off keeps the compiler out of it.
  */
 #include <stdio.h>
 #include <stdlib.h>

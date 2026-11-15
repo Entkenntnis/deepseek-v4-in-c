@@ -197,6 +197,17 @@ static void eqf(const char *what, float got, float want)
           "%s = %.9g, expected %.9g", what, (double)got, (double)want);
 }
 
+static double l2_rel(const float *a, const float *b, int n)
+{
+    double err = 0.0, ref = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = (double)a[i] - (double)b[i];
+        err += d * d;
+        ref += (double)b[i] * (double)b[i];
+    }
+    return sqrt(err / (ref > 0.0 ? ref : 1.0));
+}
+
 int main(void)
 {
     printf("DeepSeek-V4 packed matmul gate\n");
@@ -539,6 +550,50 @@ int main(void)
                    fp8_rel, fp8_gen_rel, fp4_rel, OUT, IN);
     }
 
+    printf("\n-- GATE  cross-block float fold over full Flash width --\n");
+    {
+        /* The random gate above only spans 2 FP8 blocks and 8 FP4 blocks.
+         * Flash's real width is 4096, i.e. 32 FP8 blocks or 128 FP4 blocks,
+         * which is where a float cross-block sum has to prove its error
+         * bound. Four Float partials plus the pairwise final tree are used. */
+        enum { IN = 4096, OUT = 8 };
+        static uint8_t W8[(size_t)OUT * IN], W4[(size_t)OUT * IN / 2];
+        static uint8_t S8[1 * (IN / 128)], S4[OUT * (IN / 32)];
+        static float x[IN], ys[OUT], yv[OUT];
+        unsigned r = 246813579u;
+        for (int i = 0; i < IN; i++) {
+            r = r * 1103515245u + 12345u;
+            x[i] = (float)((int)((r >> 16) & 0xff) - 128) * 0.01f;
+        }
+        for (size_t i = 0; i < sizeof W8; i++) {
+            r = r * 1103515245u + 12345u;
+            unsigned e = 1 + ((r >> 16) % 14);
+            unsigned m = (r >> 20) & 7u;
+            unsigned s = (r >> 24) & 1u;
+            W8[i] = (uint8_t)((s << 7) | (e << 3) | m);
+        }
+        for (size_t i = 0; i < sizeof W4; i++) {
+            r = r * 1103515245u + 12345u;
+            W4[i] = (uint8_t)(r >> 24);
+        }
+        memset(S8, 127, sizeof S8);
+        memset(S4, 127, sizeof S4);
+
+        dsv4_matmul_fp8_scalar(ys, x, W8, S8, IN, OUT, 128, 128);
+        dsv4_matmul_fp8(yv, x, W8, S8, IN, OUT, 128, 128);
+        const double rel8 = l2_rel(yv, ys, OUT);
+        CHECK(rel8 <= 1e-6, "fp8 4096-wide L2 rel %.3e exceeds 1e-6", rel8);
+
+        dsv4_matmul_fp4_scalar(ys, x, W4, S4, IN, OUT, 1, 32);
+        dsv4_matmul_fp4(yv, x, W4, S4, IN, OUT, 1, 32);
+        const double rel4 = l2_rel(yv, ys, OUT);
+        CHECK(rel4 <= 1e-6, "fp4 4096-wide L2 rel %.3e exceeds 1e-6", rel4);
+
+        if (!fails)
+            printf("  ok    fp8 32 blocks L2 %.1e; fp4 128 blocks L2 %.1e\n",
+                   rel8, rel4);
+    }
+
 
     printf("\n-- GATE  every E4M3 code through the AVX2 path --\n");
     {
@@ -596,7 +651,8 @@ int main(void)
          * This gate deliberately fills every block with NORMAL codes first, so
          * the closed-form decode is the path actually tested, then injects one
          * subnormal, one NaN and one zero into a single block to exercise the
-         * fallback. Both must agree with the gather kernel bit for bit. */
+         * fallback. The production path now uses a float cross-block fold, so
+         * the comparison to the double table reference is an L2 bound. */
         enum { IN = 512, OUT = 256 };
         static uint8_t W[(size_t)OUT * IN], S[(OUT / 128) * (IN / 128)];
         static float x[IN], ya[OUT], yb[OUT];
@@ -616,8 +672,9 @@ int main(void)
 
         dsv4_matmul_fp8_f32(ya, x, W, S, IN, OUT, 128, 128);
         dsv4_matmul_fp8(yb, x, W, S, IN, OUT, 128, 128);
-        CHECK(memcmp(ya, yb, sizeof ya) == 0,
-              "normal-only blocks differ from the gather kernel");
+        const double rel_normal = l2_rel(ya, yb, OUT);
+        CHECK(rel_normal <= 1e-6,
+              "normal-only blocks L2 rel %.3e exceeds 1e-6", rel_normal);
 
         W[0] = 0x01;    /* subnormal */
         W[1] = 0x7F;    /* +NaN */
@@ -625,12 +682,18 @@ int main(void)
         W[3] = 0x00;    /* +0 */
         dsv4_matmul_fp8_f32(ya, x, W, S, IN, OUT, 128, 128);
         dsv4_matmul_fp8(yb, x, W, S, IN, OUT, 128, 128);
-        CHECK(memcmp(ya, yb, sizeof ya) == 0,
-              "the fallback block differs from the gather kernel");
+        /* The injected NaN makes row 0 NaN in both paths; compare the other
+         * rows with the L2 bound and the NaN rows for NaN-ness. */
+        const double rel_special = l2_rel(ya + 1, yb + 1, OUT - 1);
+        CHECK(isnan(ya[0]) && isnan(yb[0]),
+              "fallback NaN row: ref %.9g, avx2 %.9g",
+              (double)ya[0], (double)yb[0]);
+        CHECK(rel_special <= 1e-6,
+              "fallback block L2 rel %.3e exceeds 1e-6", rel_special);
 
         if (!fails)
-            printf("  ok    %d normal-only rows bitwise, and the injected "
-                   "subnormal/NaN/zero block falls back exactly\n", OUT);
+            printf("  ok    %d rows: normal L2 %.1e, fallback L2 %.1e\n",
+                   OUT, rel_normal, rel_special);
     }
 #endif
 

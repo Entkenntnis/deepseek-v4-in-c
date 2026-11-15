@@ -65,7 +65,7 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
         _mm256_or_si256(_mm256_castps_si256(mag), sgn));
 }
 
-/* 512 doubles covers every released geometry (Pro's widest reduce dimension,
+/* 512 blocks covers every released geometry (Pro's widest reduce dimension,
  * 16384, is 512 blocks). Anything wider takes the generic block loop. */
 #define FP4_SC_MAX 512
 

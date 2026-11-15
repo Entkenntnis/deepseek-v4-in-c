@@ -71,19 +71,14 @@ static inline __m256 load8_fp8(const uint8_t *wb, int i)
     return _mm256_castsi256_ps(bits);
 }
 
-/* FP8 WITH A FLOAT-INNER BLOCK AND A DOUBLE FOLD.
+/* FP8 FLOAT-INNER REFERENCE HELPER.
  *
- * The old double-accumulator kernel lives in tests/unit/test_matmul.c. It
- * converts every weight f32 -> f64 (four `vcvtps2pd` per 16 weights).
- * `perf annotate` put ~33% of the FP8 kernel's cycles on that conversion, and
- * the FP8 kernel is ~52% of all decode compute. FP4 already took the same trade
- * and measured 1.36x in the kernel and -5.7% wall, so FP8 gets the same shape:
- * form each 128-wide scale block's dot product with 8-lane float FMAs, widen
- * the block ONCE, and keep the block scale and the cross-block sum in double.
- *
- * This is deliberately NOT bitwise-equal to the scalar double reference. The
- * factory gate bounds the L2 relative error (measured ~8e-8), exactly as it
- * already does for FP4. */
+ * This is the exact-table gather path used by the reference and by the rare
+ * subnormal/NaN block. The production fast path forms each 128-wide block sum
+ * with 8-lane float FMAs and accumulates four blocks at a time in float; this
+ * helper returns the block sum as a double so the gate has a stable scalar
+ * comparison. It is deliberately not bitwise-equal to the production float
+ * fold; the matmul gate bounds the L2 relative error (measured ~8e-8). */
 static inline double fp8_block_dot_f32_128(const uint8_t *wb,
                                            const float *xb)
 {
@@ -116,6 +111,28 @@ static __attribute__((noinline)) double
 fp8_block_dot_f32_128_gather(const uint8_t *wb, const float *xb)
 {
     return fp8_block_dot_f32_128(wb, xb);
+}
+
+/* The production nt == 1 body needs the block sum as lanes, not as a scalar:
+ * four of them are folded together and scaled as one float vector. */
+static inline __m256 fp8_block_sum_128_normal(const uint8_t *wb,
+                                              const float *xb)
+{
+    __m256 s;
+#define FP8_LOAD8(k) fp8_8_normal(wb, (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return s;
+}
+
+static __attribute__((noinline)) __m256
+fp8_block_sum_128_gather(const uint8_t *wb, const float *xb)
+{
+    __m256 s;
+#define FP8_LOAD8(k) load8_fp8(wb, (k))
+    FP8_BLOCK_SUM(FP8_LOAD8);
+#undef FP8_LOAD8
+    return s;
 }
 
 /* The decode-once form: the batch kernels decode a block into wf[128] and run
