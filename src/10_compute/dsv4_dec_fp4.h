@@ -49,6 +49,51 @@
  * first byte, lane 1 its high nibble, lane 2 the low nibble of the second
  * byte, and so on. That makes this a bit-for-bit replacement, not merely an
  * equivalent decode; test_matmul's FP4 gate checks the result. */
+/* THIRTY-TWO E2M1 VALUES AT ONCE, EACH AS TWICE ITS MAGNITUDE.
+ *
+ * The per-eight decode below costs 6 uops per 8 weights, three of them on the
+ * shuffle port, and `perf annotate` put the FP4 GEMV at 25 GB/s against the
+ * FP8 GEMV's 41 GB/s on the same shapes. The byte
+ * form removes the per-eight broadcast and permute entirely: 16 packed bytes
+ * hold 32 nibbles, two vpshufb turns each nibble into a signed byte, and the
+ * low/high nibble halves interleave back into element order.
+ *
+ * WHY THE FACTOR OF TWO. E2M1 magnitudes are {0, .5, 1, 1.5, 2, 3, 4, 6}; doubled
+ * they are the integers {0, 1, 2, 3, 4, 6, 8, 12}, which fit a signed byte
+ * alongside their negatives. Sign and magnitude therefore come out of the
+ * same byte LUT, and vpmovsxbd + vcvtdq2ps are exact. Every weight in this
+ * path is 2*w, so every block sum, the fold4 tree and the four partial
+ * accumulators all hold exactly 2x their true value: adding and scaling by a
+ * power of two commute with rounding, so fl(2a+2b) == 2*fl(a+b) bit for bit.
+ * The kernels divide by two ONCE per output element, which is exact, and the
+ * result is bitwise identical to the old decoder -- except for the sign of a
+ * zero: code 8 is -0.0, and an integer LUT cannot produce one. A row whose
+ * weights and activations all vanish can therefore yield +0.0 where the old
+ * kernel produced -0.0. Nothing downstream distinguishes the two.
+ *
+ * The generic-geometry path and its scalar reference keep the exact float
+ * decode below, so fixtures still see the one-times values. */
+static inline void fp4_32(const uint8_t *row, int64_t base, __m256 *w)
+{
+    const __m128i lut = _mm_setr_epi8(0, 1, 2, 3, 4, 6, 8, 12,
+                                      0, -1, -2, -3, -4, -6, -8, -12);
+    const __m128i mask = _mm_set1_epi8(0x0F);
+    /* 16 bytes carry the 32 nibbles of this block; element 0 is the LOW nibble
+     * of byte 0, so the even elements come from the low halves and the odd
+     * ones from the high halves. */
+    const __m128i v  = _mm_loadu_si128((const __m128i *)(row + (base >> 1)));
+    const __m128i lo = _mm_shuffle_epi8(lut, _mm_and_si128(v, mask));
+    const __m128i hi = _mm_shuffle_epi8(
+        lut, _mm_and_si128(_mm_srli_epi16(v, 4), mask));
+    const __m128i e0 = _mm_unpacklo_epi8(lo, hi);     /* elements  0..15 */
+    const __m128i e1 = _mm_unpackhi_epi8(lo, hi);     /* elements 16..31 */
+
+    w[0] = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(e0));
+    w[1] = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(e0, 8)));
+    w[2] = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(e1));
+    w[3] = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(e1, 8)));
+}
+
 static inline __m256 fp4_8(const uint8_t *row, int64_t base)
 {
     uint32_t four;
@@ -86,13 +131,22 @@ static inline __m256 fp4_8(const uint8_t *row, int64_t base)
             _mm256_fmadd_ps(LOAD8(24), _mm256_loadu_ps(xb + 24),                \
                             _mm256_setzero_ps())))
 
-/* Decode-on-the-fly, for the single-token GEMV. */
+/* Decode-on-the-fly, for the single-token GEMV. Same tree as before, but the
+ * weights come from fp4_32 as one block of 32 instead of four fp4_8 calls.
+ * The values are 2*w; the caller halves the finished output once. */
 static inline __m256 fp4_block_sum32(const uint8_t *row, int64_t base,
                                      const float *xb)
 {
-#define FP4_LOAD8(k) fp4_8(row, base + (k))
-    return FP4_BLOCK_SUM(FP4_LOAD8);
-#undef FP4_LOAD8
+    __m256 w[4];
+    fp4_32(row, base, w);
+    const __m256 z = _mm256_setzero_ps();
+    return _mm256_add_ps(
+        _mm256_add_ps(
+            _mm256_fmadd_ps(w[0], _mm256_loadu_ps(xb),      z),
+            _mm256_fmadd_ps(w[1], _mm256_loadu_ps(xb + 8),  z)),
+        _mm256_add_ps(
+            _mm256_fmadd_ps(w[2], _mm256_loadu_ps(xb + 16), z),
+            _mm256_fmadd_ps(w[3], _mm256_loadu_ps(xb + 24), z)));
 }
 
 /* Decode once into an f32 block, for the batched GEMM. */

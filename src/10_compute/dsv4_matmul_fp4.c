@@ -79,7 +79,9 @@ void fp4_n(float *y, const float *x, const uint8_t *W,
                 }
                 const __m128 t = _mm_add_ps(_mm_add_ps(a0, a1),
                                             _mm_add_ps(a2, a3));
-                y[o] = dsv4_hsum128(t) + tail;
+                /* fp4_32 decodes 2*w, so every accumulator above is exactly
+                 * twice its true value and this single multiply restores it. */
+                y[o] = 0.5f * (dsv4_hsum128(t) + tail);
             }
             return;
         }
@@ -98,8 +100,14 @@ void fp4_n(float *y, const float *x, const uint8_t *W,
 
             int bi = 0, c0 = 0;
             for (; c0 + 127 < in; c0 += 128, bi += 4) {
-                for (int i = 0; i < 128; i += 8)
-                    _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+                for (int i = 0; i < 128; i += 32) {
+                    __m256 wc[4];
+                    fp4_32(row, (int64_t)c0 + i, wc);
+                    _mm256_storeu_ps(wf + i,      wc[0]);
+                    _mm256_storeu_ps(wf + i + 8,  wc[1]);
+                    _mm256_storeu_ps(wf + i + 16, wc[2]);
+                    _mm256_storeu_ps(wf + i + 24, wc[3]);
+                }
                 const __m128 sc4 = dsv4_e8m0x4_to_ps(srow + bi);
                 const int slot = (bi >> 2) & 3;
                 for (int t = 0; t < nt; t++) {
@@ -113,8 +121,10 @@ void fp4_n(float *y, const float *x, const uint8_t *W,
                 }
             }
             for (; c0 < in; c0 += 32, bi++) {
-                for (int i = 0; i < 32; i += 8)
-                    _mm256_storeu_ps(wf + i, fp4_8(row, (int64_t)c0 + i));
+                __m256 wc[4];
+                fp4_32(row, (int64_t)c0, wc);
+                for (int i = 0; i < 4; i++)
+                    _mm256_storeu_ps(wf + i * 8, wc[i]);
                 const float s = dsv4_e8m0_to_f32(srow[bi]);
                 for (int t = 0; t < nt; t++) {
                     const __m256 v = fp4_block_sum32_w(
@@ -125,7 +135,7 @@ void fp4_n(float *y, const float *x, const uint8_t *W,
             for (int t = 0; t < nt; t++) {
                 const __m128 v = _mm_add_ps(_mm_add_ps(acc[0][t], acc[1][t]),
                                             _mm_add_ps(acc[2][t], acc[3][t]));
-                y[(size_t)t * out + o] = dsv4_hsum128(v) + tail[t];
+                y[(size_t)t * out + o] = 0.5f * (dsv4_hsum128(v) + tail[t]);
             }
         }
         return;

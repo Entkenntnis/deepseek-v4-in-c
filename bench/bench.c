@@ -119,11 +119,20 @@ int main(int argc, char **argv)
     bench_qmat("gate",        "256x4096", DSV4_WBF16, 256, 4096, 1, 1, 8, 40);
     bench_qmat("head",        "129280x4096", DSV4_WBF16, 129280, 4096, 1, 1, 1, 40);
 
-    /* prefill GEMM */
+    /* prefill GEMM, at the token counts the engine actually tiles with: a
+     * routed expert sees ~5 tokens of the block (54 tokens x top-6 / 256
+     * experts, deduped), the dense projections see the whole 54-token block. */
+    bench_qmat("expert_w1_nt5", "2048x4096 nt5", DSV4_WFP4, 2048, 4096, 5, 1, 4, 40);
     bench_qmat("expert_w1_nt16", "2048x4096 nt16", DSV4_WFP4, 2048, 4096, 16, 1, 4, 40);
     bench_qmat("expert_w1_nt128", "2048x4096 nt128", DSV4_WFP4, 2048, 4096, 128, 1, 4, 40);
+    bench_qmat("wq_a_nt54",   "1024x4096 nt54", DSV4_WFP8, 1024, 4096, 54, 1, 4, 40);
     bench_qmat("wq_b_nt16",   "32768x1024 nt16", DSV4_WFP8, 32768, 1024, 16, 1, 2, 40);
+    bench_qmat("wq_b_nt54",   "32768x1024 nt54", DSV4_WFP8, 32768, 1024, 54, 1, 2, 40);
     bench_qmat("wo_a_nt16",   "1024x4096 nt16", DSV4_WFP8, 1024, 4096, 16, 1, 4, 40);
+    bench_qmat("wo_a_nt54",   "1024x4096 nt54", DSV4_WFP8, 1024, 4096, 54, 1, 4, 40);
+    bench_qmat("wo_b_nt54",   "4096x8192 nt54", DSV4_WFP8, 4096, 8192, 54, 1, 2, 40);
+    bench_qmat("shared_gate_up_nt54", "2048x4096 nt54", DSV4_WFP8, 2048, 4096, 54, 1, 2, 40);
+    bench_qmat("shared_down_nt54", "4096x2048 nt54", DSV4_WFP8, 4096, 2048, 54, 1, 2, 40);
 
     /* attention / indexer / compressor */
     bench_attn("sparse_attn_idx", 640);
