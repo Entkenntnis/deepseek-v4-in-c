@@ -86,24 +86,24 @@ is what makes the layer counter and the live cache/disk rates move during a
 token. With `--no-layers` there are only per-token events, which is quieter on a
 slow terminal or over a remote link.
 
-Batched prefill is layer-major, so it does not emit one `layer` event per
+Prefill is one layer-major block, so it does not emit one `layer` event per
 prompt token. Instead the engine emits `prefill` progress events carrying the
-stage (`chunk`, `layer`, `chunk_done`, `head`), chunk/layer counters, an
-estimated progress fraction and the same live `sys`/`cache`/`trunk` blocks as
-a layer event. While the prompt runs, the panel shows a **PREFILL** section with
-the current stage, token counts, the actual batch size of the current chunk and
-a progress bar with the estimated percentage and elapsed time. The bar,
-percentage and layer/token counters repaint on every prefill event; the elapsed
-clock, rate readout and MEMORY stay on the 1 Hz cadence, so cache-hit and disk
-readout move during the prompt without the numbers jittering. When the prompt
-completes, the progress bar is replaced by the engine's final timing line
+stage (`start`, `layer`, `head`, `done`), layer counters, the block's token
+count, an estimated progress fraction and the same live `sys`/`cache`/`trunk`
+blocks as a layer event. While the prompt runs, the panel shows a **PREFILL**
+section with the current stage, token counts, the block size and a progress bar
+with the estimated percentage and elapsed time. The bar, percentage and
+layer/token counters repaint on every prefill event; the elapsed clock, rate
+readout and MEMORY stay on the 1 Hz cadence, so cache-hit and disk readout move
+during the prompt without the numbers jittering. When the prompt completes, the
+progress bar is replaced by the engine's final timing line
 (`N tokens in T s (tok/s, s/token)`), and the section stays visible while the
 response decodes. The DECODE section appears once the first token is decoded.
 The prompt-only timer arrives on the first `token` event and is not written to
 the transcript.
 
 The one-shot CLI and all correctness gates are unchanged. The streaming
-backend is `dsv4_serve.c`; it shares the same `src/prefill/` dense-prefill
+backend is `dsv4_serve.c`; it shares the same `src/prefill/` block-prefill
 module as the one-shot CLI, so both paths use identical math.
 
 ## Defaults
@@ -119,11 +119,10 @@ The defaults match the development machine:
 | `--budget` | `10.0` GB (or `auto`) |
 | `--ctx` | `4096` tokens |
 | `--gen` | `256` tokens per turn |
-| `--prefill-batch-size` | `16` tokens per dense prefill chunk (`0` disables) |
 
-The TUI runs the prompt through the dense prefill path in chunks of 16 by
-default; `--prefill-batch-size 0` restores the per-token path. Routed experts
-stay per token either way, and the generated token stream is identical.
+The TUI prefills each turn's new prompt as one block. There is no chunk-size
+flag; routed experts are batched by layer-level union over that block, and the
+generated token stream is identical to the per-token fallback.
 
 Budget matters. The trunk is ~6.3 GB and one decode pass touches ~3.2 GB of
 experts; a budget below roughly 9.5 GB leaves the expert cache with fewer slots
@@ -175,10 +174,8 @@ prompt in the KV state.
 The right-hand panel keeps the live resource numbers that are useful while the
 model runs, plus a decode graph while a turn is generating tokens:
 
-* **PREFILL** — the prompt's stage, token progress and the actual size of the
-  chunk being run (the configured `--prefill-batch-size` is only a cap, so a
-  short prompt shows its real size and a long prompt's last chunk shows the
-  remainder), with a progress bar while the prompt runs. After completion the
+* **PREFILL** — the prompt's stage, token progress and the size of the block
+  being run, with a progress bar while the prompt runs. After completion the
   bar is replaced by the engine's final `N tokens in T s (tok/s, s/token)` line,
   and the section stays visible while the response decodes.
 * **DECODE** — a graph of **tok/s** for generated tokens only. It appears while

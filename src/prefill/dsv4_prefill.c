@@ -10,16 +10,20 @@
  *
  * WHAT IS BATCHED
  *   The dense matrices: q/kv/output projections, the shared expert and the
- *   router, read once per chunk and used for every token in it. The routed
+ *   router, read once per block and used for every token in it. The routed
  *   experts are batched too, by layer-level union: every distinct expert the
- *   chunk routes to is requested once, and each expert's whole token bucket is
- *   run through one FP4 batch kernel. In a 64-token chunk that turns ~384
- *   per-token expert requests into ~99 expert-major buckets.
+ *   block routes to is requested once, and each expert's whole token bucket is
+ *   run through one FP4 batch kernel.
  *
  * WHAT IS NOT BATCHED, DELIBERATELY
  *   mHC, RoPE, the compressor's sequential state, the CSA indexer and sparse
  *   attention. They either carry a position-ordered dependency or have no
  *   weight-reuse payoff. Only projections are GEMMs.
+ *
+ * SCHEDULING
+ *   The prompt is one block and is walked layer-major: every token of layer L
+ *   runs before L+1. That keeps L's dense weights and routed-expert working set
+ *   resident for the whole prompt.
  */
 #define _GNU_SOURCE
 
@@ -109,7 +113,9 @@ struct DSV4Prefill {
     const DSV4ExpertSrc *src;
     const DSV4ModelW *mw;
     DSV4PrefillOpts  opt;
-    int              B;
+    int              cap;          /* allocated token rows in the block buffers */
+    int              scratch_cap;  /* allocated DSV4Scratch entries */
+    int              n;            /* tokens in the block being run */
 
     float *H;          /* [B][hc*hidden] */
     float *x1;         /* [B][hidden] */
@@ -159,6 +165,108 @@ static void *xcalloc(size_t n)
     return p;
 }
 
+static void *xrealloc(void *p, size_t n)
+{
+    void *q = realloc(p, n ? n : 1);
+    if (!q) fprintf(stderr, "prefill: out of memory (%zu bytes)\n", n);
+    return q;
+}
+
+/* Grow one block buffer to `cap` rows of `per` floats/ints. The old contents
+ * are preserved; new rows are not initialised because every caller writes the
+ * rows it uses before reading them. */
+static int grow_f(float **pp, int cap, size_t per)
+{
+    const size_t bytes = (size_t)cap * per * sizeof(float);
+    float *q = (float *)xrealloc(*pp, bytes);
+    if (!q) return -1;
+    *pp = q;
+    return 0;
+}
+
+static int grow_i(int **pp, int cap, size_t per)
+{
+    const size_t bytes = (size_t)cap * per * sizeof(int);
+    int *q = (int *)xrealloc(*pp, bytes);
+    if (!q) return -1;
+    *pp = q;
+    return 0;
+}
+
+int dsv4_prefill_reserve(DSV4Prefill *p, int n)
+{
+    if (!p || n <= 0) return -1;
+    if (n <= p->cap) return 0;
+
+    const DSV4Cfg *c = p->c;
+    const int cap = n, hc = c->hc_mult, d = c->hidden;
+    const size_t hcd = (size_t)hc * d;
+    const int mix_hc = (2 + hc) * hc;
+    const size_t qr_n = (size_t)(d > c->q_lora ? d : c->q_lora);
+    const size_t hdall = (size_t)c->n_heads * c->head_dim;
+    const size_t inter = (size_t)c->moe_inter * c->n_shared;
+    const size_t rinter = (size_t)c->moe_inter;
+    const size_t og = (size_t)c->o_groups * c->o_lora;
+
+    if (grow_f(&p->H, cap, hcd) ||
+        grow_f(&p->x1, cap, (size_t)d) ||
+        grow_f(&p->resid, cap, hcd) ||
+        grow_f(&p->post, cap, (size_t)hc) ||
+        grow_f(&p->comb, cap, (size_t)hc * hc) ||
+        grow_f(&p->mixes, cap, (size_t)mix_hc) ||
+        grow_f(&p->qr, cap, qr_n) ||
+        grow_f(&p->q, cap, hdall) ||
+        grow_f(&p->kv, cap, (size_t)c->head_dim) ||
+        grow_f(&p->o, cap, hdall) ||
+        grow_f(&p->ogrp, cap, og) ||
+        grow_f(&p->xg, cap, hdall) ||
+        grow_f(&p->yg, cap, og) ||
+        grow_f(&p->gate, cap, (size_t)c->n_experts) ||
+        grow_f(&p->gate_orig, cap, (size_t)c->n_experts) ||
+        grow_i(&p->topk_idx, cap, (size_t)c->topk) ||
+        grow_f(&p->topk_w, cap, (size_t)c->topk) ||
+        grow_f(&p->sh_gate, cap, inter) ||
+        grow_f(&p->sh_up, cap, inter) ||
+        grow_f(&p->sh_mid, cap, inter) ||
+        grow_f(&p->sh_out, cap, (size_t)d) ||
+        grow_f(&p->out, cap, (size_t)d) ||
+        grow_i(&p->ex_tok, cap, (size_t)c->topk) ||
+        grow_i(&p->ex_k, cap, (size_t)c->topk) ||
+        grow_f(&p->ex_x, cap, (size_t)d) ||
+        grow_f(&p->ex_gate, cap, rinter) ||
+        grow_f(&p->ex_up, cap, rinter) ||
+        grow_f(&p->ex_mid, cap, rinter) ||
+        grow_f(&p->ex_out, cap, (size_t)d))
+        return -1;
+
+    if (p->scratch_cap < cap) {
+        DSV4Scratch *ns = (DSV4Scratch *)xrealloc(
+            p->scratch, (size_t)cap * sizeof *ns);
+        if (!ns) return -1;
+        p->scratch = ns;
+        for (int t = p->scratch_cap; t < cap; t++) {
+            memset(&p->scratch[t], 0, sizeof p->scratch[t]);
+            if (dsv4_scratch_init(&p->scratch[t], c, p->opt.max_pos) != 0) {
+                for (int j = p->scratch_cap; j <= t; j++)
+                    dsv4_scratch_free(&p->scratch[j]);
+                return -1;
+            }
+        }
+        p->scratch_cap = cap;
+    }
+
+    p->cap = cap;
+    const size_t per_tok = 2 * hcd + 5 * (size_t)d + (size_t)hc +
+        (size_t)hc * hc + (size_t)mix_hc + qr_n + 3 * hdall +
+        (size_t)c->head_dim + 2 * og + 2 * (size_t)c->n_experts +
+        4 * (size_t)c->topk + 3 * inter + 3 * rinter;
+    fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block "
+                    "buffers; matmul tile <=%d rows\n",
+            cap, (double)cap * (double)per_tok * sizeof(float) / 1048576.0,
+            DSV4_MAX_BATCH);
+    return 0;
+}
+
 int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
                       DSV4LayerState *lst, const DSV4ExpertSrc *src,
                       const DSV4ModelW *mw, const DSV4PrefillOpts *opt)
@@ -167,75 +275,24 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     if (!p) return -1;
     p->c = c; p->tr = tr; p->lst = lst; p->src = src; p->mw = mw;
     p->opt = *opt;
-    if (p->opt.batch < 1) p->opt.batch = 1;
-    if (p->opt.batch > DSV4_MAX_BATCH) p->opt.batch = DSV4_MAX_BATCH;
-    p->B = p->opt.batch;
 
-    const int B = p->B, hc = c->hc_mult, d = c->hidden;
-    const size_t hcd = (size_t)hc * d;
-    const int mix_hc = (2 + hc) * hc;
-    const size_t qr_n = (size_t)(d > c->q_lora ? d : c->q_lora);
-    const size_t hdall = (size_t)c->n_heads * c->head_dim;
-    const size_t inter = (size_t)c->moe_inter * c->n_shared;
-    const size_t rinter = (size_t)c->moe_inter;
-    const size_t nreq = (size_t)B * (size_t)c->topk;
-    const size_t og = (size_t)c->o_groups * c->o_lora;
-
-    p->H = xcalloc((size_t)B * hcd * sizeof(float));
-    p->x1 = xcalloc((size_t)B * d * sizeof(float));
-    p->resid = xcalloc((size_t)B * hcd * sizeof(float));
-    p->post = xcalloc((size_t)B * hc * sizeof(float));
-    p->comb = xcalloc((size_t)B * (size_t)hc * hc * sizeof(float));
-    p->mixes = xcalloc((size_t)B * mix_hc * sizeof(float));
-    p->qr = xcalloc((size_t)B * qr_n * sizeof(float));
-    p->q = xcalloc((size_t)B * hdall * sizeof(float));
-    p->kv = xcalloc((size_t)B * c->head_dim * sizeof(float));
-    p->o = xcalloc((size_t)B * hdall * sizeof(float));
-    p->ogrp = xcalloc((size_t)B * og * sizeof(float));
-    p->xg = xcalloc((size_t)B * c->o_groups * (hdall / c->o_groups) * sizeof(float));
-    p->yg = xcalloc((size_t)B * c->o_groups * c->o_lora * sizeof(float));
-    p->gate = xcalloc((size_t)B * c->n_experts * sizeof(float));
-    p->gate_orig = xcalloc((size_t)B * c->n_experts * sizeof(float));
-    p->topk_idx = xcalloc((size_t)B * c->topk * sizeof(int));
-    p->topk_w = xcalloc((size_t)B * c->topk * sizeof(float));
-    p->sh_gate = xcalloc((size_t)B * inter * sizeof(float));
-    p->sh_up = xcalloc((size_t)B * inter * sizeof(float));
-    p->sh_mid = xcalloc((size_t)B * inter * sizeof(float));
-    p->sh_out = xcalloc((size_t)B * d * sizeof(float));
-    p->out = xcalloc((size_t)B * d * sizeof(float));
-    p->xh = xcalloc((size_t)d * sizeof(float));
-    p->scratch = (DSV4Scratch *)xcalloc((size_t)B * sizeof(DSV4Scratch));
-    p->ex_tok = (int *)xcalloc(nreq * sizeof(int));
-    p->ex_k = (int *)xcalloc(nreq * sizeof(int));
+    /* Only the block-independent buffers live here. Everything scaled by the
+     * prompt length is allocated by dsv4_prefill_reserve() once the caller
+     * knows how many tokens this block has. */
+    p->xh = xcalloc((size_t)c->hidden * sizeof(float));
     p->ex_count = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_order = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
     p->ex_fill = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_seen = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
-    p->ex_x = xcalloc((size_t)B * d * sizeof(float));
-    p->ex_gate = xcalloc((size_t)B * rinter * sizeof(float));
-    p->ex_up = xcalloc((size_t)B * rinter * sizeof(float));
-    p->ex_mid = xcalloc((size_t)B * rinter * sizeof(float));
-    p->ex_out = xcalloc((size_t)B * d * sizeof(float));
-
-    if (!p->H || !p->x1 || !p->resid || !p->post || !p->comb || !p->mixes ||
-        !p->qr || !p->q || !p->kv || !p->o || !p->ogrp || !p->xg || !p->yg ||
-        !p->gate || !p->gate_orig || !p->topk_idx || !p->topk_w ||
-        !p->sh_gate || !p->sh_up || !p->sh_mid || !p->sh_out ||
-        !p->out || !p->xh || !p->scratch ||
-        !p->ex_tok || !p->ex_k || !p->ex_count || !p->ex_order ||
-        !p->ex_off || !p->ex_fill || !p->ex_seen ||
-        !p->ex_x || !p->ex_gate || !p->ex_up || !p->ex_mid || !p->ex_out) {
+    if (!p->xh || !p->ex_count || !p->ex_order || !p->ex_off ||
+        !p->ex_fill || !p->ex_seen) {
         dsv4_prefill_free(p);
         return -1;
     }
-    for (int t = 0; t < B; t++)
-        if (dsv4_scratch_init(&p->scratch[t], c, p->opt.max_pos) != 0) {
-            dsv4_prefill_free(p);
-            return -1;
-        }
 
-    fprintf(stderr, "prefill: CPU dense batch, %d token(s) per chunk\n", p->B);
+    fprintf(stderr, "prefill: whole-prompt block; kernels tile at <=%d rows\n",
+            DSV4_MAX_BATCH);
     *out = p;
     return 0;
 }
@@ -244,7 +301,7 @@ void dsv4_prefill_free(DSV4Prefill *p)
 {
     if (!p) return;
     if (p->scratch) {
-        for (int t = 0; t < p->B; t++) dsv4_scratch_free(&p->scratch[t]);
+        for (int t = 0; t < p->scratch_cap; t++) dsv4_scratch_free(&p->scratch[t]);
         free(p->scratch);
     }
     free(p->H); free(p->x1); free(p->resid); free(p->post); free(p->comb);
@@ -495,7 +552,7 @@ static int prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
     double ts = pnow();
     for (int g = 0; g < c->o_groups; g++) {
         for (int t = 0; t < n; t++)
-            memcpy(p->xg + ((size_t)g * p->B + t) * gw,
+            memcpy(p->xg + ((size_t)g * p->cap + t) * gw,
                    p->o + (size_t)t * (size_t)H * hd + (size_t)g * gw,
                    (size_t)gw * sizeof(float));
         DSV4QMat slice = w->attn.wo_a;
@@ -511,8 +568,8 @@ static int prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
         }
         slices[g] = slice;
         jobs[g].m = &slices[g];
-        jobs[g].x = p->xg + (size_t)g * p->B * gw;
-        jobs[g].y = p->yg + (size_t)g * p->B * gr;
+        jobs[g].x = p->xg + (size_t)g * p->cap * gw;
+        jobs[g].y = p->yg + (size_t)g * p->cap * gr;
         jobs[g].n = n;
     }
     p->st.oproj_pack += pnow() - ts;
@@ -523,7 +580,7 @@ static int prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
         for (int t = 0; t < n; t++)
             memcpy(p->ogrp + (size_t)t * (size_t)c->o_groups * c->o_lora +
                        (size_t)g * gr,
-                   p->yg + (size_t)g * p->B * gr + (size_t)t * gr,
+                   p->yg + (size_t)g * p->cap * gr + (size_t)t * gr,
                    (size_t)gr * sizeof(float));
     p->st.oproj_unpack += pnow() - ts;
     if (pm_n_stats(p, p->out, p->ogrp, &w->attn.wo_b, n,
@@ -607,7 +664,7 @@ static void expert_bucket_forward(DSV4Prefill *p, const DSV4ExpertW *ew,
 
 /* Layer-level union scheduling.
  *
- * Request every distinct expert this layer's chunk needs, in first-use order,
+ * Request every distinct expert this layer's block needs, in first-use order,
  * so the reader pool sees the whole layer instead of six requests at a time.
  * The per-token end() barrier is what exposed ~24% of prefill as expert I/O;
  * here there is one barrier per group of requests, and each expert's bucket is
@@ -948,25 +1005,16 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
 }
 
 static void report_progress(DSV4Prefill *p, const char *stage,
-                            int chunk, int chunks, int layer, int layers,
-                            int tokens_done, int tokens_total, int chunk_tokens,
+                            int layer, int tokens_done, int tokens_total,
                             double elapsed, double progress)
 {
     if (!p->opt.on_progress) return;
     DSV4PrefillProgress pr;
     pr.stage = stage;
-    pr.chunk = chunk;
-    pr.chunks = chunks;
     pr.layer = layer;
-    pr.layers = layers;
+    pr.layers = p->c->n_layers;
     pr.tokens_done = tokens_done;
     pr.tokens_total = tokens_total;
-    pr.chunk_tokens = chunk_tokens;
-    /* The batch the caller actually ran, not the configured cap. A short
-     * prompt gets one shrunken chunk (3 tokens, not 16), and a long prompt's
-     * last chunk is whatever is left. The TUI prints this value, so reporting
-     * the cap here made it lie at both ends. */
-    pr.batch = chunk_tokens > 0 ? chunk_tokens : p->B;
     pr.elapsed = elapsed;
     pr.progress = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
     p->opt.on_progress(p->opt.progress_ctx, &pr);
@@ -988,7 +1036,7 @@ static void pf_row(const char *name, double sec, double total, int n,
     }
 }
 
-static void pf_report(DSV4Prefill *p, int n, int nchunks, int first_m)
+static void pf_report(DSV4Prefill *p, int n)
 {
     const DSV4PrefillStats *s = &p->st;
     const double T = p->t_total;
@@ -996,9 +1044,9 @@ static void pf_report(DSV4Prefill *p, int n, int nchunks, int first_m)
     const double dense_gf  = s->f_qkv + s->f_oproj + s->f_gate + s->f_shared;
 
     fprintf(stderr,
-            "  prefill stages: %d tokens, %d chunk(s) of <=%d, %.3f s, "
+            "  prefill stages: %d tokens in one block, %.3f s, "
             "%.3f s/token\n",
-            n, nchunks, first_m, T, n > 0 ? T / (double)n : 0.0);
+            n, T, n > 0 ? T / (double)n : 0.0);
     fprintf(stderr, "    %-26s %8s %7s %10s %10s %8s\n",
             "stage", "sec", "%", "ms/token", "GFLOP", "GF/s");
 
@@ -1051,7 +1099,7 @@ static void pf_report(DSV4Prefill *p, int n, int nchunks, int first_m)
     /* Top-level buckets. These do not overlap: t_hc is the two hc_pre/norm
      * passes, t_attn the whole attention half, t_gate/t_shared/t_moe the MoE
      * halves, and the two I/O buckets are the blocking calls. The remainder is
-     * progress callbacks, the chunk loop and clock overhead. */
+     * progress callbacks, function-call overhead and clock reads. */
     const double covered = s->embed + p->t_hc + p->t_attn + p->t_gate +
                            p->t_shared + p->t_moe + s->expert_io +
                            s->trunk_io + s->bind + s->hc_post_moe;
@@ -1088,6 +1136,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                        float *h_out)
 {
     if (!p || !ids || n <= 0 || !h_out || pos0 < 0) return -1;
+    if (dsv4_prefill_reserve(p, n) != 0) return -1;
+    p->n = n;
     const DSV4Cfg *c = p->c;
     const int hc = c->hc_mult, d = c->hidden;
     const size_t hcd = (size_t)hc * d;
@@ -1108,67 +1158,57 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         p->st.have_estats = 1;
     const uint64_t trunk0 = p->tr ? p->tr->bytes_read : 0;
 
-    const int nchunks = (n + p->B - 1) / p->B;
-    const int first_m = n < p->B ? n : p->B;
-    int chunk_idx = 0;
-    report_progress(p, "start", 0, nchunks, 0, c->n_layers,
-                    0, n, first_m, 0.0, 0.0);
+    report_progress(p, "start", 0, 0, n, 0.0, 0.0);
 
-    int off = 0;
-    int last_m = 1;
-    while (off < n) {
-        int m = n - off;
-        if (m > p->B) m = p->B;
-        last_m = m;
-        chunk_idx++;
-        report_progress(p, "chunk", chunk_idx, nchunks, 0, c->n_layers,
-                        off, n, m, pnow() - t0, (double)off / (double)n);
-
-        {
-            const double te = pnow();
-            for (int t = 0; t < m; t++) {
-                dsv4_embed_row(p->xh, p->mw->embed, p->mw->wdt, ids[off + t], d);
-                for (int j = 0; j < hc; j++)
-                    memcpy(p->H + (size_t)t * hcd + (size_t)j * d, p->xh,
-                           (size_t)d * sizeof(float));
-            }
-            p->st.embed += pnow() - te;
-        }
-
-        for (int L = 0; L < c->n_layers; L++) {
-            DSV4LayerBind lb;
-            const double tb = pnow();
-            const double io0 = p->tr->load_seconds;
-            if (dsv4_trunk_bind(p->tr, c, L, &lb) != 0) return -1;
-            const double io = p->tr->load_seconds - io0;
-            const double call = pnow() - tb;
-            p->t_io += io;
-            p->t_trunk += io;
-            p->t_bind += call > io ? call - io : 0.0;
-            p->st.trunk_io += io;
-            p->st.bind += call > io ? call - io : 0.0;
-
-            const int comp = dsv4_compress_ratio(c, L) != 0;
-            const float *cs = comp ? cs_c : cs_d;
-            const float *sn = comp ? sn_c : sn_d;
-            if (prefill_layer(p, L, &lb.w, m, pos0 + off, ids + off, cs, sn))
-                return -1;
-
-            const double frac = (double)off +
-                (double)m * (double)(L + 1) / (double)c->n_layers;
-            report_progress(p, "layer", chunk_idx, nchunks, L + 1,
-                            c->n_layers, (int)frac, n, m, pnow() - t0,
-                            frac / (double)n);
-        }
-        report_progress(p, "chunk_done", chunk_idx, nchunks, c->n_layers,
-                        c->n_layers, off + m, n, m, pnow() - t0,
-                        (double)(off + m) / (double)n);
-        off += m;
+    /* ONE BLOCK, LAYER-MAJOR.
+     *
+     * The whole prompt is the block. Every token passes layer L before any
+     * token enters L+1, which keeps the layer's dense weights and routed
+     * experts resident for the entire prompt. There is no chunk loop and no
+     * second activation buffer: p->H holds all n residual streams for the
+     * whole call.
+     *
+     * The functional stages below still have their own working-set sizes.
+     * For now each stage processes the whole block; dsv4_mmq_n() splits the
+     * matmuls into fixed kernel tiles internally so the dense GEMMs keep the
+     * cache behavior the old per-128-token chunks had. */
+    const double te = pnow();
+    for (int t = 0; t < n; t++) {
+        dsv4_embed_row(p->xh, p->mw->embed, p->mw->wdt, ids[t], d);
+        for (int j = 0; j < hc; j++)
+            memcpy(p->H + (size_t)t * hcd + (size_t)j * d, p->xh,
+                   (size_t)d * sizeof(float));
     }
-    report_progress(p, "done", nchunks, nchunks, c->n_layers, c->n_layers,
-                    n, n, last_m, pnow() - t0, 1.0);
+    p->st.embed += pnow() - te;
 
-    memcpy(h_out, p->H + (size_t)(last_m - 1) * hcd, hcd * sizeof(float));
+    for (int L = 0; L < c->n_layers; L++) {
+        DSV4LayerBind lb;
+        const double tb = pnow();
+        const double io0 = p->tr->load_seconds;
+        if (dsv4_trunk_bind(p->tr, c, L, &lb) != 0) return -1;
+        const double io = p->tr->load_seconds - io0;
+        const double call = pnow() - tb;
+        p->t_io += io;
+        p->t_trunk += io;
+        p->t_bind += call > io ? call - io : 0.0;
+        p->st.trunk_io += io;
+        p->st.bind += call > io ? call - io : 0.0;
+
+        const int comp = dsv4_compress_ratio(c, L) != 0;
+        const float *cs = comp ? cs_c : cs_d;
+        const float *sn = comp ? sn_c : sn_d;
+
+        /* `layer` is 1-based and names the layer being entered. Progress is
+         * the completed fraction, so the bar moves when a layer finishes and
+         * the label never claims a layer that has not started. */
+        const double frac = (double)L / (double)c->n_layers;
+        report_progress(p, "layer", L + 1, (int)(frac * (double)n), n,
+                        pnow() - t0, frac);
+        if (prefill_layer(p, L, &lb.w, n, pos0, ids, cs, sn)) return -1;
+    }
+
+    report_progress(p, "done", c->n_layers, n, n, pnow() - t0, 1.0);
+    memcpy(h_out, p->H + (size_t)(n - 1) * hcd, hcd * sizeof(float));
     p->t_total = pnow() - t0;
 
     if (p->st.have_estats) {
@@ -1182,7 +1222,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
 
     /* Fold the prompt's timers into the same report decode uses, so the
      * end-of-run "where the time went" is not 90% unaccounted. `t_io` carries
-     * both expert reads and the chunk's trunk reads; split them so the report
+     * both expert reads and the block's trunk reads; split them so the report
      * keeps its two different meanings. */
     dsv4_prof.attn       += p->t_attn;
     dsv4_prof.idxer      += p->t_idx;
@@ -1195,12 +1235,12 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     dsv4_prof.expert_io  += p->t_io - p->t_trunk;
 
     fprintf(stderr,
-            "prefill: %d tokens at pos %d, %d chunk(s) of <=%d, %.2f s "
+            "prefill: %d tokens at pos %d, one block, %.2f s "
             "(%.3f s/token); attn %.2f moe %.2f io %.2f bind %.2f hc %.2f\n",
-            n, pos0, nchunks, first_m, p->t_total,
+            n, pos0, p->t_total,
             p->t_total / (double)n, p->t_attn, p->t_moe, p->t_io,
             p->t_bind, p->t_hc);
-    pf_report(p, n, nchunks, first_m);
+    pf_report(p, n);
     return 0;
 }
 

@@ -341,16 +341,15 @@ static void fp4_n(float *y, const float *x, const uint8_t *W,
     }
 }
 
-void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
+/* One kernel tile. nt is 1..DSV4_MAX_BATCH, which bounds the fixed-size
+ * accumulator arrays above and keeps the activation working set small enough
+ * for the last-level cache. dsv4_mmq_n() below is the public entry point and
+ * walks as many tiles as the caller's token block needs. */
+static void mmq_n_tile(float *y, const float *x, const DSV4QMat *m, int nt)
 {
     if (nt <= 1) {
         dsv4_mmq(y, x, m);
         return;
-    }
-    if (nt > DSV4_MAX_BATCH) {
-        fprintf(stderr, "dsv4_mmq_n: batch %d exceeds DSV4_MAX_BATCH %d "
-                        "for %dx%d\n", nt, DSV4_MAX_BATCH, m->rows, m->cols);
-        abort();
     }
 
     switch (m->wdt) {
@@ -385,5 +384,22 @@ void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
         fprintf(stderr, "dsv4_mmq_n: matrix has unimplemented wdt %d "
                         "(%dx%d)\n", m->wdt, m->rows, m->cols);
         abort();
+    }
+}
+
+void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt)
+{
+    if (nt <= 0) return;
+
+    /* The prefill block is the whole prompt, but no kernel has to hold the
+     * whole block: every token row is independent. Walk the block in
+     * DSV4_MAX_BATCH-row tiles. This is also what keeps the activation
+     * footprint inside LLC; one giant nt turns the dense GEMMs into a DRAM
+     * stream because the output-row loop re-walks x for every row. */
+    for (int off = 0; off < nt; off += DSV4_MAX_BATCH) {
+        int t = nt - off;
+        if (t > DSV4_MAX_BATCH) t = DSV4_MAX_BATCH;
+        mmq_n_tile(y + (size_t)off * (size_t)m->rows,
+                   x + (size_t)off * (size_t)m->cols, m, t);
     }
 }

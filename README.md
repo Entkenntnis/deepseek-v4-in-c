@@ -137,7 +137,6 @@ python3 tools/pack_tokenizer.py ~/models/dsv4-flash ~/dsv4_tok.bin
 | `--readers N` | expert-reader threads, independent of compute (default 6) |
 | `--reader-pin p\|e\|all\|off` | affinity for the reader threads |
 | `--stream-miss N` | keep N miss reads in flight and run each expert's matmul as it lands (default 6); `0` restores the old end-of-batch barrier |
-| `--prefill-batch-size N` | opt-in CPU dense prefill in chunks of N tokens (default 0 = per-token decode path); routed experts stay per token |
 | `--gpu` | put the dense trunk's FP8 matrices in VRAM (opt-in) |
 | `--route-log FILE` | record every expert request, for `tools/sim_cache.py` |
 
@@ -159,10 +158,9 @@ python3 tui/dsv4_tui.py --demo    # synthetic backend, no checkpoint needed
 ```
 
 `--budget 10` is the TUI default (the trunk pins at ~6.3 GB, leaving enough
-expert-cache slots to beat the 3.21 GB working set). The TUI also passes
-`--prefill-batch-size 16` to `dsv4-serve`, so a turn's prompt uses the dense
-prefill path; use `--prefill-batch-size 0` to force the per-token path.
-`/help` lists the in-app
+expert-cache slots to beat the 3.21 GB working set). The TUI prefills each
+turn's new prompt as one block; there is no chunk-size flag. `/help` lists the
+in-app
 commands; [tui/README.md](tui/README.md) explains the panel, the optional
 Markdown rendering (`pip install -r tui/requirements.txt`) and the JSON-lines
 protocol. The one-shot `bin/dsv4` and every correctness gate are unchanged.
@@ -286,7 +284,7 @@ router                   0.5%    0.2 s
 ```
 
 Disk is the largest single line. Note that 15 of these 40 passes are prompt
-tokens — see [Prefill is the expensive half](#prefill-is-the-expensive-half-and-the-default-path-is-not-batched).
+tokens — see [Prefill is the expensive half](#prefill-is-the-expensive-half).
 
 The routed experts stay on the CPU on purpose: 137 GB, none of it resident,
 streamed per token. Sending them across PCIe would add a hop to a disk read.
@@ -363,11 +361,12 @@ Every cache gate passed throughout, for two compounding reasons, both now fixed:
   a different residue. The fixture now mirrors that, and the new gate fails
   without the fix.
 
-## Prefill is the expensive half, and the default path is not batched
+## Prefill is the expensive half
 
-Prompt tokens go through the engine **one at a time**, exactly like generated
-ones. That is a deliberate gap, and this is what it costs. Two runs of the same
-command differing only in prompt length, `--budget 16 --gpu`:
+Prompt tokens used to go through the engine one at a time, exactly like
+generated ones, and that fallback is still available if a block allocation
+fails. This is what the per-token path costs. Two runs of the same command
+differing only in prompt length, `--budget 16 --gpu`:
 
 | prompt | forward passes | wall | |
 |---|---|---|---|
@@ -379,15 +378,15 @@ So a prompt token costs about 1.0 s against 1.62 s for a generated one. It is
 cheaper only because the attention context is shorter — the weight traffic is
 identical, because each token still does its own GEMV against every matrix.
 
-That sets time-to-first-token at roughly **a second per prompt token**: ~3.5
-minutes for a 207-token prompt, and over half an hour for a 2,000-token one.
-For anything with a long prompt — code completion, an agent loop, retrieval —
-this, not the generation rate, is the number that hurts.
+That sets time-to-first-token at roughly **a second per prompt token** on the
+per-token path: ~3.5 minutes for a 207-token prompt, and over half an hour for
+a 2,000-token one. For anything with a long prompt — code completion, an agent
+loop, retrieval — this, not the generation rate, is the number that hurts.
 
-### What a batched GEMM would actually buy
+### Why batching helps
 
-The fix is to run N prompt tokens through a layer together so each weight is
-read once and used N times, lifting arithmetic intensity from ~1 flop/byte
+The fix is to run the prompt's tokens through a layer together so each weight
+is read once and used N times, lifting arithmetic intensity from ~1 flop/byte
 toward N. How much reuse is really available is a property of the routing, so
 it can be measured rather than guessed — replaying a `--route-log` and counting
 requests against distinct experts per layer over the prefill window:
@@ -414,19 +413,29 @@ prefill could get roughly **2-3x faster on a long prompt, and ~15% on a
 25-token one**. That is an estimate from the breakdown, not a measurement —
 the only measurements here are the timings and the reuse factors above.
 
-It is not a small change: it needs a batched variant of every matmul, batched
-attention, and the compressor's `start_pos == 0` branch, and each has to keep
-the same 16-accumulator tree per (row, token) pair to stay bit-exact.
+### CPU prefill is now one block
 
-### CPU dense prefill is now opt-in and measured
+Prompts with more than one token go through `src/prefill/` as a single block:
 
-`--prefill-batch-size N` sends the prompt through a separate module in
-`src/prefill/`. It batches the **dense** matrices only — q/kv/output
-projections, the shared expert and the router — while the routed experts stay
-on the per-token path. That boundary is deliberate: at a 32-token prompt top-6
-over 256 experts gives only ~2.9x reuse, and the earlier expert-union
-experiment measured **+50% exposed I/O** because deduplicating requests removed
-the cache hits that paid for the overlap.
+- The block is layer-major. Every token passes layer L before any token enters
+  L+1, so the layer's dense weights and routed-expert working set stay
+  resident for the whole prompt.
+- The dense matrices, the shared expert, the router and the routed experts are
+  batched over the block. mHC, RoPE, the compressor's sequential state, the
+  CSA indexer and sparse attention remain per token because they carry a
+  position-ordered dependency or have no weight-reuse payoff.
+- The matmul entry point splits the block into fixed 128-row kernel tiles
+  internally. Token rows are independent, so this changes neither the
+  arithmetic nor the per-(row, token) reduction order; it keeps the activation
+  working set in cache and bounds the kernel stack arrays.
+- There is no chunk-size flag. The one-shot CLI and `dsv4-serve` both preflight
+  the block allocation; if it fails, they fall back to the per-token path
+  before any KV or compressor state is touched. A failure after the block
+  starts is terminal, because the state has already moved.
+- Block memory scales with prompt length: roughly 1.6 MB/token when block
+  buffers and per-token scratch are combined. The functional stages currently
+  process the whole block; splitting them into per-stage tiles is the next
+  tuning step.
 
 The kernel bench is `bin/prefill_gemm` (cold weights, per-token speedup,
 `OMP_NUM_THREADS=4`). At nt=32:
@@ -440,20 +449,11 @@ The kernel bench is `bin/prefill_gemm` (cold weights, per-token speedup,
 | fp8 shared `w1` 2048×4096 | **1.92x** |
 | bf16 router 256×4096 | 1.1x |
 
-End to end, `--budget 16`, the same prompt on both paths and interleaved:
-
-| prompt | per-token TTFT | `--prefill-batch-size 32` |
-|---|---:|---:|
-| 30 tokens | 18.2–19.8 s | **14.9–15.1 s** |
-| 60 tokens (two chunks) | 35.6 s | **28.9 s** |
-| 30 tokens, `--prefill-batch-size 2` | — | 21.9 s (no win) |
-
-Token ids were identical in every arm, including batch sizes 2, 7, 32 and a
-ragged 60-token prompt. The default remains the per-token decode path; the flag
-is opt-in, and an allocation failure falls back to it before any layer state is
-touched. `dsv4-serve` accepts the same flag and prefills only the new turn,
-starting at the position where the previous turn stopped; the TUI passes 16 by
-default and `--prefill-batch-size 0` restores the per-token path there too.
+Before the block refactor, the same prompt at `--budget 16` measured
+18.2–19.8 s TTFT per token and **14.9–15.1 s** with fixed 32-token chunks.
+That knob no longer exists; those numbers are kept as the last controlled A/B
+for the kernels, not as a description of the current interface. Token ids are
+identical between the block path and the per-token fallback.
 
 ## DeepSeek-V4-Pro
 

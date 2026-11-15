@@ -14,19 +14,20 @@
 
 #include "dsv4.h"
 
-/* Prompt tokens processed together by the batched prefill path.
- *
- * A cap, not a tuning parameter: it bounds the fixed-size accumulator arrays
- * in the batched kernels and the per-token scratch the prefill module holds.
- * The measured kernel curve plateaus by 16-32, so 64 leaves room to test
- * without pretending an arbitrary prompt length is free. */
+/* Rows per kernel tile. This is NOT the prefill block size: the whole prompt
+ * is one block now, and dsv4_mmq_n() walks it in tiles of at most this many
+ * rows. The value bounds the fixed-size accumulator arrays in the batch
+ * kernels and keeps the activation working set in LLC. The measured kernel
+ * curve plateaus by 16-32 rows; 128 is deliberately above that and costs only
+ * stack/workspace, not another copy of the weights. */
 #define DSV4_MAX_BATCH     128
 
 /* y[t*rows + o] = sum_c x[t*cols + c] * W[o,c], for t in 0..nt-1.
  *
- * nt == 1 must behave exactly like dsv4_mmq(). The kernels keep the
- * per-(row, token) reduction order of the GEMV; only the order in which
- * independent dot products are issued changes. nt must be 1..DSV4_MAX_BATCH.
+ * nt may be any positive number: the call is split into DSV4_MAX_BATCH-row
+ * tiles internally. Token rows are independent, so tiling changes neither the
+ * arithmetic nor the per-(row, token) reduction order. nt == 1 must behave
+ * exactly like dsv4_mmq().
  */
 void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt);
 

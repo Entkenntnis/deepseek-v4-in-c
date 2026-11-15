@@ -11,16 +11,22 @@
  *
  * WHAT IS BATCHED
  *   The dense matrices: q/kv/output projections, the shared expert and the
- *   router, read once per chunk and used for every token in it. The routed
+ *   router, read once per block and used for every token in it. The routed
  *   experts are batched too, by layer-level union: every distinct expert the
- *   chunk routes to is requested once, and each expert's whole token bucket is
- *   run through one FP4 batch kernel. In a 64-token chunk that turns ~384
- *   per-token expert requests into ~99 expert-major buckets.
+ *   block routes to is requested once, and each expert's whole token bucket is
+ *   run through one FP4 batch kernel.
  *
  * WHAT IS NOT BATCHED, DELIBERATELY
  *   mHC, RoPE, the compressor's sequential state, the CSA indexer and sparse
  *   attention. They either carry a position-ordered dependency or have no
  *   weight-reuse payoff. Only the projections are GEMMs.
+ *
+ * SCHEDULING
+ *   The prompt is one block and is walked layer-major: every token of layer L
+ *   runs before L+1. That keeps L's dense weights and routed-expert working set
+ *   resident for the whole prompt. The matmul entry point splits the block into
+ *   fixed kernel tiles internally, so a very long block does not turn the dense
+ *   GEMMs into a DRAM stream.
  */
 #ifndef DSV4_PREFILL_H
 #define DSV4_PREFILL_H
@@ -34,27 +40,22 @@
 #include "dsv4_layer.h"
 #include "dsv4_trunk.h"
 
-/* Progress is layer-major: a chunk of tokens is walked through layer 0..N-1,
- * so a per-token "progress" is an estimate until the chunk completes. The
- * fields are deliberately explicit rather than a single percentage: a caller
- * can show the stage, the chunk, the layer and a bar without guessing. */
+/* Progress. The prefill block is the whole prompt: every layer walks every
+ * token before the next layer starts. `layer` is the layer currently running
+ * (1-based); `tokens_done` is an estimate while the block is mid-layer. */
 typedef struct {
-    const char *stage;      /* start | chunk | layer | chunk_done | done */
-    int chunk, chunks;      /* 1-based chunk index and total */
-    int layer, layers;      /* completed layers in this chunk / total layers */
-    int tokens_done;        /* tokens whose work is complete or estimated */
-    int tokens_total;
-    int chunk_tokens;
-    int batch;              /* actual size of this chunk, not the configured cap */
+    const char *stage;      /* start | layer | done */
+    int layer, layers;      /* current layer (1-based) / total layers */
+    int tokens_done;        /* estimated from completed layers */
+    int tokens_total;       /* tokens in this block */
     double elapsed;         /* seconds since this prefill call began */
-    double progress;        /* 0..1, estimated across the whole prompt */
+    double progress;        /* 0..1, estimated across the block */
 } DSV4PrefillProgress;
 
 typedef void (*DSV4PrefillProgressFn)(void *ctx,
                                       const DSV4PrefillProgress *p);
 
 typedef struct {
-    int batch;      /* tokens per chunk, 1..DSV4_MAX_BATCH. 1 = disabled */
     int max_pos;    /* same bound the decode scratch/state were built with */
     DSV4PrefillProgressFn on_progress; /* optional; NULL in one-shot use */
     void *progress_ctx;
@@ -67,7 +68,13 @@ int  dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
                        const DSV4ModelW *mw, const DSV4PrefillOpts *opt);
 void dsv4_prefill_free(DSV4Prefill *p);
 
-/* Run tokens ids[0..n-1] through every layer, in chunks, at absolute
+/* Allocate the block buffers for `n_tokens` before any model state is touched.
+ * dsv4_prefill_range() calls this too, but a caller that wants a safe fallback
+ * to the per-token path on allocation failure should call it first: after the
+ * range starts writing KV/compressor state there is no way back. */
+int  dsv4_prefill_reserve(DSV4Prefill *p, int n_tokens);
+
+/* Run tokens ids[0..n-1] through every layer as one block, at absolute
  * positions pos0..pos0+n-1. On return `h_out` is the last token's residual
  * stream, ready for the output head.
  *

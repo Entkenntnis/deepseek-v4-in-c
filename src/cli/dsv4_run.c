@@ -8,10 +8,9 @@
  *   the released encoding/ folder is the message-formatting path. So this
  *   produces base-model continuations, not replies.
  *
- *   By default there is no chunked prefill: the prompt is fed one token at a
- *   time through the same decode path the generated tokens use, which is
- *   correct and not fast. `--prefill-batch-size N` opts into the separate
- *   dense prefill module in src/prefill; decode keeps its own path.
+ *   Prefill is one block: the whole prompt walks each layer before the next,
+ *   using the separate dense prefill module in src/prefill. The matmul kernels
+ *   tile the block internally. Decode keeps its own bit-exact per-token path.
  *
  * TWO ROPE TABLES, NOT ONE
  *   model.py Attention.__init__ builds freqs_cis with compress_rope_theta and
@@ -251,8 +250,7 @@ static void usage(const char *me)
            "       [--chat] [--think] [--system TEXT]\n"
            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
            "       [--reader-pin off|all|p|e] [--synthetic-kv START_POS]\n"
-           "       [--synthetic-experts] [--stream-miss N (default 6)]\n"
-           "       [--prefill-batch-size N (0 disables; dense prefill path)]\n", me);
+           "       [--synthetic-experts] [--stream-miss N (default 6)]\n", me);
 }
 
 int main(int argc, char **argv)
@@ -270,7 +268,6 @@ int main(int argc, char **argv)
     int synthetic_kv = 0;       /* >0: prefill the KV state, start at this pos */
     int synthetic_experts = 0;  /* benchmark: one fixed FP4 expert in RAM */
     int stream_miss = 6;        /* miss reads in flight per layer; 0 = barrier */
-    int prefill_batch = 0;      /* 0 = per-token decode path (default) */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model)      { model = argv[i]; continue; }
@@ -298,8 +295,6 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--synthetic-experts")) synthetic_experts = 1;
         else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
             stream_miss = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--prefill-batch-size") && i + 1 < argc)
-            prefill_batch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--think")) { chat = 1; think = 1; }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) { sysprompt = argv[++i]; chat = 1; }
@@ -523,27 +518,26 @@ int main(int argc, char **argv)
      * engine is usable in an agent loop. */
     double ttft = 0.0;
 
-    /* Batched dense prefill, off by default.
+    /* Whole-prompt dense prefill.
      *
      * This is deliberately a separate module (src/prefill). The decode loop
-     * below remains the bit-exact reference; only the prompt is allowed to take
-     * the GEMM path, and only when the user asks for it. If allocation fails,
-     * the run falls back to the per-token path before any layer state is
-     * touched. A failure during the prompt itself is not fallback-safe -- the
-     * KV cache and compressor state have already moved -- so it aborts. */
+     * below remains the bit-exact reference; only the prompt takes the GEMM
+     * path. Allocation is preflighted before the first layer state is touched,
+     * so an out-of-memory block can still fall back to the per-token path. A
+     * failure during the prompt itself is not fallback-safe -- the KV cache and
+     * compressor state have already moved -- so it aborts. */
     int prefill_done = 0, prefill_eos = 0;
-    if (prefill_batch > 1 && synthetic_kv == 0 && nprompt > 1) {
-        int pb = prefill_batch;
-        if (pb > DSV4_MAX_BATCH) {
-            fprintf(stderr, "prefill: batch %d clamped to DSV4_MAX_BATCH %d\n",
-                    pb, DSV4_MAX_BATCH);
-            pb = DSV4_MAX_BATCH;
-        }
-        DSV4PrefillOpts po = { .batch = pb, .max_pos = maxpos };
+    if (synthetic_kv == 0 && nprompt > 1) {
+        const DSV4PrefillOpts po = { .max_pos = maxpos };
         DSV4Prefill *pf = NULL;
         if (dsv4_prefill_init(&pf, &c, &tr, lst, &src, &mb.w, &po) != 0) {
             fprintf(stderr, "prefill: init failed; falling back to the "
                             "per-token decode path\n");
+        } else if (dsv4_prefill_reserve(pf, nprompt) != 0) {
+            fprintf(stderr, "prefill: cannot allocate a %d-token block; "
+                            "falling back to the per-token decode path\n",
+                    nprompt);
+            dsv4_prefill_free(pf);
         } else {
             if (dsv4_prefill_prompt(pf, ids, nprompt, cs_d, sn_d, cs_c, sn_c,
                                     h) != 0) {
@@ -578,10 +572,10 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Prompt tokens and generated tokens use the SAME forward path when the
-     * batched prefill is off. That keeps prefill and decode timings
-     * comparable: there is no separate GEMM path whose cost would have to be
-     * reasoned about separately.
+    /* Prompt tokens and generated tokens use the SAME forward path only when
+     * the block prefill could not run. That keeps the fallback comparable:
+     * there is no second GEMM path whose cost would have to be reasoned about
+     * separately.
      *
      * With --synthetic-kv the prefill is skipped: step 0 is the seed token at
      * start_pos and every later step is a decode step against the filled KV.

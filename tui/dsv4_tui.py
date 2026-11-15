@@ -467,7 +467,7 @@ class DemoBackend:
 
         self.sink.event({
             "event": "start", "pos": 0, "prompt_tokens": prompt_tokens,
-            "gen_max": ngen, "mode": mode, "prefill_batch": 0,
+            "gen_max": ngen, "mode": mode, "prefill_tokens": 0,
             "context_cap": 4096, **self._base(),
         })
 
@@ -609,7 +609,7 @@ class App:
         self.last_token_t = 0.0
         # One duration per decoded token, in turns.
         self.decode_spt: deque[float] = deque(maxlen=4096)
-        self.prefill_batch = int(getattr(args, "prefill_batch_size", 0) or 0)
+        self.prefill_size = 0
         self.prefill_progress: dict = {}
         self.prefill_active = False
         self.prefill_s = 0.0
@@ -664,8 +664,7 @@ class App:
                 "--ctx", str(self.args.ctx),
                 "--gen", str(self.args.gen),
             ]
-            # None means "let the engine use its default", so the TUI follows
-            # the same thread policy as bin/dsv4 without duplicating it here.
+            # The TUI follows the engine's thread policy without duplicating it.
             if self.args.threads is not None:
                 argv += ["--threads", str(self.args.threads)]
             if self.args.pin is not None:
@@ -674,12 +673,6 @@ class App:
                 argv += ["--readers", str(self.args.readers)]
             if self.args.reader_pin is not None:
                 argv += ["--reader-pin", self.args.reader_pin]
-            # The TUI defaults to a small dense prefill batch. 0 falls back to
-            # the per-token decode path; the serve flag is the same one the
-            # one-shot CLI uses.
-            pb = getattr(self.args, "prefill_batch_size", 0)
-            if pb is not None:
-                argv += ["--prefill-batch-size", str(pb)]
             if self.args.think:
                 argv.append("--think")
             if self.args.no_layers:
@@ -948,9 +941,9 @@ class App:
             self.last_token_t = 0.0
             # decode_spt is cleared on the first decoded token, so the graph
             # only ever covers the current turn's decode.
-            self.prefill_batch = int(ev.get("prefill_batch") or 0)
+            self.prefill_size = int(ev.get("prefill_tokens") or 0)
             self.prefill_progress = {}
-            self.prefill_active = self.prefill_batch > 1
+            self.prefill_active = self.prefill_size > 1
             self.prefill_s = 0.0
             self.prefill_tokens = 0
             self.prefill_elapsed = 0.0
@@ -978,12 +971,9 @@ class App:
         elif name == "prefill":
             self.prefill_progress = ev
             self.prefill_active = True
-            # `chunk_tokens` is the chunk that just ran; `batch` carries the
-            # same actual value. Prefer the former so an older backend that
-            # only reports the configured cap still shows the shrunken chunk.
-            batch = int(ev.get("chunk_tokens") or ev.get("batch") or 0)
-            if batch:
-                self.prefill_batch = batch
+            total = int(ev.get("tokens_total") or 0)
+            if total:
+                self.prefill_size = total
             self.current_layer = int(ev.get("layer") or self.current_layer)
             self.phase = "prompt"
             self.dirty = True
@@ -1370,10 +1360,7 @@ class App:
         if status == "generating":
             n_layers = int((self.ready.get("config") or {}).get("layers") or 0) or 43
             if self.phase == "prompt":
-                if self.prefill_batch > 1:
-                    phase = f"prefill batch {self.prefill_batch}"
-                else:
-                    phase = f"prefill {self.current_layer}/{n_layers}"
+                phase = f"prefill {self.current_layer}/{n_layers}"
             elif self.phase == "resume":
                 phase = "closing previous turn"
             else:
@@ -1570,13 +1557,8 @@ class App:
 
         p = self.prefill_progress or {}
         stage = p.get("stage") or "start"
-        # Show the chunk that actually ran. The configured batch is only
-        # a cap: a 3-token prompt reports 3, and a long prompt's last
-        # chunk reports its remainder rather than the cap.
-        batch = int(p.get("chunk_tokens") or p.get("batch")
-                    or self.prefill_batch or 0)
-        chunk = int(p.get("chunk") or 0)
-        chunks = int(p.get("chunks") or 0)
+        # The whole prompt is one block. Its token count is fixed for the turn.
+        size = int(p.get("tokens_total") or self.prefill_size or 0)
         layer = int(p.get("layer") or 0)
         layers = int(p.get("layers") or 0)
 
@@ -1594,10 +1576,6 @@ class App:
             done = tokens
             if stage == "layer":
                 status = f"layers {layer}/{layers}"
-            elif stage == "chunk":
-                status = f"chunk {chunk}/{chunks}"
-            elif stage == "chunk_done":
-                status = f"chunk {chunk}/{chunks} done"
             elif stage == "head":
                 status = "output head"
             elif stage == "done":
@@ -1610,18 +1588,17 @@ class App:
             (f" {status}", "muted" if status == "done" else "active")]
         if total:
             seg.append((f"  {done}/{total} tok", "value"))
-        if batch > 1:
-            seg.append((f"  batch {batch}", "dim"))
+        if size > 1:
+            seg.append((f"  block {size}", "dim"))
         emit(*seg)
 
         if final:
             spt = seconds / tokens
             tps = tokens / seconds
-            # The header already carries the batch size when it is > 1.
-            mode = "; per-token" if batch <= 1 else ""
+            mode = "; per-token" if size <= 1 else ""
             emit((" ", "dim"),
-                 (f"{tokens} tokens in {seconds:.2f} s "
-                  f"({tps:.2f} tok/s, {spt:.3f} s/tok)",
+                 (f"{seconds:.2f} s "
+                  f"({tps:.2f} tok/s, {spt:.3f} s/tok{mode})",
                   "value"))
         else:
             prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)
@@ -2106,10 +2083,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pin", choices=["off", "all", "p", "e"], default=None,
                    help="compute affinity: off, all, P-cores (p) or E-cores (e); "
                         "default: engine policy")
-    p.add_argument("--prefill-batch-size", type=int, default=128,
-                   metavar="N",
-                   help="dense prefill chunk size handed to dsv4-serve "
-                        "(default: 16; 0 = per-token decode path)")
     p.add_argument("--readers", type=int, default=None,
                    help="expert-reader threads; default: engine policy (6)")
     p.add_argument("--reader-pin", choices=["off", "all", "p", "e"],
