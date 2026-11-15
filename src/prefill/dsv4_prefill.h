@@ -87,10 +87,4 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                        const float *cs_c, const float *sn_c,
                        float *h_out);
 
-/* The one-shot case: a fresh sequence, positions 0..n-1. */
-int dsv4_prefill_prompt(DSV4Prefill *p, const int32_t *ids, int n,
-                        const float *cs_d, const float *sn_d,
-                        const float *cs_c, const float *sn_c,
-                        float *h_out);
-
 #endif /* DSV4_PREFILL_H */

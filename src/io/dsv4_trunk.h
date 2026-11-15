@@ -101,7 +101,7 @@ void dsv4_trunk_close(DSV4Trunk *tr);
  * budget buys nothing. A caller splitting one budget between the trunk and the
  * expert cache should therefore give the trunk what it asks for and hand the
  * REMAINDER to the cache, rather than dividing by a fixed ratio -- see the note
- * in dsv4_run.c. */
+ * in dsv4_serve.c. */
 int64_t dsv4_trunk_resident_bytes(const DSV4Trunk *tr);
 
 /* Make layer L resident and point b's weight pointers at it. */

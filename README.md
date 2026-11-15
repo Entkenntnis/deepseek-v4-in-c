@@ -2,6 +2,10 @@
 
 Upstream: https://github.com/ronak-create/deepseek-v4-in-c
 
+This file is for humans, never touch or change by agent.
+
+---
+
 Optimised version for my system: Intel Core Ultra 7 256V, 32 GB RAM, 1 TB NVMe
 
 Main entry point is `make tui` and start chatting.

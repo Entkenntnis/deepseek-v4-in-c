@@ -130,8 +130,8 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
      * eviction order. Enforcing it here broke that gate and told me the check
      * was in the wrong place.
      *
-     * Prevention lives in the budget planner (dsv4_run.c reserves topk experts
-     * before the trunk takes its share) and the last line of defence is in
+     * Prevention lives in the budget planner (it reserves topk experts before
+     * the trunk takes its share) and the last line of defence is in
      * moe(), which aborts rather than emit a token routed through fewer experts
      * than the model specifies. That failure used to be silent: at --budget 3
      * the cache got 5 slots against a top-k of 6 and the fourth generated token

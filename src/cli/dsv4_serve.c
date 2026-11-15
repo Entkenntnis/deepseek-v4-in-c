@@ -1,16 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_serve.c - a JSON-lines front end for the TUI, and nothing else.
+/* dsv4_serve.c - the engine front end: JSON lines for the TUI and tools.
  *
  * WHY THIS EXISTS
- *   dsv4_run.c is deliberately one-shot: it loads the model, prints ids, reports
- *   totals, and exits. That is the right shape for a gate or a benchmark, and the
- *   wrong shape for a conversation, where the KV state must survive from one turn
- *   to the next and a 1.6 s/token model needs to show what it is doing WHILE it
- *   does it.
- *
- *   This binary keeps the engine resident and speaks one JSON object per line on
- *   stdout. Python reads those lines and paints a TUI. Nothing here is used by
- *   the correctness gates; this file is additive.
+ *   The engine is meant to stay resident: the KV state must survive from one
+ *   turn to the next, and a 1.6 s/token model needs to show what it is doing
+ *   WHILE it does it. This binary keeps the engine loaded and speaks one JSON
+ *   object per line on stdout. Python reads those lines and paints a TUI or a
+ *   one-shot diagnostic report. Nothing here is used by the correctness gates;
+ *   this file is the only CLI.
  *
  * PROTOCOL (line-delimited JSON)
  *   stdin  commands:
@@ -80,8 +77,8 @@ static void handle_cancel(int sig)
     cancel_requested = 1;
 }
 
-/* Tokenizer entry points. dsv4_tok.h documents decode() but, like dsv4_run.c,
- * leaves the rest to each CLI so the header stays about the algorithm. */
+/* Tokenizer entry points. dsv4_tok.h documents decode() but leaves the rest
+ * here so the header stays about the algorithm. */
 int  dsv4_tok_load(DSV4Tok *, const char *);
 void dsv4_tok_free(DSV4Tok *);
 int  dsv4_tok_encode(const DSV4Tok *, const char *, int, int32_t *, int);
@@ -474,9 +471,8 @@ static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
 
 /* ----------------------------------------------------------- engine core -- */
 
-/* The head's own hc reduction. Copied from dsv4_run.c on purpose: it is small,
- * it is model math, and dsv4_run.c is a self-contained CLI rather than a
- * library. If a third caller appears, this moves into dsv4_layer.c. */
+/* The head's own hc reduction. It is small model math, kept here because this
+ * is the only caller; if a second one appears, it moves into dsv4_layer.c. */
 static void hc_head(float *y, const float *x, const DSV4HcW *w,
                     int hc, int hidden, float norm_eps, float hc_eps)
 {

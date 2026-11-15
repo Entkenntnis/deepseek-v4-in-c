@@ -21,13 +21,15 @@ TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 
-.PHONY: test tui clean
+.PHONY: test serve tui clean
 .SECONDARY: $(TEST_OBJ)
 
 test: $(TEST_BIN)
 	@set -e; for t in $(TEST_BIN); do echo; ./$$t; done
 
-tui: $(BIN)/dsv4-serve
+serve: $(BIN)/dsv4-serve
+
+tui: serve
 	python3 tui/dsv4_tui.py --budget auto --ctx 8192 --gen 1024
 
 $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)

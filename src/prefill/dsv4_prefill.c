@@ -1243,12 +1243,3 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     pf_report(p, n);
     return 0;
 }
-
-int dsv4_prefill_prompt(DSV4Prefill *p, const int32_t *ids, int n,
-                        const float *cs_d, const float *sn_d,
-                        const float *cs_c, const float *sn_c,
-                        float *h_out)
-{
-    return dsv4_prefill_range(p, ids, n, 0,
-                              cs_d, sn_d, cs_c, sn_c, h_out);
-}
