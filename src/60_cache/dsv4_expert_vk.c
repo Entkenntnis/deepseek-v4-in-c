@@ -1,13 +1,16 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_expert_vk.c - one routed FP4 expert's fused pass on the iGPU.
+/* dsv4_expert_vk.c - routed FP4 experts on the iGPU, submitted in waves.
  *
- * The shader is the one from bench/vk_expert: w1 and w3, one barrier, fused
- * SWiGLU, one barrier, w2. The reduction tree still matches the CPU matmul;
- * only the SwiGLU exp differs, which is accepted. Weights come straight from
- * the cache's imported host pages through the pool's VkBuffer.
+ * One expert is still w1/w3, one barrier, fused SwiGLU, one barrier, w2. What
+ * changed is the unit of submission: every expert that is available at the same
+ * moment is recorded into one command buffer, so a wave pays one submit and one
+ * fence instead of one per expert. The two barriers are therefore per wave, not
+ * per expert.
  *
- * This iteration is deliberately one-by-one: one submit and one fence per
- * expert. It is a correctness/bring-up step, not the performance step.
+ * Waves do not wait for each other. The caller submits a wave and keeps going;
+ * dsv4_expert_vk_wait_wave() is called only when the results are needed. This
+ * is what lets the shared expert and the next disk reads overlap with device
+ * work.
  */
 #define _GNU_SOURCE
 
@@ -20,6 +23,7 @@
 #include "dsv4_expert_vk.h"
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
+#include "dsv4_prof.h"
 #include "expert_fp4_spv.h"
 
 /* Must match the shader's push-constant block. */
@@ -31,6 +35,14 @@ typedef struct {
 
 #define WG_ROWS 64u
 #define SWIGLU_WG 256u
+
+/* One slot for the resident/hit wave and one per possible individual miss. */
+#define DSV4_VK_MAX_WAVES (DSV4_MAX_TOPK + 1)
+
+/* Timestamps per expert: w1 start/end, w3 end, swiglu start/end, w2 start/end.
+ * The "start" stamps matter in a wave: without them the gap to the previous
+ * expert's dispatch would be charged to this expert's SwiGLU/w2. */
+#define DSV4_VK_TS_JOB 7u
 
 struct DSV4ExpertVk {
     DSV4CacheVk *vk;
@@ -45,11 +57,19 @@ struct DSV4ExpertVk {
     int                   npool;
 
     VkCommandPool   cpool;
-    VkCommandBuffer cmd;
-    VkFence         fence;
+    VkCommandBuffer cmd[DSV4_VK_MAX_WAVES];
+    VkFence         fence[DSV4_VK_MAX_WAVES];
+    int             slot_used[DSV4_VK_MAX_WAVES];
+
+    /* Five queries per expert in a wave: start, w1, w3, swiglu, w2. */
+    VkQueryPool qpool;
+    int         has_ts;
+    uint32_t    ts_valid_bits;
+    uint64_t    ts_mask;
+    double      ts_period_ns;
 
     DSV4VkMapped scratch;
-    int   hidden, inter;
+    int   hidden, inter, max_jobs;
     float limit;
     uint32_t x_off, gate_off, up_off, mid_off, y_off, trio_floats;
 };
@@ -82,14 +102,15 @@ static void rec_matvec(DSV4ExpertVk *g, VkCommandBuffer cmd,
     vkCmdDispatch(cmd, (out_n + WG_ROWS - 1u) / WG_ROWS, 1, 1);
 }
 
-static void rec_swiglu(DSV4ExpertVk *g, VkCommandBuffer cmd)
+static void rec_swiglu(DSV4ExpertVk *g, VkCommandBuffer cmd,
+                       uint32_t gate_off, uint32_t up_off, uint32_t mid_off)
 {
     PC pc;
     memset(&pc, 0, sizeof pc);
     pc.in_n   = (uint32_t)g->inter;
-    pc.x_off  = g->gate_off;
-    pc.up_off = g->up_off;
-    pc.y_off  = g->mid_off;
+    pc.x_off  = gate_off;
+    pc.up_off = up_off;
+    pc.y_off  = mid_off;
     pc.mode   = 1;
     pc.limit  = g->limit;
     vkCmdPushConstants(cmd, g->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0,
@@ -110,12 +131,30 @@ static void mem_barrier(VkCommandBuffer cmd)
                          1, &mb, 0, NULL, 0, NULL);
 }
 
+static void ts_write(DSV4ExpertVk *g, VkCommandBuffer cmd, uint32_t q)
+{
+    if (g->has_ts)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            g->qpool, q);
+}
+
 static uint32_t slot_off(const DSV4ExpertVk *g, const void *p,
                          const DSV4ExpertW *e)
 {
     const int64_t d = (const unsigned char *)p - e->vk_base;
     (void)g;
     return (uint32_t)(e->vk_off + d);
+}
+
+static int take_slot(DSV4ExpertVk *g)
+{
+    for (int i = 0; i < DSV4_VK_MAX_WAVES; i++) {
+        if (!g->slot_used[i]) {
+            g->slot_used[i] = 1;
+            return i;
+        }
+    }
+    return -1;
 }
 
 int dsv4_expert_vk_init(DSV4ExpertVk **out, DSV4CacheVk *cache_vk,
@@ -139,6 +178,8 @@ int dsv4_expert_vk_init(DSV4ExpertVk **out, DSV4CacheVk *cache_vk,
     g->queue   = dsv4_cache_vk_queue(cache_vk);
     g->hidden  = hidden;
     g->inter   = inter;
+    g->max_jobs = cfg->topk > 0 && cfg->topk <= DSV4_MAX_TOPK
+                ? cfg->topk : DSV4_MAX_TOPK;
     g->limit   = cfg->swiglu_limit;
     g->x_off   = 0;
     g->gate_off = (uint32_t)hidden;
@@ -154,8 +195,8 @@ int dsv4_expert_vk_init(DSV4ExpertVk **out, DSV4CacheVk *cache_vk,
     }
 
     if (dsv4_cache_vk_alloc_mapped(cache_vk,
-                                   (uint64_t)g->trio_floats * sizeof(float),
-                                   &g->scratch) != 0) {
+                                   (uint64_t)g->trio_floats * g->max_jobs
+                                   * sizeof(float), &g->scratch) != 0) {
         fprintf(stderr, "dsv4_expert_vk: could not allocate scratch\n");
         free(g);
         return -1;
@@ -277,15 +318,35 @@ int dsv4_expert_vk_init(DSV4ExpertVk **out, DSV4CacheVk *cache_vk,
     cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cbi.commandPool = g->cpool;
     cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbi.commandBufferCount = 1;
-    if (vkchk(vkAllocateCommandBuffers(g->dev, &cbi, &g->cmd),
-              "command buffer")) { dsv4_expert_vk_free(g); return -1; }
+    cbi.commandBufferCount = DSV4_VK_MAX_WAVES;
+    if (vkchk(vkAllocateCommandBuffers(g->dev, &cbi, g->cmd),
+              "command buffers")) { dsv4_expert_vk_free(g); return -1; }
 
     VkFenceCreateInfo fci;
     memset(&fci, 0, sizeof fci);
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    if (vkchk(vkCreateFence(g->dev, &fci, NULL, &g->fence),
-              "fence")) { dsv4_expert_vk_free(g); return -1; }
+    for (int i = 0; i < DSV4_VK_MAX_WAVES; i++)
+        if (vkchk(vkCreateFence(g->dev, &fci, NULL, &g->fence[i]),
+                  "fence")) { dsv4_expert_vk_free(g); return -1; }
+
+    if (dsv4_cache_vk_has_timestamps(cache_vk)) {
+        VkQueryPoolCreateInfo qpi;
+        memset(&qpi, 0, sizeof qpi);
+        qpi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpi.queryCount =
+            (uint32_t)(DSV4_VK_MAX_WAVES * g->max_jobs * DSV4_VK_TS_JOB);
+        if (vkCreateQueryPool(g->dev, &qpi, NULL, &g->qpool) == VK_SUCCESS) {
+            g->has_ts = 1;
+            g->ts_period_ns = dsv4_cache_vk_timestamp_period_ns(cache_vk);
+            g->ts_valid_bits = dsv4_cache_vk_timestamp_valid_bits(cache_vk);
+            /* vkCmdWriteTimestamp may deliver fewer than 64 bits. Mask the
+             * unsigned difference so a counter wrap stays a small duration. */
+            g->ts_mask = g->ts_valid_bits >= 64
+                       ? UINT64_MAX
+                       : ((UINT64_C(1) << g->ts_valid_bits) - 1u);
+        }
+    }
 
     *out = g;
     return 0;
@@ -295,7 +356,9 @@ void dsv4_expert_vk_free(DSV4ExpertVk *g)
 {
     if (!g) return;
     if (g->dev) vkDeviceWaitIdle(g->dev);
-    if (g->fence) vkDestroyFence(g->dev, g->fence, NULL);
+    for (int i = 0; i < DSV4_VK_MAX_WAVES; i++)
+        if (g->fence[i]) vkDestroyFence(g->dev, g->fence[i], NULL);
+    if (g->qpool) vkDestroyQueryPool(g->dev, g->qpool, NULL);
     if (g->cpool) vkDestroyCommandPool(g->dev, g->cpool, NULL);
     if (g->pipe) vkDestroyPipeline(g->dev, g->pipe, NULL);
     if (g->dpool) vkDestroyDescriptorPool(g->dev, g->dpool, NULL);
@@ -307,57 +370,246 @@ void dsv4_expert_vk_free(DSV4ExpertVk *g)
     free(g);
 }
 
-int dsv4_expert_vk_forward(DSV4ExpertVk *g, const DSV4ExpertW *e,
-                           const float *x, float *out)
+int dsv4_expert_vk_submit_wave(DSV4ExpertVk *g,
+                               const DSV4ExpertVkJob *jobs, int n,
+                               const float *x, int timing,
+                               DSV4ExpertVkWave *w)
 {
-    if (!g || !e || !e->vk_base || !x || !out) return -1;
-    if (e->vk_pool < 0 || e->vk_pool >= g->npool) return -1;
+    if (!g || !jobs || !w || !x || n <= 0 || n > g->max_jobs) return -1;
+    for (int j = 0; j < n; j++) {
+        if (jobs[j].k < 0 || jobs[j].k >= g->max_jobs ||
+            !jobs[j].e || !jobs[j].e->vk_base || !jobs[j].out)
+            return -1;
+        if (jobs[j].e->vk_pool < 0 || jobs[j].e->vk_pool >= g->npool)
+            return -1;
+        for (int p = 0; p < j; p++)
+            if (jobs[p].k == jobs[j].k) return -1;
+    }
+
+    const int slot = take_slot(g);
+    if (slot < 0) {
+        fprintf(stderr, "dsv4_expert_vk: no free wave slot (max %d)\n",
+                DSV4_VK_MAX_WAVES);
+        return -1;
+    }
+
+    memset(w, 0, sizeof *w);
+    w->n = n;
+    w->slot = slot;
+    w->timing = timing;
+    w->valid = 1;
+    w->start_at = timing ? dsv4_now_s() : 0.0;
+    double ta = w->start_at;
 
     float *f = (float *)g->scratch.cpu;
-    memcpy(f + g->x_off, x, (size_t)g->hidden * sizeof(float));
+    for (int j = 0; j < n; j++) {
+        const uint64_t base = (uint64_t)jobs[j].k * g->trio_floats;
+        w->ks[j] = jobs[j].k;
+        w->out[j] = jobs[j].out;
+        memcpy(f + base + g->x_off, x, (size_t)g->hidden * sizeof(float));
+    }
+    if (timing) {
+        const double now = dsv4_now_s();
+        w->copy_in_ms = (now - ta) * 1000.0;
+        ta = now;
+    }
 
-    VkCommandBuffer cmd = g->cmd;
+    VkCommandBuffer cmd = g->cmd[slot];
     if (vkchk(vkResetCommandBuffer(cmd, 0), "reset command buffer"))
-        return -1;
+        { g->slot_used[slot] = 0; return -1; }
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof bi);
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (vkchk(vkBeginCommandBuffer(cmd, &bi), "begin command buffer"))
-        return -1;
+        { g->slot_used[slot] = 0; return -1; }
+
+    const int gpu_ts = timing && g->has_ts;
+    const uint32_t qbase = (uint32_t)slot * (uint32_t)g->max_jobs *
+                           DSV4_VK_TS_JOB;
+    if (gpu_ts)
+        vkCmdResetQueryPool(cmd, g->qpool, qbase,
+                            (uint32_t)n * DSV4_VK_TS_JOB);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g->pipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g->pl, 0, 1,
-                            &g->dset[e->vk_pool], 0, NULL);
 
-    rec_matvec(g, cmd, slot_off(g, e->w1.w, e), slot_off(g, e->w1.s, e),
-               (uint32_t)g->hidden, (uint32_t)g->inter,
-               g->x_off, g->gate_off);
-    rec_matvec(g, cmd, slot_off(g, e->w3.w, e), slot_off(g, e->w3.s, e),
-               (uint32_t)g->hidden, (uint32_t)g->inter,
-               g->x_off, g->up_off);
+    /* Phase 1: w1 and w3 for every expert. No barrier between these; they are
+     * independent and write different regions of the scratch. */
+    for (int j = 0; j < n; j++) {
+        const DSV4ExpertW *e = jobs[j].e;
+        const uint32_t base = (uint32_t)((uint64_t)jobs[j].k * g->trio_floats);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g->pl, 0,
+                                1, &g->dset[e->vk_pool], 0, NULL);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 0u);
+        rec_matvec(g, cmd, slot_off(g, e->w1.w, e), slot_off(g, e->w1.s, e),
+                   (uint32_t)g->hidden, (uint32_t)g->inter,
+                   base + g->x_off, base + g->gate_off);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 1u);
+        rec_matvec(g, cmd, slot_off(g, e->w3.w, e), slot_off(g, e->w3.s, e),
+                   (uint32_t)g->hidden, (uint32_t)g->inter,
+                   base + g->x_off, base + g->up_off);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 2u);
+    }
+
     mem_barrier(cmd);
-    rec_swiglu(g, cmd);
+
+    /* Phase 2: SwiGLU for every expert. */
+    for (int j = 0; j < n; j++) {
+        const DSV4ExpertW *e = jobs[j].e;
+        const uint32_t base = (uint32_t)((uint64_t)jobs[j].k * g->trio_floats);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g->pl, 0,
+                                1, &g->dset[e->vk_pool], 0, NULL);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 3u);
+        rec_swiglu(g, cmd, base + g->gate_off, base + g->up_off,
+                   base + g->mid_off);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 4u);
+    }
+
     mem_barrier(cmd);
-    rec_matvec(g, cmd, slot_off(g, e->w2.w, e), slot_off(g, e->w2.s, e),
-               (uint32_t)g->inter, (uint32_t)g->hidden,
-               g->mid_off, g->y_off);
 
-    if (vkchk(vkEndCommandBuffer(cmd), "end command buffer")) return -1;
+    /* Phase 3: w2 for every expert. */
+    for (int j = 0; j < n; j++) {
+        const DSV4ExpertW *e = jobs[j].e;
+        const uint32_t base = (uint32_t)((uint64_t)jobs[j].k * g->trio_floats);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g->pl, 0,
+                                1, &g->dset[e->vk_pool], 0, NULL);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 5u);
+        rec_matvec(g, cmd, slot_off(g, e->w2.w, e), slot_off(g, e->w2.s, e),
+                   (uint32_t)g->inter, (uint32_t)g->hidden,
+                   base + g->mid_off, base + g->y_off);
+        if (gpu_ts) ts_write(g, cmd, qbase + (uint32_t)j * DSV4_VK_TS_JOB + 6u);
+    }
 
-    VkResult fr = vkResetFences(g->dev, 1, &g->fence);
-    if (vkchk(fr, "reset fence")) return -1;
+    if (vkchk(vkEndCommandBuffer(cmd), "end command buffer"))
+        { g->slot_used[slot] = 0; return -1; }
+    if (timing) {
+        const double now = dsv4_now_s();
+        w->record_ms = (now - ta) * 1000.0;
+        ta = now;
+    }
+
+    VkResult fr = vkResetFences(g->dev, 1, &g->fence[slot]);
+    if (vkchk(fr, "reset fence")) { g->slot_used[slot] = 0; return -1; }
     VkSubmitInfo si;
     memset(&si, 0, sizeof si);
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    fr = vkQueueSubmit(g->queue, 1, &si, g->fence);
-    if (vkchk(fr, "queue submit")) return -1;
-    fr = vkWaitForFences(g->dev, 1, &g->fence, VK_TRUE, UINT64_MAX);
-    if (vkchk(fr, "wait for expert fence")) return -1;
+    fr = vkQueueSubmit(g->queue, 1, &si, g->fence[slot]);
+    if (vkchk(fr, "queue submit")) { g->slot_used[slot] = 0; return -1; }
+    if (timing) {
+        const double now = dsv4_now_s();
+        w->submit_ms = (now - ta) * 1000.0;
+        w->submit_at = now;
+    }
+    return 0;
+}
 
-    memcpy(out, f + g->y_off, (size_t)g->hidden * sizeof(float));
+int dsv4_expert_vk_wait_wave(DSV4ExpertVk *g, DSV4ExpertVkWave *w)
+{
+    if (!g || !w || w->slot < 0 || w->slot >= DSV4_VK_MAX_WAVES ||
+        !g->slot_used[w->slot])
+        return -1;
+
+    const double tw = w->timing ? dsv4_now_s() : 0.0;
+    const VkResult fr =
+        vkWaitForFences(g->dev, 1, &g->fence[w->slot], VK_TRUE, UINT64_MAX);
+    if (vkchk(fr, "wait for wave fence")) return -1;
+    if (w->timing) {
+        w->fence_done_at = dsv4_now_s();
+        w->wait_ms = (w->fence_done_at - tw) * 1000.0;
+    }
+
+    const double tc = w->timing ? dsv4_now_s() : 0.0;
+    float *f = (float *)g->scratch.cpu;
+    for (int j = 0; j < w->n; j++) {
+        const uint64_t base = (uint64_t)w->ks[j] * g->trio_floats;
+        memcpy(w->out[j], f + base + g->y_off,
+               (size_t)g->hidden * sizeof(float));
+    }
+    if (w->timing) {
+        const double now = dsv4_now_s();
+        w->copy_out_ms = (now - tc) * 1000.0;
+    }
+
+    if (w->timing && g->has_ts) {
+        uint64_t ts[DSV4_MAX_TOPK * DSV4_VK_TS_JOB];
+        const uint32_t qbase = (uint32_t)w->slot * (uint32_t)g->max_jobs *
+                               DSV4_VK_TS_JOB;
+        const uint32_t nq = (uint32_t)w->n * DSV4_VK_TS_JOB;
+        const VkResult qr =
+            vkGetQueryPoolResults(g->dev, g->qpool, qbase, nq,
+                                  sizeof(uint64_t) * nq, ts,
+                                  sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT
+                                  | VK_QUERY_RESULT_WAIT_BIT);
+        if (qr == VK_SUCCESS) {
+            const uint64_t m = g->ts_mask;
+            const double ms = g->ts_period_ns / 1e6;
+            uint64_t t0 = ts[0], t1 = ts[DSV4_VK_TS_JOB - 1];
+            for (int j = 1; j < w->n; j++) {
+                const uint64_t *q = &ts[j * DSV4_VK_TS_JOB];
+                if (q[0] < t0) t0 = q[0];
+                if (q[DSV4_VK_TS_JOB - 1] > t1) t1 = q[DSV4_VK_TS_JOB - 1];
+            }
+            w->gpu_span_ms = (double)((t1 - t0) & m) * ms;
+            /* Waves are waited for late, so fence_done_at is not the moment the
+             * device finished. Anchor the device span at the submit instead;
+             * the relative timestamps inside the wave are exact. */
+            w->gpu_anchor_at = w->submit_at;
+            w->gpu_ts_valid = 1;
+            for (int j = 0; j < w->n; j++) {
+                DSV4ExpertVkTiming *e = &w->expert[j];
+                const uint64_t *q = &ts[j * DSV4_VK_TS_JOB];
+                e->valid = 1;
+                e->gpu_ts_valid = 1;
+                e->gpu_start_ms = (double)((q[0] - t0) & m) * ms;
+                e->gpu_w1_ms = (double)((q[1] - q[0]) & m) * ms;
+                e->gpu_w3_ms = (double)((q[2] - q[1]) & m) * ms;
+                e->gpu_swiglu_ms = (double)((q[4] - q[3]) & m) * ms;
+                e->gpu_w2_ms = (double)((q[6] - q[5]) & m) * ms;
+                e->gpu_total_ms = e->gpu_w1_ms + e->gpu_w3_ms +
+                                  e->gpu_swiglu_ms + e->gpu_w2_ms;
+            }
+        }
+    }
+
+    if (w->timing) {
+        w->total_ms = w->copy_in_ms + w->record_ms + w->submit_ms +
+                      (w->gpu_ts_valid ? w->gpu_span_ms : w->wait_ms) +
+                      w->copy_out_ms;
+    }
+
+    g->slot_used[w->slot] = 0;
+    return 0;
+}
+
+int dsv4_expert_vk_forward_timed(DSV4ExpertVk *g, const DSV4ExpertW *e,
+                                 const float *x, float *out,
+                                 DSV4ExpertVkTiming *t)
+{
+    if (!g || !e || !e->vk_base || !x || !out) return -1;
+
+    const DSV4ExpertVkJob job = { .k = 0, .e = e, .out = out };
+    DSV4ExpertVkWave w;
+    if (dsv4_expert_vk_submit_wave(g, &job, 1, x, t != NULL, &w) != 0)
+        return -1;
+    if (dsv4_expert_vk_wait_wave(g, &w) != 0) return -1;
+
+    if (t) {
+        memset(t, 0, sizeof *t);
+        *t = w.expert[0];
+        t->valid = 1;
+        t->copy_in_ms = w.copy_in_ms;
+        t->record_ms = w.record_ms;
+        t->submit_ms = w.submit_ms;
+        t->fence_ms = w.wait_ms;
+        t->copy_out_ms = w.copy_out_ms;
+        t->total_ms = w.total_ms;
+        t->submit_at = w.submit_at;
+        t->fence_done_at = w.fence_done_at;
+        t->gpu_ts_valid = w.gpu_ts_valid;
+    }
 
     /* One-shot diagnostic: compare the first real routed expert against the
      * CPU trio. Expected rel L2 is ~1e-7 (only the SWiGLU exp differs). */
@@ -406,4 +658,10 @@ int dsv4_expert_vk_forward(DSV4ExpertVk *g, const DSV4ExpertW *e,
         free(gate); free(up); free(mid); free(cpu);
     }
     return 0;
+}
+
+int dsv4_expert_vk_forward(DSV4ExpertVk *g, const DSV4ExpertW *e,
+                           const float *x, float *out)
+{
+    return dsv4_expert_vk_forward_timed(g, e, x, out, NULL);
 }

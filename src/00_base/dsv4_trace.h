@@ -9,6 +9,10 @@
  *   much arithmetic still ran after the last publish. Those are the numbers
  *   that decide whether starting a matmul earlier can help at all.
  *
+ *   On the Vulkan path the same file also carries the host/device split of
+ *   each expert: copy-in, command recording, submit, fence wait, copy-out and
+ *   the four timestamped dispatches (w1, w3, SwiGLU, w2).
+ *
  * WHAT IT COSTS
  *   Disabled: one predictable branch per call site. Enabled: a timestamp and a
  *   64-byte struct copy under a small mutex, no formatting and no I/O on the
@@ -38,6 +42,7 @@ enum {
     DSV4_TR_COMPUTE     = 'C',  /* expert_forward() starts                     */
     DSV4_TR_MM          = 'M',  /* one matmul inside expert_forward()          */
     DSV4_TR_SWIGLU      = 'G',  /* silu(gate) * up                             */
+    DSV4_TR_VK          = 'V',  /* host/GPU interval of one Vulkan expert      */
     DSV4_TR_COMPUTE_END = 'c',  /* expert_forward() done                       */
     DSV4_TR_SHARED      = 'S',  /* the shared expert finished                  */
     DSV4_TR_BARRIER     = 'F',  /* end() had to wait for outstanding reads     */
@@ -54,8 +59,9 @@ enum {
  *   K  layer k expert
  *   Z  layer ms
  *   C/c layer k expert tag=hit|miss|late|shared
- *   M  layer k ms tag=w1|w3|w2
- *   G  layer k ms
+ *   M  layer k ms tag=w1|w3|w2 (CPU) or gw1|gw3|gw2 (Vulkan host timeline)
+ *   G  layer k ms tag=gswiglu for the fused Vulkan SwiGLU
+ *   V  layer k=-1 slot=wave n=experts ms tag=cin|rec|sub|wait|cout|tot
  *   S  layer ms
  *   F  layer ms
  *   E  layer ms

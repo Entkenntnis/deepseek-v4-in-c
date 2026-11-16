@@ -114,9 +114,16 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                         "are consumed as they land\n", e->cache.stream_cap);
     }
     dsv4_make_expert_src(&e->src, &e->cache);
-    if (dsv4_expert_vk_init(&e->expert_vk, e->cache.vk, &e->c) != 0)
-        return -1;
-    e->src.gpu = e->expert_vk;
+    /* Diagnostic A/B switch: leave src.gpu NULL and every routed expert runs
+     * through the CPU FP4 kernel, with the usual w1/w3/swiglu/w2 trace. */
+    const char *no_vk = getenv("DSV4_NO_VK");
+    if (!no_vk || !*no_vk || !strcmp(no_vk, "0")) {
+        if (dsv4_expert_vk_init(&e->expert_vk, e->cache.vk, &e->c) != 0)
+            return -1;
+        e->src.gpu = e->expert_vk;
+    } else {
+        fprintf(stderr, "dsv4: DSV4_NO_VK set, routed experts stay on CPU\n");
+    }
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));

@@ -12,9 +12,10 @@
 #include "dsv4_prof.h"
 #include "dsv4_trace.h"
 
-/* ~43 layers x ~40 events is ~1,700 per token; 8,192 leaves room for a
- * pathological layer and is still only half a megabyte. */
-#define DSV4_TRACE_CAP 8192
+/* Cache scheduling is ~40 events per layer. A traced Vulkan expert adds up to
+ * ten more (host phases, four device stages, total), so ~43 layers x 7 experts
+ * is still well under 16k. One event is ~80 bytes. */
+#define DSV4_TRACE_CAP 16384
 
 typedef struct {
     double    t;

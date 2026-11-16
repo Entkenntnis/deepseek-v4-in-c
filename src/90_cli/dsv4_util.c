@@ -98,6 +98,8 @@ void dsv4_usage(const char *me)
             "       [--trace FILE] [--trace-from TOKEN (default 0)]\n"
             "       [--trace-tokens N (default 4, 0 = all)]\n"
             "       [--trace-layers A-B]\n"
+            "       DSV4_NO_VK=1 keeps routed experts on the CPU for A/B traces\n"
+            "       DSV4_VK_WAVE_SIZE=1 submits one expert per wave (A/B)\n"
             "\n"
             "Speaks JSON lines on stdin/stdout. Start it from the TUI:\n"
             "  python3 tui/dsv4_tui.py\n", me);

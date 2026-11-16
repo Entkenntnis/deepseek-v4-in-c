@@ -58,6 +58,8 @@ struct DSV4CacheVk {
     VkDeviceSize     import_align;
     PFN_vkGetMemoryHostPointerPropertiesEXT get_host_ptr_props;
     VkPhysicalDeviceMemoryProperties mp;
+    uint32_t         ts_valid_bits;   /* timestamp bits of the compute queue  */
+    double           ts_period_ns;    /* nanoseconds per timestamp tick       */
 
     DSV4VkPool *pool;
     int         npool;
@@ -284,8 +286,13 @@ DSV4CacheVk *dsv4_cache_vk_open(void)
         if (!qf) continue;
         vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, qf);
         uint32_t qfam = UINT32_MAX;
+        uint32_t ts_bits = 0;
         for (uint32_t q = 0; q < nq; q++)
-            if (qf[q].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam = q; break; }
+            if (qf[q].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                qfam = q;
+                ts_bits = qf[q].timestampValidBits;
+                break;
+            }
         free(qf);
         if (qfam == UINT32_MAX) continue;
 
@@ -319,6 +326,8 @@ DSV4CacheVk *dsv4_cache_vk_open(void)
         v->phys = pd[i];
         v->qfam = qfam;
         v->mp = mp;
+        v->ts_valid_bits = ts_bits;
+        v->ts_period_ns = (double)props.limits.timestampPeriod;
         v->import_align = hp.minImportedHostPointerAlignment;
         v->get_host_ptr_props = fn;
         snprintf(v->devname, sizeof v->devname, "%s", props.deviceName);
@@ -452,6 +461,21 @@ VkQueue dsv4_cache_vk_queue(const DSV4CacheVk *v)
 uint32_t dsv4_cache_vk_queue_family(const DSV4CacheVk *v)
 {
     return v ? v->qfam : UINT32_MAX;
+}
+
+int dsv4_cache_vk_has_timestamps(const DSV4CacheVk *v)
+{
+    return v && v->ts_valid_bits > 0 && v->ts_period_ns > 0.0;
+}
+
+uint32_t dsv4_cache_vk_timestamp_valid_bits(const DSV4CacheVk *v)
+{
+    return v ? v->ts_valid_bits : 0;
+}
+
+double dsv4_cache_vk_timestamp_period_ns(const DSV4CacheVk *v)
+{
+    return v ? v->ts_period_ns : 0.0;
 }
 
 int dsv4_cache_vk_pool_count(const DSV4CacheVk *v)

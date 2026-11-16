@@ -43,6 +43,12 @@ uint32_t    dsv4_cache_vk_memory_type(const DSV4CacheVk *v);
 VkDevice   dsv4_cache_vk_device(const DSV4CacheVk *v);
 VkQueue    dsv4_cache_vk_queue(const DSV4CacheVk *v);
 uint32_t   dsv4_cache_vk_queue_family(const DSV4CacheVk *v);
+
+/* Device timestamps on the compute queue. When false, callers must fall back
+ * to host wall time; the period is only meaningful when this returns true. */
+int        dsv4_cache_vk_has_timestamps(const DSV4CacheVk *v);
+uint32_t   dsv4_cache_vk_timestamp_valid_bits(const DSV4CacheVk *v);
+double     dsv4_cache_vk_timestamp_period_ns(const DSV4CacheVk *v);
 int        dsv4_cache_vk_pool_count(const DSV4CacheVk *v);
 VkBuffer   dsv4_cache_vk_pool_buffer(const DSV4CacheVk *v, int pool);
 VkDeviceSize dsv4_cache_vk_pool_size(const DSV4CacheVk *v, int pool);

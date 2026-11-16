@@ -10,6 +10,7 @@ one event, relative to the token's start:
 Examples:
     python3 tools/trace_view.py t.log --summary
     python3 tools/trace_view.py t.log --timeline --layer 12 --width 140
+    python3 tools/trace_view.py t.log --breakdown --layer 12
     python3 tools/trace_view.py t.log --note order.txt
     python3 tools/trace_view.py t.log --all-tokens --summary
 """
@@ -21,7 +22,13 @@ KIND_LABEL = {
     "B": "begin", "H": "hit", "Q": "queue", "R": "read", "P": "publish",
     "W": "wait", "K": "wake", "Z": "wait-end", "C": "compute", "M": "mm",
     "G": "swiglu", "c": "done", "S": "shared", "F": "barrier", "E": "layer",
+    "V": "vk",
 }
+
+# Matmul tags: the CPU trio and the GPU stages share the same lane glyphs.
+MM_GLYPH = {"w1": "1", "w3": "3", "w2": "2",
+            "gw1": "1", "gw3": "3", "gw2": "2"}
+VK_GLYPH = {"cin": "c", "rec": "r", "sub": "S", "wait": "w", "cout": "o"}
 
 
 def parse(path):
@@ -79,6 +86,10 @@ def layer_stats(evs):
     shared_ms = 0.0
     mm_events = []
     mm_ms = 0.0
+    gpu_ms = 0.0
+    vk_total_ms = 0.0
+    vk_host_ms = 0.0
+    vk_wait_ms = 0.0
     tail_ms = 0.0
     layer_ms = 0.0
 
@@ -110,6 +121,20 @@ def layer_stats(evs):
             if e["k"] >= 0:
                 mm_events.append(e)
                 mm_ms += e["ms"]
+                if e["tag"] in ("gw1", "gw3", "gw2"):
+                    gpu_ms += e["ms"]
+        elif k == "G":
+            if e["k"] >= 0 and e["tag"] == "gswiglu":
+                gpu_ms += e["ms"]
+        elif k == "V":
+            tag = e["tag"]
+            if tag == "tot":
+                vk_total_ms += e["ms"]
+            elif tag == "wait":
+                vk_wait_ms += e["ms"]
+                vk_host_ms += e["ms"]
+            elif tag in ("cin", "rec", "sub", "cout"):
+                vk_host_ms += e["ms"]
         elif k == "E":
             layer_ms = e["ms"]
 
@@ -123,14 +148,17 @@ def layer_stats(evs):
         "pfw": pfw_b if pfw_b else len(pf_waits),
         "pf_wait_ms": sum(e["ms"] for e in pf_waits),
         "miss": miss, "last_pub": last_pub, "wait_ms": wait_ms,
-        "mm_ms": mm_ms, "tail_ms": tail_ms, "layer_ms": layer_ms,
-        "shared_ms": shared_ms, "pubs": pubs, "hits_ev": hits,
+        "mm_ms": mm_ms, "gpu_ms": gpu_ms, "tail_ms": tail_ms,
+        "layer_ms": layer_ms, "shared_ms": shared_ms, "pubs": pubs,
+        "hits_ev": hits, "vk_total_ms": vk_total_ms,
+        "vk_host_ms": vk_host_ms, "vk_wait_ms": vk_wait_ms,
     }
 
 
 def print_summary(tokens, every):
     print(f"{'tok':>4} {'L':>3} {'hit':>4} {'pfw':>4} {'miss':>4} "
-          f"{'lastP':>8} {'wait':>8} {'mm':>8} {'tail':>8} {'moe':>8}")
+          f"{'lastP':>8} {'wait':>8} {'mm':>8} {'gpu':>8} {'vk':>8} "
+          f"{'tail':>8} {'moe':>8}")
     for tok in tokens:
         if not every and tok is not tokens[0]:
             continue
@@ -142,6 +170,7 @@ def print_summary(tokens, every):
             print(f"{tok['token']:>4} {L:>3} {st['hits']:>4} {st['pfw']:>4} "
                   f"{st['miss']:>4} {1000.0 * st['last_pub']:8.3f} "
                   f"{st['wait_ms']:8.3f} {st['mm_ms']:8.3f} "
+                  f"{st['gpu_ms']:8.3f} {st['vk_total_ms']:8.3f} "
                   f"{st['tail_ms']:8.3f} {st['layer_ms']:8.3f}")
 
 def pick_layer(tokens, want):
@@ -223,7 +252,7 @@ def print_timeline(tokens, layer, width=118):
             put(rr, q["t"], "q")
         for e in evs:
             if e["kind"] == "M" and e["k"] == k:
-                ch = {"w1": "1", "w3": "3", "w2": "2"}.get(e["tag"], "#")
+                ch = MM_GLYPH.get(e["tag"], "#")
                 for c in range(_col(e["t"], t0, span, width),
                                _col(e["t"] + e["ms"] / 1000.0,
                                     t0, span, width) + 1):
@@ -242,7 +271,7 @@ def print_timeline(tokens, layer, width=118):
     srow = rows["shared"]
     for e in evs:
         if e["kind"] == "M" and e["k"] < 0:
-            ch = {"w1": "1", "w3": "3", "w2": "2"}.get(e["tag"], "#")
+            ch = MM_GLYPH.get(e["tag"], "#")
             for c in range(_col(e["t"], t0, span, width),
                            _col(e["t"] + e["ms"] / 1000.0,
                                 t0, span, width) + 1):
@@ -257,6 +286,16 @@ def print_timeline(tokens, layer, width=118):
             at = (e["t"] + e["ms"] / 1000.0
                   if e["t"] < sm_end - 1e-9 else e["t"])
             put(srow, at, "S")
+
+    # Vulkan host phases: copy-in, record, submit, fence wait, copy-out.
+    vkrow = rows["vk-host"]
+    for e in evs:
+        if e["kind"] != "V" or e["tag"] not in VK_GLYPH:
+            continue
+        ch = VK_GLYPH[e["tag"]]
+        for c in range(_col(e["t"], t0, span, width),
+                       _col(e["t"] + e["ms"] / 1000.0, t0, span, width) + 1):
+            vkrow[c] = ch
 
     # Main lane: fill compute first, then draw the blocking windows on top.
     for e in evs:
@@ -307,6 +346,7 @@ def print_timeline(tokens, layer, width=118):
         out.append((f"k{k} e{d['expert']} {d['state']}", rows[f"k{k}"]))
     out.append(("shared expert", srow))
     out.append(("main (compute thread)", main))
+    out.append(("vk host", vkrow))
     for r in sorted((x for x in rows if x.startswith("r")),
                     key=lambda s: int(s[1:])):
         out.append((r, rows[r]))
@@ -328,11 +368,13 @@ def print_timeline(tokens, layer, width=118):
     print("         main: + = Compute-Thread rechnet (irgendein Expert/Shared)")
     print("         Reader-Zeile: Ziffer = welchen k dieser Thread liest, "
           "p = Prefetch-Read")
+    print("         vk host: c = Copy-in, r = Command-Recording, S = Submit, "
+          "w = Fence-Wait, o = Copy-out")
     print()
 
     print(f"{'k':>2} {'expert':>6} {'state':>12} {'reader':>6} "
           f"{'read start':>10} {'read end':>9} {'read ms':>8} "
-          f"{'w1':>6} {'w3':>6} {'w2':>6}")
+          f"{'w1':>6} {'w3':>6} {'w2':>6} {'gpu':>8}")
     for k in ks:
         d = info[k]
         rs = (d["R"]["t"] - t0) * 1000.0 if d["R"] else None
@@ -342,11 +384,160 @@ def print_timeline(tokens, layer, width=118):
         s_len = f"{re - rs:.3f}" if rs is not None and re is not None else "-"
         rdr = f"r{d['reader']}" if d["reader"] >= 0 else "-"
         def mm(which):
-            return next((e["ms"] for e in evs if e["kind"] == "M"
-                         and e["k"] == k and e["tag"] == which), 0.0)
+            for tag in (which, "g" + which):
+                v = next((e["ms"] for e in evs if e["kind"] == "M"
+                          and e["k"] == k and e["tag"] == tag), None)
+                if v is not None:
+                    return v
+            return 0.0
+        gpu = (mm('w1') + mm('w3') + mm('w2') +
+               sum(e["ms"] for e in evs if e["kind"] == "G"
+                   and e["k"] == k))
         print(f"{k:>2} {d['expert']:>6} {d['state']:>12} {rdr:>6} "
               f"{s_rs:>10} {s_re:>9} {s_len:>8} "
-              f"{mm('w1'):>6.3f} {mm('w3'):>6.3f} {mm('w2'):>6.3f}")
+              f"{mm('w1'):>6.3f} {mm('w3'):>6.3f} {mm('w2'):>6.3f} "
+              f"{gpu:>8.3f}")
+
+
+def print_breakdown(tokens, layer):
+    """Per-wave and per-expert split of host and device time for one layer."""
+    toks = [t for t in tokens if by_layer(t["ev"]).get(layer)]
+    if not toks:
+        print(f"trace_view: no events for layer {layer}", file=sys.stderr)
+        return
+    tok = toks[0]
+    evs = by_layer(tok["ev"])[layer]
+    ks = sorted({e["k"] for e in evs if e["k"] >= 0})
+    wave_tots = [e for e in evs
+                 if e["kind"] == "V" and e["tag"] == "tot" and e["k"] < 0]
+
+    print(f"token {tok['token']} pos {tok['pos']}  layer {layer}  "
+          f"expert breakdown (ms)")
+
+    if wave_tots:
+        print(f"{'wave':>4} {'n':>2} {'gpu':>7} {'cin':>6} {'rec':>6} "
+              f"{'sub':>6} {'wait':>7} {'cout':>6} {'host':>7} "
+              f"{'total':>7} {'conc':>6}")
+        tot = collections.defaultdict(float)
+        for wt in wave_tots:
+            slot = wt["slot"]
+            v = collections.defaultdict(float)
+            for e in evs:
+                if e["kind"] == "V" and e["slot"] == slot:
+                    v[e["tag"]] += e["ms"]
+            gpu = sum(e["ms"] for e in evs
+                      if e["slot"] == slot and e["k"] >= 0
+                      and (e["kind"] == "M" or
+                           (e["kind"] == "G" and e["tag"] == "gswiglu")))
+            host = v["cin"] + v["rec"] + v["sub"] + v["wait"] + v["cout"]
+            total = v["tot"] if v["tot"] > 0.0 else gpu + host
+            conc = gpu / total if total > 0.0 else 0.0
+            for name in ("cin", "rec", "sub", "wait", "cout"):
+                tot[name] += v[name]
+            tot["gpu"] += gpu
+            tot["host"] += host
+            tot["total"] += total
+            print(f"{slot:>4} {wt['n']:>2} {gpu:>7.3f} {v['cin']:>6.3f} "
+                  f"{v['rec']:>6.3f} {v['sub']:>6.3f} {v['wait']:>7.3f} "
+                  f"{v['cout']:>6.3f} {host:>7.3f} {total:>7.3f} "
+                  f"{conc:>5.2f}x")
+        conc = tot["gpu"] / tot["total"] if tot["total"] > 0.0 else 0.0
+        print(f"{'sum':>4} {'':>2} {tot['gpu']:>7.3f} {tot['cin']:>6.3f} "
+              f"{tot['rec']:>6.3f} {tot['sub']:>6.3f} {tot['wait']:>7.3f} "
+              f"{tot['cout']:>6.3f} {tot['host']:>7.3f} {tot['total']:>7.3f} "
+              f"{conc:>5.2f}x")
+        print()
+        print("conc = Summe der GPU-Stages / Wave-Busy-Zeit. >1 heißt: "
+              "Experten liefen gleichzeitig.")
+        print("total = cin+rec+sub+gpu_span+cout; wait = tatsächliche "
+              "Host-Blockzeit beim Einsammeln der Wave.")
+        print()
+        print(f"{'wave':>4} {'k':>2} {'expert':>6} {'start':>9} "
+              f"{'w1':>7} {'w3':>7} {'silu':>7} {'w2':>7} {'gpu':>7}")
+        for wt in wave_tots:
+            slot = wt["slot"]
+            for k in sorted({e["k"] for e in evs
+                             if e["slot"] == slot and e["k"] >= 0
+                             and e["kind"] in ("M", "G")}):
+                kev = [e for e in evs if e["slot"] == slot and e["k"] == k]
+                expert = next((e["expert"] for e in evs
+                               if e["k"] == k and e["expert"] >= 0), -1)
+                def mm(tag):
+                    return sum(e["ms"] for e in kev
+                               if e["kind"] == "M" and e["tag"] == tag)
+                silu = sum(e["ms"] for e in kev
+                           if e["kind"] == "G" and e["tag"] == "gswiglu")
+                start = next((e["t"] for e in kev
+                              if e["kind"] == "M" and e["tag"] == "gw1"), 0.0)
+                gpu = mm("gw1") + mm("gw3") + silu + mm("gw2")
+                print(f"{slot:>4} {k:>2} {expert:>6} {start * 1000.0:>9.3f} "
+                      f"{mm('gw1'):>7.3f} {mm('gw3'):>7.3f} {silu:>7.3f} "
+                      f"{mm('gw2'):>7.3f} {gpu:>7.3f}")
+        return
+
+    has_vk = any(e["kind"] == "V" for e in evs)
+    if not has_vk:
+        print("CPU path: no Vulkan host stages; total = matmuls + swiglu")
+    print(f"{'k':>2} {'expert':>6} {'w1':>7} {'w3':>7} {'silu':>7} "
+          f"{'w2':>7} {'gpu':>7} {'cin':>6} {'rec':>6} {'sub':>6} "
+          f"{'wait':>7} {'cout':>6} {'host':>7} {'total':>7} {'busy':>6}")
+
+    tot = collections.defaultdict(float)
+    for k in ks:
+        kev = [e for e in evs if e["k"] == k]
+        expert = next((e["expert"] for e in kev
+                       if e["kind"] in ("C", "H", "Q") and e["expert"] >= 0),
+                      -1)
+        v = collections.defaultdict(float)
+        for e in kev:
+            if e["kind"] == "V":
+                v[e["tag"]] += e["ms"]
+        gw = {}
+        for tag in ("gw1", "gw3", "gw2"):
+            gw[tag] = sum(e["ms"] for e in kev
+                          if e["kind"] == "M" and e["tag"] == tag)
+        gsilu = sum(e["ms"] for e in kev
+                    if e["kind"] == "G" and e["tag"] == "gswiglu")
+        gpu = gw["gw1"] + gw["gw3"] + gsilu + gw["gw2"]
+        if gpu == 0.0:
+            # CPU fallback: the same three matmuls and swiglu, no Vulkan.
+            gw["gw1"] = sum(e["ms"] for e in kev
+                            if e["kind"] == "M" and e["tag"] == "w1")
+            gw["gw3"] = sum(e["ms"] for e in kev
+                            if e["kind"] == "M" and e["tag"] == "w3")
+            gw["gw2"] = sum(e["ms"] for e in kev
+                            if e["kind"] == "M" and e["tag"] == "w2")
+            gsilu = sum(e["ms"] for e in kev if e["kind"] == "G")
+            gpu = gw["gw1"] + gw["gw3"] + gsilu + gw["gw2"]
+        host = (v["cin"] + v["rec"] + v["sub"] + v["wait"] + v["cout"])
+        total = v["tot"] if v["tot"] > 0.0 else gpu + host
+        busy = 100.0 * gpu / total if total > 0.0 else 0.0
+
+        for name in ("gw1", "gw3", "gw2"):
+            tot[name] += gw[name]
+        tot["gsilu"] += gsilu
+        tot["gpu"] += gpu
+        tot["host"] += host
+        tot["total"] += total
+        for name in ("cin", "rec", "sub", "wait", "cout"):
+            tot[name] += v[name]
+
+        print(f"{k:>2} {expert:>6} {gw['gw1']:>7.3f} {gw['gw3']:>7.3f} "
+              f"{gsilu:>7.3f} {gw['gw2']:>7.3f} {gpu:>7.3f} "
+              f"{v['cin']:>6.3f} {v['rec']:>6.3f} {v['sub']:>6.3f} "
+              f"{v['wait']:>7.3f} {v['cout']:>6.3f} {host:>7.3f} "
+              f"{total:>7.3f} {busy:>5.1f}%")
+
+    if ks:
+        busy = 100.0 * tot["gpu"] / tot["total"] if tot["total"] > 0.0 else 0.0
+        print(f"{'':>2} {'sum':>6} {tot['gw1']:>7.3f} {tot['gw3']:>7.3f} "
+              f"{tot['gsilu']:>7.3f} {tot['gw2']:>7.3f} {tot['gpu']:>7.3f} "
+              f"{tot['cin']:>6.3f} {tot['rec']:>6.3f} {tot['sub']:>6.3f} "
+              f"{tot['wait']:>7.3f} {tot['cout']:>6.3f} {tot['host']:>7.3f} "
+              f"{tot['total']:>7.3f} {busy:>5.1f}%")
+    print()
+    print("busy = GPU-Dispatches / gesamte Host-Wall-Zeit des Experten; "
+          "host = cin+rec+sub+wait+cout")
 
 
 def fmt_event(e):
@@ -381,7 +572,12 @@ def fmt_event(e):
     if k == "M":
         return f"{t}    {e['tag']:<6} {e['ms']:.3f} ms"
     if k == "G":
-        return f"{t}    swiglu {e['ms']:.3f} ms"
+        return f"{t}    swiglu {e['ms']:.3f} ms" \
+               f"{' (gpu)' if e['tag'] == 'gswiglu' else ''}"
+    if k == "V":
+        extra = (f"  wave{e['slot']} n{e['n']}" if e["tag"] == "tot"
+                 and e["k"] < 0 else "")
+        return f"{t}    vk {e['tag']:<4} {e['ms']:.3f} ms{extra}"
     if k == "c":
         return f"{t}  done      k{e['k']} e{e['expert']}"
     if k == "S":
@@ -430,6 +626,8 @@ def main():
     p.add_argument("--all-tokens", action="store_true",
                    help="summary over every traced token")
     p.add_argument("--timeline", action="store_true", help="ASCII interleaving")
+    p.add_argument("--breakdown", action="store_true",
+                   help="per-expert Vulkan host/GPU time table for --layer")
     p.add_argument("--width", type=int, default=118,
                    help="columns for --timeline (default 118)")
     p.add_argument("--note", nargs="?", const="-", default=None,
@@ -451,13 +649,18 @@ def main():
         sel = tokens[0]
 
     did = False
-    if a.summary or (not a.timeline and a.note is None):
+    if a.summary or (not a.timeline and not a.breakdown and a.note is None):
         print_summary(tokens, a.all_tokens)
         did = True
     if a.timeline:
         layer = pick_layer([sel], a.layer)
         if layer is not None:
             print_timeline([sel], layer, max(40, a.width))
+            did = True
+    if a.breakdown:
+        layer = pick_layer([sel], a.layer)
+        if layer is not None:
+            print_breakdown([sel], layer)
             did = True
     if a.note is not None:
         if a.note == "-":
