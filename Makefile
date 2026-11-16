@@ -32,18 +32,24 @@ RUNTIME_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(RUNTIME_SRC))
 # vk_expert has its own main and needs libvulkan; keep it out of `bin/bench`
 # so the CPU-only benchmark stays free of both.
 VKX_SRC     := bench/vk_expert.c
-BENCH_SRC   := $(filter-out $(VKX_SRC),$(wildcard bench/*.c))
+VKG_SRC     := bench/vk_gemm.c
+BENCH_SRC   := $(filter-out $(VKX_SRC) $(VKG_SRC),$(wildcard bench/*.c))
 BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
 VKX_OBJ     := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(VKX_SRC))
+VKG_OBJ     := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(VKG_SRC))
 VK_SPV      := build/expert_fp4.spv
 VK_SPV_H    := build/expert_fp4_spv.h
+# Fast (not bit-exact) variant, A/B through the standalone bench's --spv flag.
+VK_FAST_SPV := build/expert_fp4_fast.spv
+VK_FAST_SPV_H := build/expert_fp4_fast_spv.h
+GEMM_SPV    := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv
 
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 
-.PHONY: test serve tui bench vk-expert e2e clean
+.PHONY: test serve tui bench vk-expert vk-fast vk-gemm e2e clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -77,7 +83,26 @@ $(VK_SPV): src/10_compute/shaders/expert_fp4.comp
 $(VK_SPV_H): $(VK_SPV) tools/spv_to_header.py
 	python3 tools/spv_to_header.py $< $@ expert_fp4_spv
 
-$(OBJ)/src/60_cache/dsv4_expert_vk.o: $(VK_SPV_H)
+# The fast variant is not embedded yet; the bench loads it with --spv so the
+# exact and fast kernels can be compared on identical bytes in one run.
+$(VK_FAST_SPV): src/10_compute/shaders/expert_fp4_fast.comp
+	@mkdir -p build
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(VK_FAST_SPV_H): $(VK_FAST_SPV) tools/spv_to_header.py
+	python3 tools/spv_to_header.py $< $@ expert_fp4_fast_spv
+
+$(GEMM_SPV): build/%.spv: bench/shaders/%.comp
+	@mkdir -p build
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(BIN)/vk_gemm: $(VKG_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
+                $(RUNTIME_OBJ) $(GEMM_SPV)
+	@mkdir -p $(BIN)
+	$(CC) $(VKG_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) $(RUNTIME_OBJ) \
+	      -o $@ $(LDFLAGS) $(VK_LDFLAGS)
+
+$(OBJ)/src/60_cache/dsv4_expert_vk.o: $(VK_SPV_H) $(VK_FAST_SPV_H)
 
 $(BIN)/vk_expert: $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
                   $(RUNTIME_OBJ) $(VK_SPV)
@@ -87,6 +112,12 @@ $(BIN)/vk_expert: $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
 
 vk-expert: $(BIN)/vk_expert
 	./$(BIN)/vk_expert
+
+vk-fast: $(BIN)/vk_expert $(VK_FAST_SPV)
+	./$(BIN)/vk_expert --legacy --spv $(VK_FAST_SPV)
+
+vk-gemm: $(BIN)/vk_gemm
+	./$(BIN)/vk_gemm
 
 $(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(REF_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)

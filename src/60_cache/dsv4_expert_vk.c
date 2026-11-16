@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_expert_vk.c - routed FP4 experts on the iGPU, submitted in waves.
  *
+ * Production runs the fast shader (expert_fp4_fast.comp): shared-LUT FP4
+ * decode, no bit-exact CPU reduction tree, gated by tolerance. Set
+ * DSV4_VK_EXACT=1 to run the original bit-identical shader instead.
+ *
  * One expert is still w1/w3, one barrier, fused SwiGLU, one barrier, w2. What
  * changed is the unit of submission: every expert that is available at the same
  * moment is recorded into one command buffer, so a wave pays one submit and one
@@ -25,6 +29,7 @@
 #include "dsv4_matmul.h"
 #include "dsv4_prof.h"
 #include "expert_fp4_spv.h"
+#include "expert_fp4_fast_spv.h"
 
 /* Must match the shader's push-constant block. */
 typedef struct {
@@ -283,11 +288,23 @@ int dsv4_expert_vk_init(DSV4ExpertVk **out, DSV4CacheVk *cache_vk,
         vkUpdateDescriptorSets(g->dev, 3, w, 0, NULL);
     }
 
+    /* The fast shader drops the bit-exact CPU reduction tree and decodes FP4
+     * through a shared LUT; production uses it. DSV4_VK_EXACT=1 switches back
+     * to the exact kernel for validation. Both share the push-constant and
+     * descriptor layout, so only the module differs. */
+    const char *exact_env = getenv("DSV4_VK_EXACT");
+    const int exact = exact_env && *exact_env && strcmp(exact_env, "0") != 0;
+    const uint32_t *code = exact ? expert_fp4_spv : expert_fp4_fast_spv;
+    const size_t code_len = exact ? expert_fp4_spv_len
+                                  : expert_fp4_fast_spv_len;
+    fprintf(stderr, "dsv4_expert_vk: expert kernel %s\n",
+            exact ? "exact (bit-identical)" : "fast (tolerance gate)");
+
     VkShaderModuleCreateInfo smi;
     memset(&smi, 0, sizeof smi);
     smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smi.codeSize = expert_fp4_spv_len;
-    smi.pCode = expert_fp4_spv;
+    smi.codeSize = code_len;
+    smi.pCode = code;
     VkShaderModule mod;
     if (vkchk(vkCreateShaderModule(g->dev, &smi, NULL, &mod),
               "shader module")) { dsv4_expert_vk_free(g); return -1; }

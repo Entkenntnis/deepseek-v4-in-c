@@ -124,7 +124,11 @@ int main(int argc, char **argv)
      * experts, deduped), the dense projections see the whole 54-token block. */
     bench_qmat("expert_w1_nt5", "2048x4096 nt5", DSV4_WFP4, 2048, 4096, 5, 1, 4, 40);
     bench_qmat("expert_w1_nt16", "2048x4096 nt16", DSV4_WFP4, 2048, 4096, 16, 1, 4, 40);
+    bench_qmat("expert_w1_nt54", "2048x4096 nt54", DSV4_WFP4, 2048, 4096, 54, 1, 4, 40);
     bench_qmat("expert_w1_nt128", "2048x4096 nt128", DSV4_WFP4, 2048, 4096, 128, 1, 4, 40);
+    bench_qmat("expert_w1_nt204", "2048x4096 nt204", DSV4_WFP4, 2048, 4096, 204, 1, 2, 40);
+    bench_qmat("expert_w2_nt54", "4096x2048 nt54", DSV4_WFP4, 4096, 2048, 54, 1, 4, 40);
+    bench_qmat("expert_w2_nt204", "4096x2048 nt204", DSV4_WFP4, 4096, 2048, 204, 1, 2, 40);
     bench_qmat("wq_a_nt54",   "1024x4096 nt54", DSV4_WFP8, 1024, 4096, 54, 1, 4, 40);
     bench_qmat("wq_b_nt16",   "32768x1024 nt16", DSV4_WFP8, 32768, 1024, 16, 1, 2, 40);
     bench_qmat("wq_b_nt54",   "32768x1024 nt54", DSV4_WFP8, 32768, 1024, 54, 1, 2, 40);
@@ -133,6 +137,16 @@ int main(int argc, char **argv)
     bench_qmat("wo_b_nt54",   "4096x8192 nt54", DSV4_WFP8, 4096, 8192, 54, 1, 2, 40);
     bench_qmat("shared_gate_up_nt54", "2048x4096 nt54", DSV4_WFP8, 2048, 4096, 54, 1, 2, 40);
     bench_qmat("shared_down_nt54", "4096x2048 nt54", DSV4_WFP8, 4096, 2048, 54, 1, 2, 40);
+
+    /* BF16 at the prefill batch size: router and indexer weights. */
+    bench_qmat("gate_nt54", "256x4096 nt54", DSV4_WBF16, 256, 4096, 54, 1, 4, 40);
+    bench_qmat("weights_proj_nt54", "64x4096 nt54", DSV4_WBF16, 64, 4096, 54, 1, 8, 40);
+
+    /* Same shapes at the 204-token block the engine uses for longer prompts. */
+    bench_qmat("wq_a_nt204", "1024x4096 nt204", DSV4_WFP8, 1024, 4096, 204, 1, 2, 40);
+    bench_qmat("wo_a_nt204", "1024x4096 nt204", DSV4_WFP8, 1024, 4096, 204, 1, 2, 40);
+    bench_qmat("wo_b_nt204", "4096x8192 nt204", DSV4_WFP8, 4096, 8192, 204, 1, 2, 40);
+    bench_qmat("shared_gate_up_nt204", "2048x4096 nt204", DSV4_WFP8, 2048, 4096, 204, 1, 1, 40);
 
     /* attention / indexer / compressor */
     bench_attn("sparse_attn_idx", 640);

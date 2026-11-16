@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
 
 #include <vulkan/vulkan.h>
@@ -117,6 +118,8 @@ typedef struct {
     VkDescriptorPool      dpool;
     VkPipeline            pipe;
     uint32_t              mem_type;
+    PFN_vkGetMemoryHostPointerPropertiesEXT get_host_props;
+    VkDeviceSize          import_align;
     char                  devname[256];
 } Vk;
 
@@ -125,6 +128,9 @@ static int   g_nslot_alloc;
 static GBuf  g_scratch;
 static VkDescriptorSet g_dset[MAX_SLOTS];
 static int   g_nslot = 4;
+static int   g_import;                   /* slots via VK_EXT_external_memory_host */
+static int   g_huge;                     /* align/madvise imported slots to 2 MiB */
+static int   g_unique;                   /* fill each slot with unique bytes      */
 static double g_kern_s;                  /* last run's timestamped kernel time */
 static int   g_use_gpu = 1, g_use_cpu = 1;
 static unsigned g_rot;
@@ -133,6 +139,9 @@ static Vk   *g_vk;
 static float *g_xsrc;                    /* HID floats, the layer's activation */
 static float *g_cpu_y;                   /* HID floats, the CPU reference     */
 static double g_cpu_ms;
+/* When non-zero, measure() sleeps this long before every timed call, so a
+ * steady-state case can be repeated in the engine's cold-clock condition. */
+static double g_measure_gap_s;
 
 #define MAX_GAPS 32
 static double g_gap_ms[MAX_GAPS] = { 0.0, 0.25, 0.5, 1.0, 2.0, 4.0,
@@ -228,6 +237,122 @@ static void make_buf(Vk *v, GBuf *b, VkDeviceSize size)
     b->size = size;
 }
 
+/* Sum AnonHugePages in the smaps entry that covers [addr, addr+len). */
+static unsigned long long smaps_anon_huge_kb(const void *addr, size_t len)
+{
+    FILE *f = fopen("/proc/self/smaps", "r");
+    if (!f) return 0;
+    const unsigned long long a0 = (unsigned long long)(uintptr_t)addr;
+    const unsigned long long a1 = a0 + (unsigned long long)len;
+    unsigned long long sum = 0, start, end, v;
+    int inside = 0;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
+            inside = start < a1 && end > a0;
+            continue;
+        }
+        if (inside && sscanf(line, "AnonHugePages: %llu kB", &v) == 1)
+            sum += v;
+    }
+    fclose(f);
+    return sum;
+}
+
+/* Same bytes, same VkBuffer, but backed by posix_memalign pages imported with
+ * VK_EXT_external_memory_host -- the path the engine cache uses so O_DIRECT can
+ * land directly in the slot. */
+static void make_buf_import(Vk *v, GBuf *b, VkDeviceSize size)
+{
+    if (!v->get_host_props) {
+        fprintf(stderr, "vk_expert: import requested but extension unavailable\n");
+        exit(1);
+    }
+
+    VkBufferCreateInfo bi;
+    memset(&bi, 0, sizeof bi);
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = size;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+             | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VK_CHECK(vkCreateBuffer(v->dev, &bi, NULL, &b->buf));
+
+    VkMemoryRequirements rq;
+    vkGetBufferMemoryRequirements(v->dev, b->buf, &rq);
+
+    VkDeviceSize align = v->import_align ? v->import_align : 4096u;
+    if (align < 4096u) align = 4096u;
+    if (g_huge && align < (2u << 20)) align = 2u << 20;
+
+    void *raw = NULL;
+    if (posix_memalign(&raw, (size_t)align,
+                       (size_t)rq.size + (size_t)align) != 0)
+        bench_die("host import allocation failed");
+    unsigned char *base = (unsigned char *)
+        (((uintptr_t)raw + (uintptr_t)align - 1u) & ~((uintptr_t)align - 1u));
+
+    if (g_huge) {
+        if (madvise(base, (size_t)rq.size, MADV_HUGEPAGE) != 0)
+            fprintf(stderr, "vk_expert: madvise(MADV_HUGEPAGE): %s\n",
+                    strerror(errno));
+        memset(base, 0, (size_t)rq.size);   /* fault in before the import */
+        const unsigned long long kb = smaps_anon_huge_kb(base, (size_t)rq.size);
+        fprintf(stderr, "vk_expert: imported %p..%p, AnonHugePages %llu KiB"
+                        " (align %llu)\n", (void *)base, (void *)(base + rq.size),
+                kb, (unsigned long long)align);
+    }
+
+    VkMemoryHostPointerPropertiesEXT hp;
+    memset(&hp, 0, sizeof hp);
+    hp.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
+    VK_CHECK(v->get_host_props(
+        v->dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+        base, &hp));
+
+    const uint32_t allowed = rq.memoryTypeBits & hp.memoryTypeBits;
+    const uint32_t mt = pick_mem_type(v, allowed);
+    if (mt == UINT32_MAX) {
+        fprintf(stderr, "vk_expert: no importable memory type\n");
+        exit(1);
+    }
+
+    VkImportMemoryHostPointerInfoEXT imp;
+    memset(&imp, 0, sizeof imp);
+    imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
+    imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    imp.pHostPointer = base;
+
+    VkMemoryAllocateInfo ai;
+    memset(&ai, 0, sizeof ai);
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.pNext = &imp;
+    ai.allocationSize = rq.size;
+    ai.memoryTypeIndex = mt;
+    v->mem_type = mt;
+    VK_CHECK(vkAllocateMemory(v->dev, &ai, NULL, &b->mem));
+    VK_CHECK(vkBindBufferMemory(v->dev, b->buf, b->mem, 0));
+    b->map = base;
+    b->size = size;
+}
+
+static int dev_ext_supported(VkPhysicalDevice phys, const char *name)
+{
+    uint32_t n = 0;
+    if (vkEnumerateDeviceExtensionProperties(phys, NULL, &n, NULL)
+        != VK_SUCCESS)
+        return 0;
+    VkExtensionProperties *e =
+        (VkExtensionProperties *)calloc(n, sizeof *e);
+    if (!e) return 0;
+    int found = 0;
+    if (vkEnumerateDeviceExtensionProperties(phys, NULL, &n, e) == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; i++)
+            if (strcmp(e[i].extensionName, name) == 0) { found = 1; break; }
+    free(e);
+    return found;
+}
+
 static void vk_init(Vk *v, const char *spv)
 {
     memset(v, 0, sizeof *v);
@@ -256,6 +381,29 @@ static void vk_init(Vk *v, const char *spv)
     vkGetPhysicalDeviceProperties(v->phys, &props);
     snprintf(v->devname, sizeof v->devname, "%s", props.deviceName);
     vkGetPhysicalDeviceMemoryProperties(v->phys, &v->mp);
+
+    if (g_import) {
+        if (!dev_ext_supported(v->phys,
+                               VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+            fprintf(stderr, "vk_expert: device lacks %s\n",
+                    VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+            exit(1);
+        }
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp;
+        memset(&hp, 0, sizeof hp);
+        hp.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 p2;
+        memset(&p2, 0, sizeof p2);
+        p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        p2.pNext = &hp;
+        vkGetPhysicalDeviceProperties2(v->phys, &p2);
+        v->import_align = hp.minImportedHostPointerAlignment;
+        if (v->import_align == 0) {
+            fprintf(stderr, "vk_expert: host import alignment is zero\n");
+            exit(1);
+        }
+    }
 
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(v->phys, &nq, NULL);
@@ -287,8 +435,24 @@ static void vk_init(Vk *v, const char *spv)
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+    const char *dev_exts[1];
+    if (g_import) {
+        dev_exts[0] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+        dci.enabledExtensionCount = 1;
+        dci.ppEnabledExtensionNames = dev_exts;
+    }
     VK_CHECK(vkCreateDevice(v->phys, &dci, NULL, &v->dev));
     vkGetDeviceQueue(v->dev, v->qfam, 0, &v->queue);
+
+    if (g_import) {
+        v->get_host_props = (PFN_vkGetMemoryHostPointerPropertiesEXT)
+            vkGetDeviceProcAddr(v->dev, "vkGetMemoryHostPointerPropertiesEXT");
+        if (!v->get_host_props) {
+            fprintf(stderr, "vk_expert: vkGetMemoryHostPointerPropertiesEXT "
+                            "missing\n");
+            exit(1);
+        }
+    }
 
     VkCommandPoolCreateInfo pci;
     memset(&pci, 0, sizeof pci);
@@ -559,6 +723,22 @@ static void fill_slot(void *base_)
     }
 }
 
+/* No 64 KiB pattern: every byte of every slot is independent. Each slot gets
+ * a different image, so neither L2 nor any memory compression can exploit
+ * repetition. Scale bytes stay in the same exponent band the fixture uses. */
+static void fill_slot_unique(void *base_)
+{
+    uint8_t *base = (uint8_t *)base_;
+    for (int t = 0; t < 3; t++) {
+        uint8_t *s = base + g_off_s[t];
+        for (int64_t i = 0; i < g_len_s[t]; i++)
+            s[i] = (uint8_t)(118u + (bench_rnd32() % 7u));
+        uint8_t *w = base + g_off_w[t];
+        for (int64_t i = 0; i < g_len_w[t]; i++)
+            w[i] = (uint8_t)(bench_rnd32() >> 24);
+    }
+}
+
 static int next_slot(void) { return (int)(g_rot++ % (unsigned)g_nslot); }
 
 static void run_cpu(void *p)
@@ -783,6 +963,7 @@ static double measure(const char *name, void (*fn)(void *), int reps,
     const double j0 = rapl_j();
     int nk = 0;
     for (int i = 0; i < reps; i++) {
+        if (g_measure_gap_s > 0.0) sleep_s(g_measure_gap_s);
         g_kern_s = -1.0;
         const double a = now_s();
         fn(NULL);
@@ -981,13 +1162,20 @@ static void usage(const char *me)
             "       [--pin off|all|p|e] [--cpu-only] [--gpu-only] [--no-energy]\n"
             "       [--warmup S] [--case-sec S] [--gaps MS,MS,...]\n"
             "       [--no-gaps] [--legacy]\n"
+            "       [--import] [--huge] [--unique]\n"
             "\n"
             "  --warmup S      seconds of fused GPU load before timing (5)\n"
             "  --case-sec S    target seconds per steady-state case (3)\n"
+            "  --cold-batch MS time gpu-batch6 with an MS idle gap before each call\n"
             "  --gaps LIST     comma-separated idle gaps in ms:\n"
             "                  0,0.25,0.5,1,2,4,8,16,32,64\n"
             "  --no-gaps       skip the idle-gap sweep\n"
-            "  --legacy        also time gpu-exact, gpu-batch6, gpu-stream6\n",
+            "  --legacy        also time gpu-exact, gpu-batch6, gpu-stream6\n"
+            "  --import        back slots with VK_EXT_external_memory_host pages,\n"
+            "                  like the engine cache, instead of native memory\n"
+            "  --huge          with --import: 2 MiB alignment + MADV_HUGEPAGE\n"
+            "  --unique        fill every slot with unique random bytes instead\n"
+            "                  of the repeated 64 KiB fixture pattern\n",
             me);
 }
 
@@ -1016,6 +1204,7 @@ int main(int argc, char **argv)
     const char *spv = "build/expert_fp4.spv";
     int pin = DSV4_PIN_P, threads = 4;
     int energy = 1, gaps = 1;
+    double cold_gap_ms = 0.0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--slots") && i + 1 < argc) {
@@ -1037,6 +1226,8 @@ int main(int argc, char **argv)
             if (parse_gaps(argv[++i]) != 0) { usage(argv[0]); return 1; }
         } else if (!strcmp(argv[i], "--no-gaps")) {
             gaps = 0;
+        } else if (!strcmp(argv[i], "--cold-batch") && i + 1 < argc) {
+            cold_gap_ms = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--legacy")) {
             g_legacy = 1;
         } else if (!strcmp(argv[i], "--cpu-only")) {
@@ -1045,6 +1236,13 @@ int main(int argc, char **argv)
             g_use_cpu = 0;
         } else if (!strcmp(argv[i], "--no-energy")) {
             energy = 0;
+        } else if (!strcmp(argv[i], "--import")) {
+            g_import = 1;
+        } else if (!strcmp(argv[i], "--huge")) {
+            g_import = 1;
+            g_huge = 1;
+        } else if (!strcmp(argv[i], "--unique")) {
+            g_unique = 1;
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
@@ -1083,7 +1281,11 @@ int main(int argc, char **argv)
         vk_init(&vk, spv);
         g_vk = &vk;
         for (int i = 0; i < g_nslot_alloc; i++)
-            make_buf(&vk, &g_slot[i], (VkDeviceSize)g_expert_bytes);
+            if (g_import)
+                make_buf_import(&vk, &g_slot[i],
+                                (VkDeviceSize)g_expert_bytes);
+            else
+                make_buf(&vk, &g_slot[i], (VkDeviceSize)g_expert_bytes);
         make_buf(&vk, &g_scratch, scratch_bytes);
     } else {
         /* Host fallback: the same bytes, plain malloc, so --cpu-only is a
@@ -1102,7 +1304,8 @@ int main(int argc, char **argv)
     /* Fill every slot with the same fixture the CPU bench uses, in the cache's
      * own layout. One-time, outside every timed region. */
     for (int i = 0; i < g_nslot_alloc; i++) {
-        fill_slot(g_slot[i].map);
+        if (g_unique) fill_slot_unique(g_slot[i].map);
+        else          fill_slot(g_slot[i].map);
         if (g_use_gpu) bind_descriptors(&vk, i);
     }
     memset(g_scratch.map, 0, (size_t)scratch_bytes);
@@ -1112,6 +1315,13 @@ int main(int argc, char **argv)
                vk.has_ts ? "timestamps" : "no timestamps");
         printf("slot          : %lld B, memory type %u, %d slots\n",
                (long long)g_expert_bytes, vk.mem_type, g_nslot_alloc);
+        printf("slot alloc    : %s%s\n",
+               g_import ? "VK_EXT_external_memory_host import"
+                        : "native VkDeviceMemory",
+               g_import && g_huge ? " + 2 MiB alignment/MADV_HUGEPAGE" : "");
+        printf("fixture       : %s\n",
+               g_unique ? "unique random bytes per slot"
+                        : "repeated 64 KiB pattern per slot");
     } else {
         printf("slot          : %lld B, host malloc, %d slots\n",
                (long long)g_expert_bytes, g_nslot_alloc);
@@ -1207,6 +1417,13 @@ int main(int argc, char **argv)
             measure("gpu-batch6", run_gpu_batch6, reps, 1, NEXP, 0);
             g_rot = 0;
             measure("gpu-stream6", run_gpu_stream6, reps, 6, NEXP, 0);
+        }
+
+        if (cold_gap_ms > 0.0) {
+            g_measure_gap_s = cold_gap_ms / 1000.0;
+            g_rot = 0;
+            measure("gpu-batch6-cold", run_gpu_batch6, reps, 1, NEXP, 0);
+            g_measure_gap_s = 0.0;
         }
 
         if (gaps && g_ngap > 0) {

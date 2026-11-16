@@ -1,0 +1,98 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* gemm_bf16.comp - tiled GEMM for DSV4 BF16 weights.
+ *
+ *   Y[N, M] = X[N, K] * W[M, K]^T
+ *
+ * Same tiling as gemm_fp8.comp, but W is row-major bf16 and has no block
+ * scales. This exists to measure the BF16 dense projections (router,
+ * indexer weights, embedding head) on the iGPU.
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer WT { uint wv[]; };
+layout(std430, binding = 1) readonly buffer SC { uint sv[]; };
+layout(std430, binding = 2) readonly buffer XB { float xv[]; };
+layout(std430, binding = 3) writeonly buffer YB { float yv[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint N;
+} pc;
+
+#define BM 64u
+#define BN 16u
+#define BK 64u
+#define NBK4 (BK / 4u)
+
+shared vec4 ws[BM][NBK4];
+shared vec4 xs[BN][NBK4 + 1u];
+
+float bf_lo(uint w) { return uintBitsToFloat((w & 0xFFFFu) << 16u); }
+float bf_hi(uint w) { return uintBitsToFloat(w & 0xFFFF0000u); }
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint tx = tid & 15u;
+    const uint ty = tid >> 4u;
+    const uint nblk = pc.K >> 7u;
+
+    float out0 = 0.0, out1 = 0.0, out2 = 0.0, out3 = 0.0;
+
+    for (uint kb = 0u; kb < nblk; ++kb) {
+        vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+        vec4 a2 = vec4(0.0), a3 = vec4(0.0);
+
+        for (uint kk = 0u; kk < 128u; kk += BK) {
+            /* 16 bf16 values per thread: eight packed uints = 32 bytes. */
+            const uint wrow = tid >> 2u;
+            const uint wseg = tid & 3u;
+            const uint ubase = (m0 + wrow) * (pc.K >> 1u)
+                             + ((kb * 128u + kk) >> 1u) + wseg * 8u;
+            for (uint j = 0u; j < 8u; j += 2u) {
+                const uint w0 = wv[ubase + j];
+                const uint w1 = wv[ubase + j + 1u];
+                ws[wrow][wseg * 4u + (j >> 1u)] = vec4(
+                    bf_lo(w0), bf_hi(w0), bf_lo(w1), bf_hi(w1));
+            }
+
+            const uint xtok = tid >> 4u;
+            const uint xseg = tid & 15u;
+            const uint gt = n0 + xtok;
+            vec4 x4 = vec4(0.0);
+            if (gt < pc.N) {
+                const uint xo = gt * pc.K + kb * 128u + kk + xseg * 4u;
+                x4 = vec4(xv[xo], xv[xo + 1u], xv[xo + 2u], xv[xo + 3u]);
+            }
+            xs[xtok][xseg] = x4;
+            barrier();
+
+            for (uint k4 = 0u; k4 < NBK4; ++k4) {
+                const vec4 xa = xs[tx][k4];
+                a0 += ws[ty        ][k4] * xa;
+                a1 += ws[ty + 16u  ][k4] * xa;
+                a2 += ws[ty + 32u  ][k4] * xa;
+                a3 += ws[ty + 48u  ][k4] * xa;
+            }
+            barrier();
+        }
+
+        out0 += a0.x + a0.y + a0.z + a0.w;
+        out1 += a1.x + a1.y + a1.z + a1.w;
+        out2 += a2.x + a2.y + a2.z + a2.w;
+        out3 += a3.x + a3.y + a3.z + a3.w;
+    }
+
+    if (n0 + tx < pc.N) {
+        const uint o = (n0 + tx) * pc.M + m0 + ty;
+        yv[o]        = out0;
+        yv[o + 16u]  = out1;
+        yv[o + 32u]  = out2;
+        yv[o + 48u]  = out3;
+    }
+}

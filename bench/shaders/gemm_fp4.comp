@@ -1,0 +1,142 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* gemm_fp4.comp - tiled GEMM for DSV4 FP4 routed-expert weights.
+ *
+ *   Y[N, M] = X[N, K] * W[M, K]^T
+ *
+ * W is two E2M1 nibbles per byte, row-major, with one E8M0 scale per 1x32
+ * block (one byte per output row per 32 columns). This is the routed-expert
+ * layout from the cache. X/Y are f32.
+ *
+ * Same 64x16 tile as gemm_fp8.comp. Each thread loads 8 packed bytes (16 FP4
+ * values); the 32-wide scale blocks force a scale application after every 32
+ * reduction elements, which is why the K loop is split into two 32-halves per
+ * staged 64-element tile.
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer WT { uint wv[]; };
+layout(std430, binding = 1) readonly buffer SC { uint sv[]; };
+layout(std430, binding = 2) readonly buffer XB { float xv[]; };
+layout(std430, binding = 3) writeonly buffer YB { float yv[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint N;
+} pc;
+
+#define BM 64u
+#define BN 16u
+#define BK 64u
+#define NBK4 (BK / 4u)
+
+shared float lut[16];
+shared vec4 ws[BM][NBK4];
+shared vec4 xs[BN][NBK4 + 1u];
+
+float fp4v(uint c)
+{
+    const uint m = c & 7u;
+    float v;
+    if      (m == 0u) v = 0.0;
+    else if (m == 1u) v = 0.5;
+    else if (m == 2u) v = 1.0;
+    else if (m == 3u) v = 1.5;
+    else if (m == 4u) v = 2.0;
+    else if (m == 5u) v = 3.0;
+    else if (m == 6u) v = 4.0;
+    else              v = 6.0;
+    return (c & 8u) != 0u ? -v : v;
+}
+
+float e8m0(uint b)
+{
+    if (b == 0u)   return uintBitsToFloat(0x00400000u);
+    if (b == 255u) return uintBitsToFloat(0x7FC00000u);
+    return uintBitsToFloat(b << 23u);
+}
+
+float scale_at(uint idx)
+{
+    return e8m0((sv[idx >> 2u] >> ((idx & 3u) * 8u)) & 0xFFu);
+}
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+    if (tid < 16u) lut[tid] = fp4v(tid);
+    barrier();
+
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint tx = tid & 15u;
+    const uint ty = tid >> 4u;
+    const uint nblk = pc.K >> 7u;              /* 128-wide tiles */
+    const uint nsc  = pc.K >> 5u;              /* 32-wide scales */
+
+    float out0 = 0.0, out1 = 0.0, out2 = 0.0, out3 = 0.0;
+
+    for (uint kb = 0u; kb < nblk; ++kb) {
+        for (uint kk = 0u; kk < 128u; kk += BK) {
+            /* 8 packed bytes = 16 FP4 values per thread, four threads/row. */
+            const uint wrow = tid >> 2u;
+            const uint wseg = tid & 3u;
+            const uint wbase = (m0 + wrow) * (pc.K >> 1u)
+                             + ((kb * 128u + kk) >> 1u) + wseg * 8u;
+            for (uint j = 0u; j < 2u; ++j) {
+                const uint w = wv[(wbase >> 2u) + j];
+                ws[wrow][wseg * 4u + j * 2u] = vec4(
+                    lut[ w        & 15u], lut[(w >>  4u) & 15u],
+                    lut[(w >>  8u) & 15u], lut[(w >> 12u) & 15u]);
+                ws[wrow][wseg * 4u + j * 2u + 1u] = vec4(
+                    lut[(w >> 16u) & 15u], lut[(w >> 20u) & 15u],
+                    lut[(w >> 24u) & 15u], lut[ w >> 28u]);
+            }
+
+            const uint xtok = tid >> 4u;
+            const uint xseg = tid & 15u;
+            const uint gt = n0 + xtok;
+            vec4 x4 = vec4(0.0);
+            if (gt < pc.N) {
+                const uint xo = gt * pc.K + kb * 128u + kk + xseg * 4u;
+                x4 = vec4(xv[xo], xv[xo + 1u], xv[xo + 2u], xv[xo + 3u]);
+            }
+            xs[xtok][xseg] = x4;
+            barrier();
+
+            /* Two 32-wide scale blocks inside the staged 64. */
+            for (uint part = 0u; part < 2u; ++part) {
+                vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+                vec4 a2 = vec4(0.0), a3 = vec4(0.0);
+                const uint k4_0 = part * 8u;
+                for (uint k4 = k4_0; k4 < k4_0 + 8u; ++k4) {
+                    const vec4 xa = xs[tx][k4];
+                    a0 += ws[ty        ][k4] * xa;
+                    a1 += ws[ty + 16u  ][k4] * xa;
+                    a2 += ws[ty + 32u  ][k4] * xa;
+                    a3 += ws[ty + 48u  ][k4] * xa;
+                }
+                const uint sbi = kb * 4u + (kk >> 5u) + part;
+                const float s0 = scale_at((m0 + ty      ) * nsc + sbi);
+                const float s1 = scale_at((m0 + ty + 16u) * nsc + sbi);
+                const float s2 = scale_at((m0 + ty + 32u) * nsc + sbi);
+                const float s3 = scale_at((m0 + ty + 48u) * nsc + sbi);
+                out0 += (a0.x + a0.y + a0.z + a0.w) * s0;
+                out1 += (a1.x + a1.y + a1.z + a1.w) * s1;
+                out2 += (a2.x + a2.y + a2.z + a2.w) * s2;
+                out3 += (a3.x + a3.y + a3.z + a3.w) * s3;
+            }
+            barrier();
+        }
+    }
+
+    if (n0 + tx < pc.N) {
+        const uint o = (n0 + tx) * pc.M + m0 + ty;
+        yv[o]        = out0;
+        yv[o + 16u]  = out1;
+        yv[o + 32u]  = out2;
+        yv[o + 48u]  = out3;
+    }
+}
