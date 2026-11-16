@@ -87,13 +87,25 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
     c->slot = (DSV4Slot *)calloc((size_t)c->nslot, sizeof(DSV4Slot));
     if (!c->slot) return -1;
 
+    /* One arena instead of nslot separate allocations: the GPU path imports
+     * it in <=1 GiB chunks, and a 4 KiB page per slot would otherwise mean one
+     * VkBuffer per slot. If the arena allocation fails, fall back to the old
+     * per-slot allocation; the GPU path then simply imports more buffers. */
+    if (c->nslot > 0 &&
+        posix_memalign((void **)&c->slot_arena, 4096,
+                       (size_t)c->nslot * (size_t)c->slot_bytes) != 0)
+        c->slot_arena = NULL;
+
     for (int i = 0; i < c->nslot; i++) {
         c->slot[i].layer = -1;
         c->slot[i].expert = -1;
         c->slot[i].pending = 0;
         /* 4096-aligned so a widened O_DIRECT window can be read straight in. */
-        if (posix_memalign((void **)&c->slot[i].bytes, 4096,
-                           (size_t)c->slot_bytes) != 0) {
+        if (c->slot_arena) {
+            c->slot[i].bytes = c->slot_arena
+                             + (size_t)i * (size_t)c->slot_bytes;
+        } else if (posix_memalign((void **)&c->slot[i].bytes, 4096,
+                                  (size_t)c->slot_bytes) != 0) {
             c->slot[i].bytes = NULL;
             dsv4_cache_free(c); return -1;
         }
@@ -126,7 +138,11 @@ void dsv4_cache_free(DSV4Cache *c)
     if (!c) return;
     /* Readers first, and before anything they point at is freed. */
     if (c->slot) dsv4_cache_pool_stop(c);
-    for (int i = 0; i < c->nslot; i++) free(c->slot[i].bytes);
+    if (c->slot_arena) {
+        free(c->slot_arena);
+    } else {
+        for (int i = 0; i < c->nslot; i++) free(c->slot[i].bytes);
+    }
     free(c->slot);
     if (c->bounce) {
         for (int b = 0; b < c->nbounce; b++) free(c->bounce[b]);

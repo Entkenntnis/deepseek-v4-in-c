@@ -4,11 +4,12 @@
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
             -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off -flto=auto
-INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party \
+INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party -Ibuild \
             -Isrc/00_base -Isrc/10_compute -Isrc/20_runtime -Isrc/30_tokenizer \
             -Isrc/40_io -Isrc/50_loader -Isrc/60_cache -Isrc/70_decode \
             -Isrc/80_prefill
 LDFLAGS  ?= -lm -fopenmp -pthread
+VK_LDFLAGS ?= -lvulkan
 DEPFLAGS := -MMD -MP
 
 # Plain `make` has always run the test suite; keep that behaviour.
@@ -34,6 +35,10 @@ TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 
+# Prefill GEMM shaders, embedded into dsv4_prefill_vk_init.o.
+VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv
+VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
+
 .PHONY: test serve tui bench e2e clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
@@ -53,15 +58,25 @@ e2e: $(BIN)/dsv4-serve
 
 $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
+# Prefill shaders: compile once, embed the words so the binary needs no .spv.
+$(VK_SPV): build/%.spv: src/10_compute/shaders/%.comp
+	@mkdir -p build
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(VK_SPV_H): build/%_spv.h: build/%.spv tools/spv_to_header.py
+	python3 tools/spv_to_header.py $< $@ $*_spv
+
+$(OBJ)/src/80_prefill/dsv4_prefill_vk_init.o: $(VK_SPV_H)
+
 $(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(REF_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 $(OBJ)/src/%.o: src/%.c
 	@mkdir -p $(dir $@)

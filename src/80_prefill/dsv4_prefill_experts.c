@@ -8,6 +8,12 @@
 #include "dsv4_matmul.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
+#include "dsv4_prefill_vk.h"
+
+/* Below this bucket size the three GPU submissions and their copies cost more
+ * than the CPU FP4 GEMM. Measured break-even is ~6 tokens/expert; 8 leaves
+ * room for the synchronous submit/fence overhead. */
+#define VK_EXPERT_MIN_COUNT 8
 
 /* Routed-expert matmul, timed per matrix so FP4 MM is not confused with the
  * SwiGLU that sits between w1/w3 and w2. */
@@ -70,8 +76,17 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     p->st.expert_pack += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();
-    dsv4_mmq_n(p->ex_gate, p->ex_x, &ew->w1, count);
-    dsv4_mmq_n(p->ex_up,   p->ex_x, &ew->w3, count);
+    int gpu = 0;
+    if (p->vk && count >= VK_EXPERT_MIN_COUNT) {
+        gpu = dsv4_prefill_vk_gemm(p->vk, p->ex_gate, p->ex_x,
+                                   &ew->w1, count) == 0
+           && dsv4_prefill_vk_gemm(p->vk, p->ex_up, p->ex_x,
+                                   &ew->w3, count) == 0;
+    }
+    if (!gpu) {
+        dsv4_mmq_n(p->ex_gate, p->ex_x, &ew->w1, count);
+        dsv4_mmq_n(p->ex_up,   p->ex_x, &ew->w3, count);
+    }
     p->st.expert_mm += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();
@@ -83,7 +98,10 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     p->st.expert_swiglu += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();
-    dsv4_mmq_n(p->ex_out, p->ex_mid, &ew->w2, count);
+    if (!(p->vk && count >= VK_EXPERT_MIN_COUNT
+          && dsv4_prefill_vk_gemm(p->vk, p->ex_out, p->ex_mid,
+                                  &ew->w2, count) == 0))
+        dsv4_mmq_n(p->ex_out, p->ex_mid, &ew->w2, count);
     p->st.expert_mm += dsv4_now_s() - t0;
 
     t0 = dsv4_now_s();

@@ -26,6 +26,7 @@ typedef struct {
     const DSV4Cfg *cfg;
     struct DSV4Slot *slot;
     int            nslot;
+    unsigned char *slot_arena;   /* one allocation for every slot, or NULL */
     int64_t        expert_bytes;
     uint64_t       clock;
 

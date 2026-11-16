@@ -1,0 +1,129 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* gemm_fp8.comp - tiled GEMM for DSV4 FP8 weights (E4M3, E8M0 128x128).
+ *
+ *   Y[N, M] = X[N, K] * W[M, K]^T
+ *
+ * W is the cache/trunk byte layout: row-major, K bytes per row, one E8M0 scale
+ * per 128x128 block. w_off/s_off are byte offsets of this matrix inside the
+ * imported weight/scale buffer; the descriptor itself binds the whole region.
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer WT { uint wv[]; };
+layout(std430, binding = 1) readonly buffer SC { uint sv[]; };
+layout(std430, binding = 2) readonly buffer XB { float xv[]; };
+layout(std430, binding = 3) writeonly buffer YB { float yv[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint N;
+    uint w_off;
+    uint s_off;
+} pc;
+
+#define BM 64u
+#define BN 16u
+#define BK 64u
+#define NBK4 (BK / 4u)
+
+shared float lut[256];
+shared vec4 ws[BM][NBK4];
+shared vec4 xs[BN][NBK4 + 1u];
+
+float e4m3(uint b)
+{
+    const uint e = (b >> 3u) & 15u;
+    const uint m = b & 7u;
+    float v;
+    if (e == 0u) {
+        v = float(m) * (1.0 / 512.0);
+    } else if (e == 15u && m == 7u) {
+        v = uintBitsToFloat(0x7FC00000u);
+    } else {
+        v = (1.0 + float(m) / 8.0) * exp2(float(int(e) - 7));
+    }
+    return (b & 0x80u) != 0u ? -v : v;
+}
+
+float e8m0(uint b)
+{
+    if (b == 0u)   return uintBitsToFloat(0x00400000u);
+    if (b == 255u) return uintBitsToFloat(0x7FC00000u);
+    return uintBitsToFloat(b << 23u);
+}
+
+float scale_at(uint idx)
+{
+    return e8m0((sv[idx >> 2u] >> ((idx & 3u) * 8u)) & 0xFFu);
+}
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+    if (tid < 256u) lut[tid] = e4m3(tid);
+    barrier();
+
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint tx = tid & 15u;
+    const uint ty = tid >> 4u;
+    const uint rb = m0 >> 7u;
+    const uint nblk = pc.K >> 7u;
+
+    float out0 = 0.0, out1 = 0.0, out2 = 0.0, out3 = 0.0;
+
+    for (uint kb = 0u; kb < nblk; ++kb) {
+        vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+        vec4 a2 = vec4(0.0), a3 = vec4(0.0);
+
+        for (uint kk = 0u; kk < 128u; kk += BK) {
+            const uint wrow = tid >> 2u;
+            const uint wseg = tid & 3u;
+            const uint wbase = pc.w_off + (m0 + wrow) * pc.K
+                             + kb * 128u + kk + wseg * 16u;
+            for (uint j = 0u; j < 4u; ++j) {
+                const uint w4 = wv[(wbase >> 2u) + j];
+                ws[wrow][wseg * 4u + j] = vec4(
+                    lut[ w4        & 0xFFu], lut[(w4 >>  8u) & 0xFFu],
+                    lut[(w4 >> 16u) & 0xFFu], lut[ w4 >> 24u]);
+            }
+
+            const uint xtok = tid >> 4u;
+            const uint xseg = tid & 15u;
+            const uint gt = n0 + xtok;
+            vec4 x4 = vec4(0.0);
+            if (gt < pc.N) {
+                const uint xo = gt * pc.K + kb * 128u + kk + xseg * 4u;
+                x4 = vec4(xv[xo], xv[xo + 1u], xv[xo + 2u], xv[xo + 3u]);
+            }
+            xs[xtok][xseg] = x4;
+            barrier();
+
+            for (uint k4 = 0u; k4 < NBK4; ++k4) {
+                const vec4 xa = xs[tx][k4];
+                a0 += ws[ty        ][k4] * xa;
+                a1 += ws[ty + 16u  ][k4] * xa;
+                a2 += ws[ty + 32u  ][k4] * xa;
+                a3 += ws[ty + 48u  ][k4] * xa;
+            }
+            barrier();
+        }
+
+        const float sc = scale_at(pc.s_off + rb * nblk + kb);
+        out0 += (a0.x + a0.y + a0.z + a0.w) * sc;
+        out1 += (a1.x + a1.y + a1.z + a1.w) * sc;
+        out2 += (a2.x + a2.y + a2.z + a2.w) * sc;
+        out3 += (a3.x + a3.y + a3.z + a3.w) * sc;
+    }
+
+    if (n0 + tx < pc.N) {
+        const uint o = (n0 + tx) * pc.M + m0 + ty;
+        yv[o]        = out0;
+        yv[o + 16u]  = out1;
+        yv[o + 32u]  = out2;
+        yv[o + 48u]  = out3;
+    }
+}

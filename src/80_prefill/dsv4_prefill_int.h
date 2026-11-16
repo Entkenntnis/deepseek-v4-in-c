@@ -62,6 +62,7 @@ struct DSV4Prefill {
     DSV4LayerState  *lst;
     const DSV4ExpertSrc *src;
     const DSV4ModelW *mw;
+    struct DSV4PrefillVk *vk;   /* NULL = CPU kernels */
     DSV4PrefillOpts  opt;
     int              cap;          /* allocated token rows in the block buffers */
     int              scratch_cap;  /* allocated DSV4PrefillTok entries */
