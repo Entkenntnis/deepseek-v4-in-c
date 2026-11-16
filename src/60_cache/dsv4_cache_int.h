@@ -17,7 +17,13 @@ typedef struct DSV4Slot {
     uint8_t  origin;           /* 0 empty, 1 hash prefetch, 2 a miss read */
     uint64_t stamp;            /* for LRU */
     DSV4ExpertW w;             /* points into `bytes` */
-    unsigned char *bytes;      /* 4096-aligned; O_DIRECT reads land here */
+    unsigned char *bytes;      /* 4096-aligned Vulkan pool slice; pread lands
+                                * here and the CPU matmul reads it directly */
+    /* The same slice for the GPU: a storage-buffer binding is
+     * (dsv4_cache_vk_pool_buffer(c->vk, vk_pool), vk_off, c->slot_bytes).
+     * It is fixed at init and survives LRU reuse. */
+    int      vk_pool;
+    int64_t  vk_off;
     /* Where each of the six tensors ended up, in the order
      * (w1.s, w2.s, w3.s, w1.w, w2.w, w3.w). Recomputed on every load. */
     int64_t  toff[6];

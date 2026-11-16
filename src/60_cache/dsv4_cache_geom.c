@@ -24,7 +24,10 @@ int dsv4_cache_expert_geometry(DSV4Cache *c, const DSV4Cfg *cfg)
     for (int i = 0; i < 3; i++) { c->off_s[i] = off; c->len_s[i] = sb[i]; off += sb[i]; }
     for (int i = 0; i < 3; i++) { c->off_w[i] = off; c->len_w[i] = wb[i]; off += wb[i]; }
     c->expert_bytes = off;
-    c->slot_bytes   = off + DSV4_SLOT_SLACK;
+    /* Round the slot up to the O_DIRECT/Vulkan slice alignment. Every slot is
+     * a 4096-aligned slice of a mapped Vulkan pool, so this must be a multiple
+     * even for geometries where the six tensors do not happen to end aligned. */
+    c->slot_bytes   = (off + DSV4_SLOT_SLACK + 4095) & ~(int64_t)4095;
     return 0;
 }
 

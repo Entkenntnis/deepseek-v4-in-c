@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_cache_load.c - resolve six tensors, then read them into a slot with
  * coalescing and no copy. */
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -102,20 +103,35 @@ int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
         if (c->direct && use_slot) {
             /* The fast path: no copy at all. */
             int64_t poff = 0;
+            errno = 0;
             const int64_t n = dsv4_st_read_aligned(
                 c->st, r[i].shard, r[i].foff, len,
                 s->bytes + soff - pad, c->slot_bytes - (soff - pad), &poff);
-            if (n != len || poff != pad) return -1;
+            if (n != len || poff != pad) {
+                fprintf(stderr,
+                        "dsv4_cache: O_DIRECT slot read failed: got %lld of "
+                        "%lld, pad %lld/%lld, errno %d (%s)\n",
+                        (long long)n, (long long)len, (long long)poff,
+                        (long long)pad, errno, strerror(errno));
+                return -1;
+            }
             place = soff;
         } else if (c->direct && len <= c->bounce_cap - 2 * 4096) {
             /* Placement did not fit; load into the staging buffer and copy.
              * Kept so a checkpoint that scatters these into more runs than the
              * slack allows still loads correctly. */
             int64_t poff = 0;
+            errno = 0;
             const int64_t n = dsv4_st_read_aligned(c->st, r[i].shard, r[i].foff,
                                                    len, bounce, c->bounce_cap,
                                                    &poff);
-            if (n != len) return -1;
+            if (n != len) {
+                fprintf(stderr,
+                        "dsv4_cache: staged slot read failed: got %lld of "
+                        "%lld, errno %d (%s)\n",
+                        (long long)n, (long long)len, errno, strerror(errno));
+                return -1;
+            }
             if (cursor + len > c->slot_bytes) return -1;
             memcpy(s->bytes + cursor, bounce + poff, (size_t)len);
             place = cursor;
@@ -124,11 +140,19 @@ int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
             place = cursor;
             int64_t got = 0;
             while (got < len) {
+                errno = 0;
                 const ssize_t n = pread(c->st->fd[r[i].shard],
                                         s->bytes + place + got,
                                         (size_t)(len - got),
                                         (off_t)(r[i].foff + got));
-                if (n <= 0) return -1;
+                if (n <= 0) {
+                    fprintf(stderr,
+                            "dsv4_cache: buffered slot read failed at %lld of "
+                            "%lld, errno %d (%s)\n",
+                            (long long)got, (long long)len, errno,
+                            strerror(errno));
+                    return -1;
+                }
                 got += n;
             }
         }

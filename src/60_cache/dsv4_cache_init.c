@@ -8,6 +8,7 @@
 
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
+#include "dsv4_cache_vk.h"
 #include "dsv4_threads.h"
 
 int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
@@ -87,16 +88,49 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
     c->slot = (DSV4Slot *)calloc((size_t)c->nslot, sizeof(DSV4Slot));
     if (!c->slot) return -1;
 
+    /* THE SLOTS ARE VULKAN MEMORY. There is no host fallback: if the device or
+     * a pool cannot be created, the cache refuses to start rather than quietly
+     * running a different memory layout from the one the GPU will use. */
+    c->vk = dsv4_cache_vk_open();
+    if (!c->vk) {
+        fprintf(stderr, "dsv4_cache: could not create the Vulkan device for "
+                        "expert slots\n");
+        dsv4_cache_free(c);
+        return -1;
+    }
+
+    unsigned char **slot_mem =
+        (unsigned char **)calloc((size_t)c->nslot, sizeof *slot_mem);
+    int *slot_pool = (int *)calloc((size_t)c->nslot, sizeof *slot_pool);
+    int64_t *slot_off = (int64_t *)calloc((size_t)c->nslot, sizeof *slot_off);
+    if (!slot_mem || !slot_pool || !slot_off) {
+        free(slot_mem);
+        free(slot_pool);
+        free(slot_off);
+        dsv4_cache_free(c);
+        return -1;
+    }
+    if (dsv4_cache_vk_alloc_slots(c->vk, c->slot_bytes, c->nslot, slot_mem,
+                                  slot_pool, slot_off) != 0) {
+        fprintf(stderr, "dsv4_cache: could not allocate %d Vulkan expert "
+                        "slots of %lld bytes\n",
+                c->nslot, (long long)c->slot_bytes);
+        free(slot_mem);
+        free(slot_pool);
+        free(slot_off);
+        dsv4_cache_free(c);
+        return -1;
+    }
+
     for (int i = 0; i < c->nslot; i++) {
         c->slot[i].layer = -1;
         c->slot[i].expert = -1;
         c->slot[i].pending = 0;
-        /* 4096-aligned so a widened O_DIRECT window can be read straight in. */
-        if (posix_memalign((void **)&c->slot[i].bytes, 4096,
-                           (size_t)c->slot_bytes) != 0) {
-            c->slot[i].bytes = NULL;
-            dsv4_cache_free(c); return -1;
-        }
+        /* 4096-aligned by dsv4_cache_vk_alloc_slots(), so a widened O_DIRECT
+         * window can be read straight into the slot. */
+        c->slot[i].bytes = slot_mem[i];
+        c->slot[i].vk_pool = slot_pool[i];
+        c->slot[i].vk_off = slot_off[i];
         /* Until the first load, the compact layout is the honest description
          * of an empty slot -- bind_slot needs SOMETHING coherent to point at. */
         for (int k = 0; k < 3; k++) {
@@ -105,6 +139,9 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
         }
         dsv4_cache_bind_slot(c, &c->slot[i]);
     }
+    free(slot_mem);
+    free(slot_pool);
+    free(slot_off);
 
     /* One FIFO for every reader job: normal begin() batches and the optional
      * hash prefetch. Overflow is a hard error, not a stall. */
@@ -126,7 +163,11 @@ void dsv4_cache_free(DSV4Cache *c)
     if (!c) return;
     /* Readers first, and before anything they point at is freed. */
     if (c->slot) dsv4_cache_pool_stop(c);
-    for (int i = 0; i < c->nslot; i++) free(c->slot[i].bytes);
+    /* The slot pointers are slices of the Vulkan pools, never malloc owns. */
+    if (c->vk) {
+        dsv4_cache_vk_close(c->vk);
+        c->vk = NULL;
+    }
     free(c->slot);
     if (c->bounce) {
         for (int b = 0; b < c->nbounce; b++) free(c->bounce[b]);

@@ -19,6 +19,7 @@
 
 struct DSV4CacheBatch;
 struct DSV4CacheJob;
+struct DSV4CacheVk;
 struct DSV4Slot;
 
 typedef struct {
@@ -28,6 +29,12 @@ typedef struct {
     int            nslot;
     int64_t        expert_bytes;
     uint64_t       clock;
+
+    /* Owns the Vulkan device and the pools the slots are sliced from. The slot
+     * bytes are host pages imported into Vulkan as VkDeviceMemory, so pread
+     * and the GPU share them without a copy. Required: init fails if this
+     * cannot be created. */
+    struct DSV4CacheVk *vk;
 
     /* Offsets of the six tensors inside a slot, computed once. */
     int64_t  off_w[3], off_s[3];

@@ -9,6 +9,9 @@ INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party \
             -Isrc/40_io -Isrc/50_loader -Isrc/60_cache -Isrc/70_decode \
             -Isrc/80_prefill
 LDFLAGS  ?= -lm -fopenmp -pthread
+# The engine owns its expert slots in Vulkan memory (src/60_cache). `bench`
+# does not link the cache, so it stays free of libvulkan.
+VK_LDFLAGS ?= -lvulkan
 DEPFLAGS := -MMD -MP
 
 # Plain `make` has always run the test suite; keep that behaviour.
@@ -58,7 +61,7 @@ e2e: $(BIN)/dsv4-serve
 
 $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
@@ -74,14 +77,14 @@ $(BIN)/vk_expert: $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
                   $(RUNTIME_OBJ) $(VKX_SPV)
 	@mkdir -p $(BIN)
 	$(CC) $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) $(RUNTIME_OBJ) \
-	      -o $@ $(LDFLAGS) -lvulkan
+	      -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 vk-expert: $(BIN)/vk_expert
 	./$(BIN)/vk_expert
 
 $(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(REF_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 $(OBJ)/src/%.o: src/%.c
 	@mkdir -p $(dir $@)
