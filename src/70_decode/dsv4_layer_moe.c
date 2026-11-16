@@ -9,6 +9,7 @@
 
 #include "dsv4.h"
 #include "dsv4_prof.h"
+#include "dsv4_expert_vk.h"
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_layer.h"
@@ -33,10 +34,23 @@ static void trace_expert(int kind, int layer, int k, int expert,
 /* SwiGLU expert: w2( silu(clamp(w1 x)) * clamp(w3 x) ). */
 static void expert_forward(float *out, const float *x, const DSV4ExpertW *e,
                            DSV4Scratch *s, int hidden, int inter, float limit,
-                           int layer, int k)
+                           int layer, int k, DSV4ExpertVk *gpu)
 {
     const int tr = dsv4_trace_active();
     double t0 = tr ? dsv4_now_s() : 0.0;
+
+    /* Cache-backed routed experts carry a Vulkan binding. Everything else
+     * (the shared expert, synthetic test experts) has vk_base == NULL and
+     * stays on the CPU. */
+    if (gpu && e->vk_base) {
+        if (dsv4_expert_vk_forward(gpu, e, x, out) != 0) {
+            fprintf(stderr, "dsv4_layer: Vulkan expert matmul failed at layer "
+                            "%d k %d; refusing to continue\n", layer, k);
+            abort();
+        }
+        if (tr) trace_mm(layer, k, "gpu", t0);
+        return;
+    }
 
     dsv4_mmq(s->expert_gate, x, &e->w1);
     if (tr) trace_mm(layer, k, "w1", t0);
@@ -61,6 +75,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
                     const DSV4Cfg *c, DSV4Scratch *s, const DSV4ExpertSrc *src,
                     int layer, int token_id)
 {
+    DSV4ExpertVk *gpu = (DSV4ExpertVk *)src->gpu;
     const double t_moe = dsv4_now_s();
     double t0 = dsv4_now_s();
     dsv4_mmq(s->gate_scores, x, &w->moe.gate);
@@ -93,7 +108,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
             trace_expert(DSV4_TR_COMPUTE, layer, k, s->topk_idx[k], "hit");
             expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
                            x, ex[k], s, c->hidden, c->moe_inter,
-                           c->swiglu_limit, layer, k);
+                           c->swiglu_limit, layer, k, gpu);
             trace_expert(DSV4_TR_COMPUTE_END, layer, k, s->topk_idx[k], "hit");
             done[k] = 1;
         }
@@ -105,7 +120,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
         t0 = dsv4_now_s();
         trace_expert(DSV4_TR_COMPUTE, layer, -1, -1, "shared");
         expert_forward(s->shared_acc, x, &w->moe.shared, s, c->hidden,
-                       c->moe_inter * c->n_shared, c->swiglu_limit, layer, -1);
+                       c->moe_inter * c->n_shared, c->swiglu_limit, layer, -1, gpu);
         trace_expert(DSV4_TR_COMPUTE_END, layer, -1, -1, "shared");
         const double shared_ms = (dsv4_now_s() - t0) * 1000.0;
         dsv4_prof.shared += shared_ms / 1000.0;
@@ -127,7 +142,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
                 trace_expert(DSV4_TR_COMPUTE, layer, k, s->topk_idx[k], "miss");
                 expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
                                x, ex[k], s, c->hidden, c->moe_inter,
-                               c->swiglu_limit, layer, k);
+                               c->swiglu_limit, layer, k, gpu);
                 trace_expert(DSV4_TR_COMPUTE_END, layer, k, s->topk_idx[k],
                              "miss");
                 dsv4_prof.expert_mm += dsv4_now_s() - t0;
@@ -150,7 +165,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
         t0 = dsv4_now_s();
         trace_expert(DSV4_TR_COMPUTE, layer, -1, -1, "shared");
         expert_forward(s->shared_acc, x, &w->moe.shared, s, c->hidden,
-                       c->moe_inter * c->n_shared, c->swiglu_limit, layer, -1);
+                       c->moe_inter * c->n_shared, c->swiglu_limit, layer, -1, gpu);
         trace_expert(DSV4_TR_COMPUTE_END, layer, -1, -1, "shared");
         const double shms = (dsv4_now_s() - t0) * 1000.0;
         dsv4_prof.shared += shms / 1000.0;
@@ -175,7 +190,7 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
             trace_expert(DSV4_TR_COMPUTE, layer, k, s->topk_idx[k], "late");
             expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
                            x, ex[k], s, c->hidden, c->moe_inter,
-                           c->swiglu_limit, layer, k);
+                           c->swiglu_limit, layer, k, gpu);
             trace_expert(DSV4_TR_COMPUTE_END, layer, k, s->topk_idx[k], "late");
         }
     }

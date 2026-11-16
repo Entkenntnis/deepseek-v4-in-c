@@ -244,6 +244,13 @@ typedef struct {
 typedef struct {
     DSV4QMat w1, w3;        /* FP4 [moe_inter, hidden]                       */
     DSV4QMat w2;            /* FP4 [hidden, moe_inter]                       */
+    /* Valid only for a cache-backed routed expert. The same bytes are a slice
+     * of a Vulkan pool; vk_base is the slot's CPU address and (vk_pool,
+     * vk_off) identify the same slice on the GPU. Shared and synthetic
+     * experts leave vk_base NULL and stay on the CPU path. */
+    int                  vk_pool;
+    int64_t              vk_off;
+    const unsigned char *vk_base;
 } DSV4ExpertW;
 
 typedef struct {

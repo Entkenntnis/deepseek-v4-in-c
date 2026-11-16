@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dsv4_expert_vk.h"
 #include "dsv4_serve_int.h"
 
 void dsv4_engine_free(Engine *e)
@@ -16,6 +17,8 @@ void dsv4_engine_free(Engine *e)
     free(e->enc_tmp); free(e->tok_bytes); free(e->hexbuf);
     dsv4_scratch_free(&e->scratch);
     dsv4_bind_model_free(&e->mb);
+    dsv4_expert_vk_free(e->expert_vk);
+    e->expert_vk = NULL;
     dsv4_cache_free(&e->cache);
     dsv4_trunk_close(&e->tr);
     dsv4_tok_free(&e->tok);

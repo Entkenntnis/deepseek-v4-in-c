@@ -16,6 +16,8 @@
 #include "dsv4_tok.h"
 #include "dsv4_trunk.h"
 
+struct DSV4ExpertVk;
+
 typedef struct {
     const char      *model_dir;
     DSV4Cfg          c;
@@ -25,6 +27,7 @@ typedef struct {
     DSV4Tok          tok;
     DSV4Trunk        tr;
     DSV4Cache        cache;
+    struct DSV4ExpertVk *expert_vk; /* fused routed-expert matmul, or NULL */
     DSV4ModelBind    mb;
     DSV4Scratch      scratch;
     DSV4LayerState  *lst;

@@ -55,6 +55,9 @@ typedef struct {
     int (*wait_any)(void *ctx, int *k);
     int (*stats)(void *ctx, DSV4ExpertStats *out);
     void *ctx;
+    /* Optional fused Vulkan matmul for cache-backed FP4 experts. NULL keeps
+     * every expert on the CPU path (tests and synthetic sources). */
+    void *gpu;
 } DSV4ExpertSrc;
 
 /* max_pos must be the same bound passed to dsv4_state_init: the indexer's row

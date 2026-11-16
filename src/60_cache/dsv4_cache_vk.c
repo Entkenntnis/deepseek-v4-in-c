@@ -402,6 +402,33 @@ int dsv4_cache_vk_alloc_slots(DSV4CacheVk *v, int64_t slot_bytes, int nslot,
     return 0;
 }
 
+int dsv4_cache_vk_alloc_mapped(DSV4CacheVk *v, uint64_t bytes,
+                               DSV4VkMapped *out)
+{
+    if (!v || !out || bytes == 0 || bytes > SIZE_MAX) return -1;
+    DSV4VkPool p;
+    if (pool_alloc(v, (size_t)bytes, &p) != 0) return -1;
+    memset(out, 0, sizeof *out);
+    out->buf = p.buf;
+    out->mem = p.mem;
+    out->cpu = p.base;
+    out->bytes = (uint64_t)p.bytes;
+    out->raw = p.raw;
+    return 0;
+}
+
+void dsv4_cache_vk_free_mapped(DSV4CacheVk *v, DSV4VkMapped *m)
+{
+    if (!v || !m) return;
+    DSV4VkPool p;
+    memset(&p, 0, sizeof p);
+    p.buf = m->buf;
+    p.mem = m->mem;
+    p.raw = m->raw;
+    pool_destroy(v, &p);
+    memset(m, 0, sizeof *m);
+}
+
 const char *dsv4_cache_vk_device_name(const DSV4CacheVk *v)
 {
     return v ? v->devname : "";

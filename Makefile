@@ -4,7 +4,7 @@
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
             -Wno-unused-parameter -march=native -fopenmp -pthread -ffp-contract=off -flto=auto
-INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party \
+INCS     := -Iinclude -Iinclude/dsv4 -Ithird_party -Ibuild \
             -Isrc/00_base -Isrc/10_compute -Isrc/20_runtime -Isrc/30_tokenizer \
             -Isrc/40_io -Isrc/50_loader -Isrc/60_cache -Isrc/70_decode \
             -Isrc/80_prefill
@@ -35,7 +35,8 @@ VKX_SRC     := bench/vk_expert.c
 BENCH_SRC   := $(filter-out $(VKX_SRC),$(wildcard bench/*.c))
 BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
 VKX_OBJ     := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(VKX_SRC))
-VKX_SPV     := build/expert_fp4.spv
+VK_SPV      := build/expert_fp4.spv
+VK_SPV_H    := build/expert_fp4_spv.h
 
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
@@ -65,16 +66,21 @@ $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 
 $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
-# Standalone Vulkan routed-expert bench: the same slot bytes, CPU FP4 vs iGPU.
-# Needs libvulkan and glslc, which is why it is not part of `make bench`.
-$(VKX_SPV): bench/shaders/expert_fp4.comp
+# One shader, two consumers: the standalone vk_expert bench loads the .spv,
+# and the engine embeds the same words through this generated header.
+$(VK_SPV): src/10_compute/shaders/expert_fp4.comp
 	@mkdir -p build
 	glslc -O --target-env=vulkan1.3 -o $@ $<
 
+$(VK_SPV_H): $(VK_SPV) tools/spv_to_header.py
+	python3 tools/spv_to_header.py $< $@ expert_fp4_spv
+
+$(OBJ)/src/60_cache/dsv4_expert_vk.o: $(VK_SPV_H)
+
 $(BIN)/vk_expert: $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
-                  $(RUNTIME_OBJ) $(VKX_SPV)
+                  $(RUNTIME_OBJ) $(VK_SPV)
 	@mkdir -p $(BIN)
 	$(CC) $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) $(RUNTIME_OBJ) \
 	      -o $@ $(LDFLAGS) $(VK_LDFLAGS)

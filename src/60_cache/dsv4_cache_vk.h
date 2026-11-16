@@ -47,4 +47,19 @@ int        dsv4_cache_vk_pool_count(const DSV4CacheVk *v);
 VkBuffer   dsv4_cache_vk_pool_buffer(const DSV4CacheVk *v, int pool);
 VkDeviceSize dsv4_cache_vk_pool_size(const DSV4CacheVk *v, int pool);
 
+/* A standalone host-mapped Vulkan buffer. Used for the expert kernel's
+ * scratch (x/gate/up/mid/y). It uses the same imported-host-page path as the
+ * cache slots, so no driver mapping and no copy. */
+typedef struct {
+    VkBuffer       buf;
+    VkDeviceMemory mem;
+    void          *cpu;
+    uint64_t       bytes;
+    void          *raw;        /* opaque, owned by this module */
+} DSV4VkMapped;
+
+int  dsv4_cache_vk_alloc_mapped(DSV4CacheVk *v, uint64_t bytes,
+                                DSV4VkMapped *out);
+void dsv4_cache_vk_free_mapped(DSV4CacheVk *v, DSV4VkMapped *m);
+
 #endif /* DSV4_CACHE_VK_H */

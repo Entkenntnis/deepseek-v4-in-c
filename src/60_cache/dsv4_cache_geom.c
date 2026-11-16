@@ -49,6 +49,9 @@ void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s)
         m[i]->w = s->bytes + s->toff[3 + i];
         m[i]->s = s->bytes + s->toff[i];
     }
+    s->w.vk_pool = s->vk_pool;
+    s->w.vk_off  = s->vk_off;
+    s->w.vk_base = s->bytes;
 }
 
 int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg)

@@ -33,10 +33,16 @@
 
 layout(local_size_x = 256) in;
 
-/* Bindings 0 and 1 are the same VkBuffer: the whole expert slot, viewed as
- * 16-byte weight words and 4-byte scale words respectively. The push constants
- * carry absolute byte offsets, so the host never re-binds per matrix. */
-layout(std430, binding = 0) readonly buffer WT { uvec4 wv[]; };
+/* Bindings 0 and 1 are the same VkBuffer: the whole expert pool, viewed as
+ * 4-byte weight words and 4-byte scale words respectively. The push constants
+ * carry absolute byte offsets, so the host never re-binds per matrix.
+ *
+ * The weight words are uint, not uvec4: the cache lands an O_DIRECT run at the
+ * file's 4096 residue, so a weight tensor can start at an 8-byte offset. A
+ * uvec4[] view would require 16-byte alignment and silently read the wrong
+ * block. Four uint loads are always enough because the file and slot are at
+ * least 4-byte aligned. */
+layout(std430, binding = 0) readonly buffer WT { uint  wv[]; };
 layout(std430, binding = 1) readonly buffer SC { uint  sw[]; };
 /* Activations: x, gate, up, mid and y are regions of one scratch buffer. */
 layout(std430, binding = 2) buffer BUF { float f[]; };
@@ -78,6 +84,13 @@ float e8m0(uint b)
     if (b == 0x00u) return uintBitsToFloat(0x00400000u);   /* 2^-127 */
     if (b == 0xFFu) return uintBitsToFloat(0x7FC00000u);   /* NaN    */
     return uintBitsToFloat(b << 23u);
+}
+
+/* A 32-weight block is four consecutive uint words, whatever the 16-byte
+ * alignment of the tensor start. */
+uvec4 load_w(uint word)
+{
+    return uvec4(wv[word], wv[word + 1u], wv[word + 2u], wv[word + 3u]);
 }
 
 /* One 32-weight block. Word k holds columns 8k..8k+7, one nibble each. */
@@ -131,13 +144,14 @@ void main()
     for (uint i = 0u; i < per; ++i) {
         const uint c     = r + 4u * i;
         const uint boff  = wrow + c * 64u;
+        const uint wb    = boff >> 2u;
         const uint xoff  = pc.x_off + c * 128u;
 
         precise vec4 b;
-        b.x = block_sum(wv[ boff         >> 4u], xoff);
-        b.y = block_sum(wv[(boff + 16u)  >> 4u], xoff +  32u);
-        b.z = block_sum(wv[(boff + 32u)  >> 4u], xoff +  64u);
-        b.w = block_sum(wv[(boff + 48u)  >> 4u], xoff +  96u);
+        b.x = block_sum(load_w(wb),      xoff);
+        b.y = block_sum(load_w(wb + 4u), xoff +  32u);
+        b.z = block_sum(load_w(wb + 8u), xoff +  64u);
+        b.w = block_sum(load_w(wb + 12u), xoff + 96u);
 
         const uint sb = sw[(srow + c * 4u) >> 2u];
         precise vec4 s4 = vec4(e8m0( sb         & 0xFFu),
