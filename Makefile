@@ -26,15 +26,20 @@ SERVE_OBJ   := $(patsubst src/%.c,$(OBJ)/src/%.o,$(CLI_SRC))
 
 COMPUTE_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(COMPUTE_SRC))
 RUNTIME_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(RUNTIME_SRC))
-BENCH_SRC   := $(wildcard bench/*.c)
+# vk_expert has its own main and needs libvulkan; keep it out of `bin/bench`
+# so the CPU-only benchmark stays free of both.
+VKX_SRC     := bench/vk_expert.c
+BENCH_SRC   := $(filter-out $(VKX_SRC),$(wildcard bench/*.c))
 BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
+VKX_OBJ     := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(VKX_SRC))
+VKX_SPV     := build/expert_fp4.spv
 
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 
-.PHONY: test serve tui bench e2e clean
+.PHONY: test serve tui bench vk-expert e2e clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -59,6 +64,21 @@ $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
+# Standalone Vulkan routed-expert bench: the same slot bytes, CPU FP4 vs iGPU.
+# Needs libvulkan and glslc, which is why it is not part of `make bench`.
+$(VKX_SPV): bench/shaders/expert_fp4.comp
+	@mkdir -p build
+	glslc -O --target-env=vulkan1.3 -o $@ $<
+
+$(BIN)/vk_expert: $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) \
+                  $(RUNTIME_OBJ) $(VKX_SPV)
+	@mkdir -p $(BIN)
+	$(CC) $(VKX_OBJ) $(OBJ)/bench/fixtures.o $(COMPUTE_OBJ) $(RUNTIME_OBJ) \
+	      -o $@ $(LDFLAGS) -lvulkan
+
+vk-expert: $(BIN)/vk_expert
+	./$(BIN)/vk_expert
+
 $(BIN)/test_%: $(OBJ)/tests/unit/test_%.o $(REF_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
@@ -79,4 +99,4 @@ clean:
 	rm -rf $(BIN) build
 
 -include $(ENGINE_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(REF_OBJ:.o=.d) \
-         $(SERVE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)
+         $(SERVE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(VKX_OBJ:.o=.d)

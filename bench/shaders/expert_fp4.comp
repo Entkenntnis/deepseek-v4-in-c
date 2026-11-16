@@ -1,0 +1,172 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* expert_fp4.comp - one routed expert's matvec, in the CPU's exact tree.
+ *
+ * TWO ENTRY BEHAVIOURS, selected by the uniform push-constant `mode`:
+ *   mode 0  y[out_n] = W[out_n, in_n] * x            (FP4, E2M1, 1x32 scales)
+ *   mode 1  y[n] = silu(clamp(x[n])) * clamp(up[n])  (SWiGLU, not bit-exact:
+ *           GLSL exp() is not libm expf(). The host uses this only for the
+ *           `fused` timing variant; the `exact` variant does SWiGLU on the CPU.)
+ *
+ * THE REDUCTION IS THE CPU'S, NOT MERELY A CLOSE ONE
+ *   src/10_compute/dsv4_matmul_fp4.c computes, per 32-weight block, eight lane
+ *   sums v[j] = (p[j] + p[8+j]) + (p[16+j] + p[24+j]), then
+ *   B = ((v0+v1)+(v2+v3)) + ((v4+v5)+(v6+v7)). Every 128-weight chunk folds its
+ *   four B's into one of four residue accumulators with an FMA against the four
+ *   E8M0 scales, in chunk order, and the row finishes as
+ *   t = (a0+a1)+(a2+a3), S = (t0+t1)+(t2+t3), y = 0.5 * S. All float; the
+ *   apparent 2x in the CPU kernel comes from its integer LUT and is undone by
+ *   the single 0.5 multiply, which is exact.
+ *
+ *   This shader reproduces that order exactly and keeps every intermediate
+ *   `precise` so the compiler cannot reassociate or contract it. The host gates
+ *   mode 0 with memcmp against dsv4_mmq, so a regression cannot hide behind a
+ *   tolerance.
+ *
+ * MAPPING
+ *   Four lanes per output row, one lane per residue class, so a lane owns
+ *   chunks r, r+4, r+8, ... in the same order the CPU accumulates them and can
+ *   use fma() exactly where the CPU uses _mm_fmadd_ps. 64 rows per 256-thread
+ *   workgroup. Memory: a 4-lane group reads 256 contiguous weight bytes per
+ *   iteration, and x comes from L1 (16 KiB, broadcast across the 64 rows).
+ */
+#version 460
+
+layout(local_size_x = 256) in;
+
+/* Bindings 0 and 1 are the same VkBuffer: the whole expert slot, viewed as
+ * 16-byte weight words and 4-byte scale words respectively. The push constants
+ * carry absolute byte offsets, so the host never re-binds per matrix. */
+layout(std430, binding = 0) readonly buffer WT { uvec4 wv[]; };
+layout(std430, binding = 1) readonly buffer SC { uint  sw[]; };
+/* Activations: x, gate, up, mid and y are regions of one scratch buffer. */
+layout(std430, binding = 2) buffer BUF { float f[]; };
+
+layout(push_constant) uniform PC {
+    uint  in_n;        /* mode 0: reduce dimension; mode 1: element count   */
+    uint  out_n;       /* mode 0: output rows                               */
+    uint  sc;          /* scale bytes per row                               */
+    uint  row_bytes;   /* packed weight bytes per row                       */
+    uint  w_off;       /* byte offset of the weight matrix inside the slot  */
+    uint  s_off;       /* byte offset of its scales inside the slot         */
+    uint  x_off;       /* float offset of the input vector                  */
+    uint  up_off;      /* mode 1: float offset of the up vector             */
+    uint  y_off;       /* float offset of the output vector                 */
+    uint  mode;
+    float limit;       /* SWiGLU clamp                                      */
+} pc;
+
+#define ROWS_PER_WG 64u
+
+shared float red[ROWS_PER_WG * 4u * 4u];
+
+/* E2M1 as the CPU's integer LUT, doubled: {0,1,2,3,4,6,8,12} with sign. Digit
+ * 8 must yield +0.0, which is why this stays an int until the conversion. */
+float fp4v(uint code)
+{
+    uint m = code & 7u;
+    int  v = int(m);
+    if      (m == 4u) v = 4;
+    else if (m == 5u) v = 6;
+    else if (m == 6u) v = 8;
+    else if (m == 7u) v = 12;
+    return float((code & 8u) != 0u ? -v : v);
+}
+
+/* dsv4_e8m0_to_f32, branch for branch. */
+float e8m0(uint b)
+{
+    if (b == 0x00u) return uintBitsToFloat(0x00400000u);   /* 2^-127 */
+    if (b == 0xFFu) return uintBitsToFloat(0x7FC00000u);   /* NaN    */
+    return uintBitsToFloat(b << 23u);
+}
+
+/* One 32-weight block. Word k holds columns 8k..8k+7, one nibble each. */
+float block_sum(uvec4 w, uint xb)
+{
+    precise float v[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        const uint sh = j * 4u;
+        precise float p0 = fp4v((w.x >> sh) & 15u) * f[xb + j];
+        precise float p1 = fp4v((w.y >> sh) & 15u) * f[xb + 8u + j];
+        precise float p2 = fp4v((w.z >> sh) & 15u) * f[xb + 16u + j];
+        precise float p3 = fp4v((w.w >> sh) & 15u) * f[xb + 24u + j];
+        v[j] = (p0 + p1) + (p2 + p3);
+    }
+    precise float lo = (v[0] + v[1]) + (v[2] + v[3]);
+    precise float hi = (v[4] + v[5]) + (v[6] + v[7]);
+    return lo + hi;
+}
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+
+    if (pc.mode == 1u) {
+        const uint i = gl_GlobalInvocationID.x;
+        if (i < pc.in_n) {
+            precise float u = f[pc.up_off + i];
+            u = min(u, pc.limit);
+            u = max(u, -pc.limit);
+            precise float g = f[pc.x_off + i];
+            g = min(g, pc.limit);
+            precise float s = g / (1.0 + exp(-g));
+            f[pc.y_off + i] = s * u;
+        }
+        return;
+    }
+
+    const uint g   = tid >> 2u;                  /* row group inside the WG */
+    const uint r   = tid & 3u;                   /* residue class           */
+    const uint row = gl_WorkGroupID.x * ROWS_PER_WG + g;
+    /* out_n is a multiple of ROWS_PER_WG for every released geometry, but clamp
+     * rather than return: every thread must reach the barrier below. */
+    const uint rr  = min(row, pc.out_n - 1u);
+
+    const uint per = (pc.in_n >> 7u) >> 2u;      /* chunks / 4 */
+    const uint wrow = pc.w_off + rr * pc.row_bytes;
+    const uint srow = pc.s_off + rr * pc.sc;
+
+    precise vec4 acc = vec4(0.0);
+
+    for (uint i = 0u; i < per; ++i) {
+        const uint c     = r + 4u * i;
+        const uint boff  = wrow + c * 64u;
+        const uint xoff  = pc.x_off + c * 128u;
+
+        precise vec4 b;
+        b.x = block_sum(wv[ boff         >> 4u], xoff);
+        b.y = block_sum(wv[(boff + 16u)  >> 4u], xoff +  32u);
+        b.z = block_sum(wv[(boff + 32u)  >> 4u], xoff +  64u);
+        b.w = block_sum(wv[(boff + 48u)  >> 4u], xoff +  96u);
+
+        const uint sb = sw[(srow + c * 4u) >> 2u];
+        precise vec4 s4 = vec4(e8m0( sb         & 0xFFu),
+                               e8m0((sb >>  8u) & 0xFFu),
+                               e8m0((sb >> 16u) & 0xFFu),
+                               e8m0( sb >> 24u));
+        acc = vec4(fma(b.x, s4.x, acc.x), fma(b.y, s4.y, acc.y),
+                   fma(b.z, s4.z, acc.z), fma(b.w, s4.w, acc.w));
+    }
+
+    red[(g * 4u + r) * 4u + 0u] = acc.x;
+    red[(g * 4u + r) * 4u + 1u] = acc.y;
+    red[(g * 4u + r) * 4u + 2u] = acc.z;
+    red[(g * 4u + r) * 4u + 3u] = acc.w;
+    barrier();
+
+    if (r == 0u) {
+        const uint base = (g * 4u) * 4u;
+        precise vec4 a0 = vec4(red[base +  0u], red[base +  1u],
+                               red[base +  2u], red[base +  3u]);
+        precise vec4 a1 = vec4(red[base +  4u], red[base +  5u],
+                               red[base +  6u], red[base +  7u]);
+        precise vec4 a2 = vec4(red[base +  8u], red[base +  9u],
+                               red[base + 10u], red[base + 11u]);
+        precise vec4 a3 = vec4(red[base + 12u], red[base + 13u],
+                               red[base + 14u], red[base + 15u]);
+        precise vec4 t = (a0 + a1) + (a2 + a3);
+        precise float S = (t.x + t.y) + (t.z + t.w);
+        if (row < pc.out_n)
+            f[pc.y_off + row] = 0.5 * S;
+    }
+}
