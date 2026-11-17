@@ -18,7 +18,7 @@ class EventMixin:
         # than rates over a single layer, and a number that changes on every
         # layer is noise. Token text and layer progress below are NOT throttled.
         now = time.monotonic()
-        force_stats = name in ("ready", "stats", "done")
+        force_stats = name in ("ready", "done")
         # Prefill emits far more progress events than the stats panel needs.
         # Treat them like any other event: MEMORY/CPU and the rate figures are
         # a 1 Hz instrument. The PREFILL bar is drawn separately on every
@@ -29,7 +29,7 @@ class EventMixin:
             self.last_stats_ingest = now
             if force_stats:
                 self.stats_force = True
-        if name in ("ready", "stats"):
+        if name == "ready":
             first = not self.ready
             self.ready = ev
             self.context_cap = (ev.get("context") or {}).get("cap",
@@ -169,9 +169,6 @@ class EventMixin:
             self.prefill_rate = 0.0
             self.prefill_sample_ts = 0.0
             self.stats_force = True
-            self.dirty = True
-
-        elif name == "system":
             self.dirty = True
 
         elif name == "error":

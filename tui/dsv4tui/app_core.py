@@ -76,7 +76,6 @@ class AppBase:
         self.phase = ""
         self.last_done: dict = {}
 
-        self.system_prompt = ""
         self.gen_limit = DEFAULT_GEN
 
         self.input = ""

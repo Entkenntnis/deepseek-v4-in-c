@@ -148,8 +148,6 @@ class DemoBackend(DemoGenerateMixin):
                                  "chars": len(cmd.get("text", ""))})
             elif name == "reset":
                 self._event("reset")
-            elif name == "stats":
-                self._event("ready")
             elif name == "ping":
                 self.sink.event({"event": "pong"})
             elif name == "generate":

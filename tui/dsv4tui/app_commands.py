@@ -72,10 +72,7 @@ class CommandMixin:
                 "commands:\n"
                 "  /help                 this list\n"
                 "  /reset                clear model context (keeps the disk cache warm)\n"
-                "  /clear                clear the chat display only\n"
-                "  /system TEXT          system prompt for the NEXT reset\n"
                 "  /gen N                max tokens per turn\n"
-                "  /stats                ask the engine for a fresh snapshot\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
             if self.generating:
@@ -91,20 +88,6 @@ class CommandMixin:
             self.decode_spt.clear()
             self.stats_force = True
             self.add_system("context reset; expert cache stays warm")
-        elif cmd == "/clear":
-            self.messages.clear()
-            self.add_system("display cleared")
-        elif cmd == "/system":
-            if not arg:
-                self.add_system(f"system prompt: {self.system_prompt or '(empty)'}")
-            else:
-                self.system_prompt = arg
-                if self.context_used > 0:
-                    self.add_system("system prompt stored; /reset for it to take effect")
-                if self.backend_alive:
-                    self.backend.send({"cmd": "system", "text": arg})
-                else:
-                    self.add_system("engine is not running")
         elif cmd == "/gen":
             try:
                 n = int(arg)
@@ -114,10 +97,6 @@ class CommandMixin:
                 self.add_system(f"max {n} tokens per turn")
             except ValueError:
                 self.add_system("usage: /gen N   (N >= 1)")
-        elif cmd == "/stats":
-            if self.backend_alive:
-                self.backend.send({"cmd": "stats"})
-            self.add_system("requested a fresh snapshot")
         else:
             self.add_system(f"unknown command {cmd}; /help for the list")
         self.dirty = True

@@ -47,20 +47,6 @@ class GraphMixin:
         rate_txt = self._short(cur_rate) if cur_rate else "-"
         spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
 
-        # The inflow estimate needs a token rate. Decode supplies it once the
-        # graph has samples; during prefill use the engine's prompt timing or
-        # the live progress estimate instead of showing zero.
-        flow_rate = cur_rate
-        if flow_rate <= 0.0:
-            if self.prefill_tokens > 0 and self.prefill_s > 0.0:
-                flow_rate = self.prefill_tokens / self.prefill_s
-            else:
-                p = self.prefill_progress or {}
-                elapsed = float(p.get("elapsed") or 0.0)
-                done = int(p.get("tokens_done") or 0)
-                if elapsed > 0.05 and done > 0:
-                    flow_rate = done / elapsed
-
         def emit_memory() -> None:
             sysd = self.last.get("sys") or self.ready.get("sys") or {}
             cache = self.last.get("cache") or self.ready.get("cache") or {}
@@ -75,21 +61,26 @@ class GraphMixin:
 
             # Per token the CPU reads every dense trunk weight plus the routed
             # experts from RAM. That is a fixed byte count for a given model,
-            # so multiplying by the current token rate estimates the flow. The
-            # rate is decode tok/s, or the prompt's token rate during prefill.
+            # so multiplying by the decode token rate estimates the flow.
+            # Prefill's token rate is not comparable and is deliberately not
+            # used as a substitute.
             layers = int(cfg.get("layers") or 0)
             topk = int(cfg.get("topk") or 0)
             slot_mb = float(cache.get("slot_mb") or 0.0)
             expert_gb = layers * topk * slot_mb / 1024.0
             trunk_gb = float(trunk.get("resident_gb") or 0.0)
-            inflow = (expert_gb + trunk_gb) * flow_rate
+            if in_prefill or cur_rate <= 0.0:
+                inflow_txt = "-"
+            else:
+                inflow = (expert_gb + trunk_gb) * cur_rate
+                inflow_txt = f"~{fmt_gbps(inflow)}"
 
             emit((" MEMORY", "section"))
             emit((" RSS  ", "dim"), (f"{rss:.2f} GB", "value"),
                  ("  avail ", "dim"), (avail, avail_color))
             emit((" cache-hit ", "dim"), (f"{hit:5.1f}%", "value"))
             emit((" disk ", "dim"), (fmt_gbps(self.io_rate), "value"),
-                 ("  inflow ", "dim"), (f"~{fmt_gbps(inflow)}", "value"))
+                 ("  inflow ", "dim"), (inflow_txt, "value"))
 
         def emit_cpu() -> None:
             def percent(core: int) -> str:
