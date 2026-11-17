@@ -78,7 +78,7 @@ class ChatMixin:
                 m = msg.meta
                 meta = (f"{m.get('generated', 0)} tok · "
                         f"{float(m.get('seconds') or 0):.1f}s · "
-                        f"{float(m.get('s_per_token') or 0):.2f} s/tok · "
+                        f"{float(m.get('tps') or 0):.2f} tok/s · "
                         f"ttft {float(m.get('ttft') or 0):.1f}s · "
                         f"{m.get('stop', '')}")
                 for ln in self._wrap(meta, body_width):

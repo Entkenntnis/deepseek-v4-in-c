@@ -113,8 +113,8 @@ class GraphMixin:
                  (f" ({spt_txt} s/tok)", "dim"))
 
             if self.decode_spt:
-                avg_spt = sum(self.decode_spt) / len(self.decode_spt)
-                avg_rate = 1.0 / avg_spt if avg_spt > 0 else 0.0
+                avg_spt = self.decode_avg_spt()
+                avg_rate = self.decode_avg_tps()
                 emit((" ⌀ avg  ", "dim"),
                      (f"{self._short(avg_rate)} tok/s", "system"),
                      (f" ({self._short_spt(avg_spt)} s/tok)", "value"))

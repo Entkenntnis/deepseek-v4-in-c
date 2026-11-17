@@ -95,6 +95,17 @@ class AppBase:
         self._color_cache: dict[Any, int] = {}
         self._next_pair = 1
 
+    def decode_avg_spt(self) -> float:
+        """Mean seconds per decoded token, excluding prefill and TTFT."""
+        if not self.decode_spt:
+            return 0.0
+        return sum(self.decode_spt) / len(self.decode_spt)
+
+    def decode_avg_tps(self) -> float:
+        """Mean decode rate, matching the sidebar's decode average."""
+        spt = self.decode_avg_spt()
+        return 1.0 / spt if spt > 0 else 0.0
+
     def start_backend(self) -> None:
         if self.demo:
             self.backend = DemoBackend(self.sink)
