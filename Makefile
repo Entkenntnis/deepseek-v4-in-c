@@ -39,7 +39,7 @@ REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv
 VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
 
-.PHONY: test serve tui demo bench e2e clean
+.PHONY: test serve tui demo bench e2e prefill clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -58,6 +58,9 @@ bench: $(BIN)/bench
 
 e2e: $(BIN)/dsv4-serve
 	python3 bench/e2e.py
+
+prefill: $(BIN)/dsv4-serve
+	python3 bench/prefill.py
 
 $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)

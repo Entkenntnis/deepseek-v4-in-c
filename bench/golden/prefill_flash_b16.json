@@ -1,0 +1,15 @@
+{
+  "model": "/home/quinn/colibri-models/deepseek-v4-flash",
+  "system_prompt_sha256": "713565af43d3de8dabc55503cae57c6b389e4a228658a8d37b286db73c0590c5",
+  "prompt": "Erkläre kurz und sachlich, warum Paris die Hauptstadt von Frankreich ist.",
+  "prompt_tokens": 200,
+  "target_tokens": 200,
+  "gen": 1,
+  "budget_gb": 16.0,
+  "ctx": 8192,
+  "token_ids": [
+    51119
+  ],
+  "text": "Paris",
+  "sha256": "9e5f2063e81fd4f33d37449d87e0818934d45cb0a1852ad58ebc248d029a935f"
+}
