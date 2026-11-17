@@ -25,6 +25,11 @@ static int run_wait_any(void *ctx, int *k)
     return dsv4_cache_wait_any((DSV4Cache *)ctx, &g_batch, k);
 }
 
+static void run_sort_experts(void *ctx, int layer, int *experts, int n)
+{
+    dsv4_cache_sort_experts((const DSV4Cache *)ctx, layer, experts, n);
+}
+
 static int run_expert_stats(void *ctx, DSV4ExpertStats *out)
 {
     const DSV4Cache *c = (const DSV4Cache *)ctx;
@@ -62,7 +67,8 @@ int dsv4_make_expert_src(DSV4ExpertSrc *src, DSV4Cache *cache)
 {
     *src = (DSV4ExpertSrc){
         .begin = run_begin_experts, .end = run_end_experts,
-        .wait_any = run_wait_any, .stats = run_expert_stats, .ctx = cache,
+        .wait_any = run_wait_any, .stats = run_expert_stats,
+        .sort = run_sort_experts, .ctx = cache,
     };
     return 0;
 }

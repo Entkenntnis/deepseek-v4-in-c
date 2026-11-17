@@ -36,6 +36,15 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     }
     p->t_gate += dsv4_now_s() - tg;
 
+    /* Routing is known now. Start the whole layer's expert reads before the
+     * shared expert so the reader pool fills slots while the GPU runs w1/w3,
+     * swiglu and w2. Hash layers already started theirs at the top of
+     * prefill_layer(), where no gate matmul was needed to know the experts. */
+    if (!(p->pf_active && p->pf_layer == L)) {
+        const int prc = dsv4_prefill_moe_prefetch(p, L, n);
+        if (prc) return prc;
+    }
+
     const double tsh = dsv4_now_s();
     {
         DSV4PMJob two[2] = {
@@ -44,7 +53,10 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
         };
         if (dsv4_prefill_pm_multi_stats(p, two, 2,
                                         &p->st.shared_mm,
-                                        &p->st.f_shared)) return -1;
+                                        &p->st.f_shared)) {
+            dsv4_prefill_moe_abort(p);
+            return -1;
+        }
     }
     {
         const double ts = dsv4_now_s();
@@ -56,10 +68,16 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
         p->st.shared_swiglu += dsv4_now_s() - ts;
     }
     if (dsv4_prefill_pm_stats(p, p->sh_out, p->sh_mid, &w->moe.shared.w2, n,
-                              &p->st.shared_mm, &p->st.f_shared)) return -1;
+                              &p->st.shared_mm, &p->st.f_shared)) {
+        dsv4_prefill_moe_abort(p);
+        return -1;
+    }
     p->t_shared += dsv4_now_s() - tsh;
 
-    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
+    if (dsv4_prefill_cancelled(p)) {
+        dsv4_prefill_moe_abort(p);
+        return dsv4_prefill_cancel_code(p);
+    }
 
     /* ROUTED EXPERTS: layer-level union and expert-major. begin()/end() are
      * required by dsv4_prefill_init(), so this is the only path. */

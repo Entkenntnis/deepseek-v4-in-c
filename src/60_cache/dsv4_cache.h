@@ -13,9 +13,11 @@
  * practice; four runs' worth is bought so placement never has to think. */
 #define DSV4_SLOT_SLACK (6 * 4096)
 
-/* Upper bound on one hash-layer prefetch batch: num_hash_layers * topk.
- * 18 on both released models; 64 leaves room and keeps the batch fixed-size. */
-#define DSV4_MAX_PREFETCH 64
+/* Upper bound on one prefetch batch. Hash-layer prefetch needs
+ * num_hash_layers * topk (18 on both released models); a whole-layer prefill
+ * batch needs up to n_routed_experts (256 for Flash). Keeping both in one
+ * fixed-size batch means begin() can queue the entire layer in one pass. */
+#define DSV4_MAX_PREFETCH 256
 
 struct DSV4CacheBatch;
 struct DSV4CacheJob;
@@ -138,6 +140,12 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               DSV4CacheBatch *b);
 int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
                             DSV4CacheBatch *b);
+
+/* Reorder `experts` into checkpoint order (shard, then w1.weight byte
+ * offset), so the reader pool consumes one layer's extents as one increasing
+ * stream instead of first-use order. Numerically neutral: the caller still
+ * accumulates each request in k order. */
+void dsv4_cache_sort_experts(const DSV4Cache *c, int layer, int *experts, int n);
 
 /* Set how many miss reads one batch keeps in flight. 0 restores the barrier. */
 void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);

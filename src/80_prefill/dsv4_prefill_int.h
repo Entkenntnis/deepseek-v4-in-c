@@ -22,7 +22,8 @@ typedef struct {
     double cpu_mm, gpu_mm;  /* expert matmul time by path                    */
     double total_s;         /* whole layer                                   */
     double attn_s, moe_s, gate_s, shared_s, hc_s, io_s;
-    double union_s;         /* begin + compute + waits + end                 */
+    double union_s;         /* prefetch start through end + weighted sum     */
+    double lead_s;          /* prefetch start -> union compute start         */
     double begin_s, wait_s, end_s, compute_s;
     uint64_t bytes;
     DSV4PrefillVkStats vk[DSV4_VK_KIND_COUNT];
@@ -144,6 +145,20 @@ struct DSV4Prefill {
     float *ex_gate, *ex_up, *ex_mid; /* [B][moe_inter] expert working set   */
     float *ex_out;           /* [B][hidden] expert output before scatter     */
 
+    /* Whole-layer expert prefetch. begin() is called as soon as routing is
+     * known -- after the gate for scored layers, at the top of the layer for
+     * hash layers -- and the batch stays live while the shared expert (and,
+     * for hash layers, attention) runs. */
+    const DSV4ExpertW *pf_ex[DSV4_MAX_PREFETCH];
+    int      pf_n;           /* distinct experts prepared for this layer      */
+    int      pf_layer;       /* layer the prepared batch belongs to           */
+    int      pf_active;      /* begin() succeeded and end() is still owed     */
+    int      pf_prepared;    /* counts/order are valid for pf_layer           */
+    int      pf_estats;      /* pf_bytes0 is valid                            */
+    uint64_t pf_bytes0;      /* cache bytes_read when prefetch started        */
+    double   pf_t0;          /* prefetch start                                */
+    double   pf_compute_t0;  /* union compute start                           */
+
     /* Per-token projections that carry no position dependency are GEMMs too.
      * The compressor and indexer weights are read once per block instead of
      * once per token: [B][2*head_dim] twice, then [B][index heads*dim] and
@@ -204,7 +219,13 @@ void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
                          float limit);
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
                                 int count, const int *tok, const int *ks);
+/* Start a whole-layer expert batch early. Returns 0 when the batch is live or
+ * when the layer is too large for one batch (the union then groups it); the
+ * caller must still run dsv4_prefill_moe_union(), which ends it. */
+int  dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n);
 int  dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n);
+/* Drain any live prefetch batch on an error/cancel path. Safe when idle. */
+void dsv4_prefill_moe_abort(DSV4Prefill *p);
 
 /* Reporting. */
 void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,

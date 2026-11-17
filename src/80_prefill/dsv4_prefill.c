@@ -18,6 +18,22 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const int hc = c->hc_mult, d = c->hidden;
     const size_t hcd = (size_t)hc * d;
     const int mix_hc = (2 + hc) * hc;
+
+    /* Hash layers get their expert ids from the token id itself, so their
+     * reads can start before any attention work. The batch stays live until
+     * dsv4_prefill_moe() reaches the union; the readers fill slots while the
+     * whole dense half runs. Scored layers start after the router gate. */
+    if (w->moe.tid2eid) {
+        const int topk = c->topk;
+        for (int t = 0; t < n; t++) {
+            const int64_t *row = w->moe.tid2eid + (int64_t)ids[t] * topk;
+            for (int k = 0; k < topk; k++)
+                p->topk_idx[(size_t)t * topk + k] = (int)row[k];
+        }
+        const int prc = dsv4_prefill_moe_prefetch(p, L, n);
+        if (prc) return prc;
+    }
+
     const double thc = dsv4_now_s();
 
     for (int t = 0; t < n; t++) {
@@ -39,7 +55,10 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
     p->t_hc += dsv4_now_s() - thc;
 
     const int arc = dsv4_prefill_attention(p, L, w, n, pos0, cs, sn);
-    if (arc) return arc;
+    if (arc) {
+        dsv4_prefill_moe_abort(p);
+        return arc;
+    }
 
     const double thc2 = dsv4_now_s();
     for (int t = 0; t < n; t++) {
@@ -72,6 +91,9 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
 {
     if (!p || !ids || n <= 0 || !h_out || pos0 < 0) return -1;
     p->state_dirty = 0;
+    /* A previous call must never leave a batch on the wire; drain it before
+     * touching state again so its readers cannot race this call. */
+    dsv4_prefill_moe_abort(p);
     if (dsv4_prefill_cancelled(p)) return DSV4_PREFILL_CANCELLED;
     if (dsv4_prefill_reserve(p, n) != 0) return -1;
     p->n = n;
@@ -151,7 +173,10 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         /* From here on layer state can change; a stop now needs a reset. */
         p->state_dirty = 1;
         const int lrc = prefill_layer(p, L, &lw, n, pos0, ids, cs, sn);
-        if (lrc) return lrc;
+        if (lrc) {
+            dsv4_prefill_moe_abort(p);
+            return lrc;
+        }
         if (p->instr >= 2) {
             DSV4PrefillLayerInstr *li = &p->linstr[L];
             li->total_s = dsv4_now_s() - tl0;

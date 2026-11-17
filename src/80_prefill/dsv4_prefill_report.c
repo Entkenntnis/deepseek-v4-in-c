@@ -188,13 +188,13 @@ void dsv4_prefill_instr_layer(DSV4Prefill *p, int L)
         "PF_LAYER call=%d L=%d total_s=%.6f attn_s=%.6f moe_s=%.6f "
         "hc_s=%.6f io_s=%.6f gate_s=%.6f shared_s=%.6f experts=%d "
         "requests=%d cpu_buckets=%d gpu_buckets=%d fallbacks=%d "
-        "cpu_s=%.6f gpu_s=%.6f union_s=%.6f begin_s=%.6f wait_s=%.6f "
-        "end_s=%.6f compute_s=%.6f bytes=%llu",
+        "cpu_s=%.6f gpu_s=%.6f union_s=%.6f lead_s=%.6f begin_s=%.6f "
+        "wait_s=%.6f end_s=%.6f compute_s=%.6f bytes=%llu",
         p->instr_call, L, l->total_s, l->attn_s, l->moe_s, l->hc_s,
         l->io_s, l->gate_s, l->shared_s, l->experts, l->requests,
         l->buckets_cpu, l->buckets_gpu, l->gpu_fallbacks,
-        l->cpu_mm, l->gpu_mm, l->union_s, l->begin_s, l->wait_s,
-        l->end_s, l->compute_s, (unsigned long long)l->bytes);
+        l->cpu_mm, l->gpu_mm, l->union_s, l->lead_s, l->begin_s,
+        l->wait_s, l->end_s, l->compute_s, (unsigned long long)l->bytes);
     pf_instr_hist(p, "LAYER_HIST", L, l->hist, l->hist_tokens);
 
     const DSV4PrefillVkStats *d = &l->vk[DSV4_VK_KIND_DENSE];
