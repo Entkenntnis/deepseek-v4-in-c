@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import curses
-
 from .markdown import RICH_AVAILABLE, Span
 from .markdown_render import render_markdown
 
@@ -53,25 +51,12 @@ class ChatMixin:
             # to the remaining columns. Wrapping to width-4 made the first line
             # one column too wide ("v4 › ") and the renderer clipped its tail.
             body_width = max(8, width - len(label_prefix))
-            if msg.role == "assistant" and msg.think:
-                if "</think>" in body:
-                    reasoning, body = body.split("</think>", 1)
-                elif "<think>" in body:
-                    reasoning, body = body.split("<think>", 1)
-                else:
-                    reasoning, body = body, ""
-                reasoning = reasoning.strip()
-                if reasoning:
-                    for ln in self._wrap(reasoning, body_width):
-                        lines.append([Span(indent + ln, named="reasoning")])
-                    lines.append([])
 
-            use_md = (msg.role == "assistant" and self.markdown_enabled
-                      and RICH_AVAILABLE)
+            use_md = msg.role == "assistant" and RICH_AVAILABLE
             if use_md:
                 md_width = max(10, body_width)
                 # The body only grows while streaming, so (length, width) is a
-                # sufficient cache key for this prototype.
+                # sufficient cache key.
                 key = (len(body), md_width)
                 if msg.md_cache_key != key:
                     rendered = render_markdown(body, md_width) if body else None

@@ -6,10 +6,8 @@ The implementation lives in the dsv4tui package next to this file, split into
 modules of at most 200 lines.
 
 Usage:
-    python3 tui/dsv4_tui.py                    # real model, defaults below
-    python3 tui/dsv4_tui.py --demo             # no model needed
-    python3 tui/dsv4_tui.py --model DIR --trunk DIR --tok FILE --budget 10
-    python3 tui/dsv4_tui.py --budget auto      # size the budget from free RAM
+    python3 tui/dsv4_tui.py          # real model, built-in defaults
+    python3 tui/dsv4_tui.py --demo   # no model needed
 
 Keys:
     Enter send, /help for commands, wheel/PgUp/PgDn scroll, Ctrl-C or /exit quits.

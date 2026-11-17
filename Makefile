@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# deepseek-v4-in-c -- usage: make tui | make test | make bench | make e2e | make clean
+# deepseek-v4-in-c -- usage: make tui | make demo | make test | make bench | make e2e | make clean
 
 CC       ?= cc
 CFLAGS   ?= -O3 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla \
@@ -39,7 +39,7 @@ REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv
 VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
 
-.PHONY: test serve tui bench e2e clean
+.PHONY: test serve tui demo bench e2e clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -48,7 +48,10 @@ test: $(TEST_BIN)
 serve: $(BIN)/dsv4-serve
 
 tui: serve
-	python3 tui/dsv4_tui.py --budget auto --ctx 8192 --gen 1024
+	python3 tui/dsv4_tui.py
+
+demo:
+	python3 tui/dsv4_tui.py --demo
 
 bench: $(BIN)/bench
 	./$(BIN)/bench

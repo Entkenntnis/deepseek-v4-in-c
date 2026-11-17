@@ -13,10 +13,10 @@ from .messages import Message
 class EventMixin:
     def handle_event(self, ev: dict) -> None:
         name = ev.get("event")
-        # Layer events arrive ~27/s on a 1.6 s/token run. The panel is sampled
-        # at 1 Hz -- rates over a one-second window are more meaningful than
-        # rates over 40 ms, and a number that changes on every layer is noise.
-        # Token text and layer progress below are NOT throttled.
+        # Layer events arrive far more often than the panel needs. The panel is
+        # sampled at 1 Hz -- rates over a one-second window are more meaningful
+        # than rates over a single layer, and a number that changes on every
+        # layer is noise. Token text and layer progress below are NOT throttled.
         now = time.monotonic()
         force_stats = name in ("ready", "stats", "done")
         # Prefill emits far more progress events than the stats panel needs.
@@ -32,7 +32,8 @@ class EventMixin:
         if name in ("ready", "stats"):
             first = not self.ready
             self.ready = ev
-            self.context_cap = (ev.get("context") or {}).get("cap", self.args.ctx)
+            self.context_cap = (ev.get("context") or {}).get("cap",
+                                                             self.context_cap)
             self.context_used = (ev.get("context") or {}).get("used", 0)
             if first:
                 cfg = ev.get("config") or {}
@@ -47,12 +48,12 @@ class EventMixin:
                     f"({cache.get('resident_gb', 0):+.2f} GB), "
                     f"trunk {trunk.get('pinned', '?')} pinned. "
                     f"Context {self.context_cap} tokens."))
-                if self.markdown_enabled and not RICH_AVAILABLE and not self.md_warned:
+                if not RICH_AVAILABLE and not self.md_warned:
                     self.md_warned = True
                     self.add_system(
                         "Markdown rendering is off because rich is not installed. "
                         "Install it with: python3 -m pip install -r "
-                        "tui/requirements.txt  (or run /markdown off to hide this)")
+                        "tui/requirements.txt")
             if self.status in ("starting", "waiting"):
                 self.status = "ready"
             self.dirty = True
@@ -60,7 +61,6 @@ class EventMixin:
         elif name == "start":
             self.generating = True
             self.status = "generating"
-            self.status_detail = ""
             self.generation = 0
             self.gen_max = int(ev.get("gen_max") or self.gen_limit)
             self.prompt_tokens = int(ev.get("prompt_tokens") or 0)
@@ -81,13 +81,10 @@ class EventMixin:
             self.ttft = 0.0
             self.current_layer = 0
             self.phase = "prompt"
-            self.top = []
-            self.mode = ev.get("mode", "chat")
             self.decoder.reset()
             if not self.current_msg or self.current_msg.role != "assistant":
-                self.current_msg = Message("assistant", "", think=self.think)
+                self.current_msg = Message("assistant", "")
                 self.messages.append(self.current_msg)
-            self.current_msg.think = self.mode == "thinking"
             self.cancel_pending = False
             self.stats_force = True
             self.dirty = True
@@ -134,7 +131,6 @@ class EventMixin:
                     self.decode_spt.append(dt)
             self.last_token_t = t
             self.ttft = ttft
-            self.top = ev.get("top") or []
             self.stats_force = True
             self.dirty = True
 

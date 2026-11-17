@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from .markdown import RICH_AVAILABLE
 from .messages import Message
 
 
@@ -34,7 +33,7 @@ class CommandMixin:
             return
 
         self.messages.append(Message("user", text))
-        self.current_msg = Message("assistant", "", think=self.think)
+        self.current_msg = Message("assistant", "")
         self.messages.append(self.current_msg)
         self.decoder.reset()
         self.scroll = 0
@@ -44,8 +43,6 @@ class CommandMixin:
             "cmd": "generate",
             "prompt": text,
             "gen": self.gen_limit,
-            "think": self.think,
-            "layers": self.show_layers,
         })
         if not sent:
             self.generating = False
@@ -59,7 +56,6 @@ class CommandMixin:
             return
         if self.backend and self.backend.cancel():
             self.cancel_pending = True
-            self.status_detail = "cancelling"
         else:
             self.add_system("could not request cancellation")
         self.dirty = True
@@ -78,10 +74,7 @@ class CommandMixin:
                 "  /reset                clear model context (keeps the disk cache warm)\n"
                 "  /clear                clear the chat display only\n"
                 "  /system TEXT          system prompt for the NEXT reset\n"
-                "  /think [on|off]       toggle thinking mode for the next turn\n"
                 "  /gen N                max tokens per turn\n"
-                "  /layers [on|off]      stream per-layer progress events\n"
-                "  /markdown [on|off]    Markdown rendering (rich, optional)\n"
                 "  /stats                ask the engine for a fresh snapshot\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
@@ -112,15 +105,6 @@ class CommandMixin:
                     self.backend.send({"cmd": "system", "text": arg})
                 else:
                     self.add_system("engine is not running")
-        elif cmd == "/think":
-            if arg.lower() in ("on", "1", "true", "yes"):
-                self.think = True
-            elif arg.lower() in ("off", "0", "false", "no"):
-                self.think = False
-            else:
-                self.think = not self.think
-            self.add_system(f"thinking mode {'on' if self.think else 'off'} "
-                            f"for the next turn")
         elif cmd == "/gen":
             try:
                 n = int(arg)
@@ -130,27 +114,6 @@ class CommandMixin:
                 self.add_system(f"max {n} tokens per turn")
             except ValueError:
                 self.add_system("usage: /gen N   (N >= 1)")
-        elif cmd == "/layers":
-            if arg.lower() in ("on", "1", "true", "yes"):
-                self.show_layers = True
-            elif arg.lower() in ("off", "0", "false", "no"):
-                self.show_layers = False
-            else:
-                self.show_layers = not self.show_layers
-            self.add_system(f"layer events {'on' if self.show_layers else 'off'}")
-        elif cmd == "/markdown":
-            if arg.lower() in ("on", "1", "true", "yes"):
-                self.markdown_enabled = True
-            elif arg.lower() in ("off", "0", "false", "no"):
-                self.markdown_enabled = False
-            else:
-                self.markdown_enabled = not self.markdown_enabled
-            if self.markdown_enabled and not RICH_AVAILABLE:
-                self.add_system("Markdown needs rich: python3 -m pip install -r "
-                                "tui/requirements.txt")
-            else:
-                self.add_system(f"Markdown rendering "
-                                f"{'on' if self.markdown_enabled else 'off'}")
         elif cmd == "/stats":
             if self.backend_alive:
                 self.backend.send({"cmd": "stats"})

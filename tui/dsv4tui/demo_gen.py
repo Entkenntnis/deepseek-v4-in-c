@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any
+
+from .defaults import DEFAULT_CTX, DEFAULT_GEN
 
 
 class DemoGenerateMixin:
 
 
-    def _response(self, prompt: str, think: bool) -> str:
+    def _response(self, prompt: str) -> str:
         low = prompt.lower()
         if "code" in low or "c function" in low or "program" in low:
             return (
@@ -49,21 +50,18 @@ class DemoGenerateMixin:
 
     def _generate(self, cmd: dict) -> None:
         prompt = cmd.get("prompt") or ""
-        ngen = int(cmd.get("gen") or 128)
-        think = bool(cmd.get("think"))
-        layers = bool(cmd.get("layers", True))
-        mode = "thinking" if think else "chat"
+        ngen = int(cmd.get("gen") or DEFAULT_GEN)
         prompt_tokens = 9
         self.cancel_requested = False
         stop = "max"
 
         self.sink.event({
             "event": "start", "pos": 0, "prompt_tokens": prompt_tokens,
-            "gen_max": ngen, "mode": mode, "prefill_tokens": 0,
-            "context_cap": 4096, **self._base(),
+            "gen_max": ngen, "mode": "chat", "prefill_tokens": 0,
+            "context_cap": DEFAULT_CTX, **self._base(),
         })
 
-        text = self._response(prompt, think)
+        text = self._response(prompt)
         # Split into plausible token-sized chunks, keeping whitespace attached.
         chunks = re.findall(r"\s+|[^\s]+", text)
         t0 = time.monotonic()
@@ -85,12 +83,11 @@ class DemoGenerateMixin:
                         self.cache_evict += 1
                 self.trunk_hit += 1
                 self.read_gb += 0.00018
-                if layers:
-                    # The engine stamps every layer of a forward with the time
-                    # the forward *started*, so the TUI can difference prompt
-                    # positions into a prefill timeline.
-                    self._event("layer", t_start, pos=pos, phase=phase,
-                                layer=L, layers=43, t=t_start)
+                # The engine stamps every layer of a forward with the time the
+                # forward *started*, so the TUI can difference prompt positions
+                # into a prefill timeline.
+                self._event("layer", t_start, pos=pos, phase=phase,
+                            layer=L, layers=43, t=t_start)
 
         # Prefill: one forward per prompt token, then the first token event.
         for p in range(prompt_tokens):
@@ -102,8 +99,7 @@ class DemoGenerateMixin:
         for i, chunk in enumerate(chunks[:ngen]):
             if self.stop.is_set():
                 return
-            # A token takes ~2.1 s on the reference machine. The demo runs at
-            # 1/12 speed so a conversation is watchable.
+            # Small per-layer sleeps keep the synthetic stream watchable.
             if i > 0:
                 forward(context - 1, "gen", time.monotonic() - t0)
             if self.cancel_requested:

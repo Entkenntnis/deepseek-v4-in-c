@@ -49,4 +49,3 @@ class LoopMixin:
             self.key(ch)
             if self.running:
                 self.render(stdscr)
-        self.close()

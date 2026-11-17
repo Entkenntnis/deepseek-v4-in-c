@@ -43,9 +43,10 @@ class EventSink:
 def _disable_core_dumps() -> None:
     """Make a crashed engine exit at once.
 
-    The model process holds ~10 GB resident; letting the kernel write a core of
-    that size takes minutes and looks exactly like a frozen TUI. Cores are
-    still available when the binary is started under gdb by hand.
+    The model process holds the checkpoint and cache resident; letting the
+    kernel write a core of that size takes minutes and looks exactly like a
+    frozen TUI. Cores are still available when the binary is started under gdb
+    by hand.
     """
     if resource is None:
         return

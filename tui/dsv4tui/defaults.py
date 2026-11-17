@@ -14,6 +14,10 @@ DEFAULT_TOK = HOME / "colibri-models" / "dsv4-tok-flash.bin"
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BINARY = REPO / "bin" / "dsv4-serve"
 
+DEFAULT_BUDGET = "auto"
+DEFAULT_CTX = 8192
+DEFAULT_GEN = 1024
+
 # These are spelled as they are in the checkpoint's own encoding/README.md.
 BOS = "<｜begin▁of▁sentence｜>"
 EOS = "<｜end▁of▁sentence｜>"
@@ -26,24 +30,6 @@ def strip_special_tokens(s: str) -> str:
     for tok in SPECIAL_TOKENS:
         s = s.replace(tok, "")
     return s
-
-
-def fmt_duration(seconds: float) -> str:
-    if seconds < 0:
-        return "-"
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    m, sec = divmod(seconds, 60)
-    if m < 60:
-        return f"{int(m)}m {sec:04.1f}s"
-    h, m = divmod(int(m), 60)
-    return f"{h}h {m:02d}m"
-
-
-def fmt_bytes_gb(gb: float) -> str:
-    if gb >= 1.0:
-        return f"{gb:.2f} GB"
-    return f"{gb * 1024:.0f} MB"
 
 
 def fmt_gbps(value: float) -> str:

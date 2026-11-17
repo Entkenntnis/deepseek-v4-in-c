@@ -6,7 +6,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .defaults import clamp
 from .messages import Message
 
 
@@ -16,9 +15,6 @@ class IngestMixin:
             if kind == "event":
                 self.handle_event(payload)
             elif kind == "stderr":
-                self.stderr_lines.append(str(payload))
-                self.dirty = True
-            elif kind == "log":
                 self.stderr_lines.append(str(payload))
                 self.dirty = True
             elif kind == "eof":
@@ -39,8 +35,6 @@ class IngestMixin:
         if not sysd:
             return
         now = time.monotonic()
-        cache = ev.get("cache") or {}
-        trunk = ev.get("trunk") or {}
         if self.prev_snap is not None:
             dt = now - self.prev_snap_t
             # A forced update (start/done) can land milliseconds after the last
@@ -50,30 +44,13 @@ class IngestMixin:
             # events would reset the window forever and the disk rate would
             # never be recomputed.
             if dt >= 0.2:
-                ps = self.prev_snap.get("sys") or {}
-                pc = self.prev_snap.get("cache") or {}
-                pt = self.prev_snap.get("trunk") or {}
                 self.io_rate = max(0.0, (sysd.get("io_read_gb", 0.0)
-                                         - ps.get("io_read_gb", 0.0)) / dt)
-                self.cache_rate = max(0.0, (cache.get("read_gb", 0.0)
-                                            - pc.get("read_gb", 0.0)) / dt)
-                self.trunk_rate = max(0.0, (trunk.get("read_gb", 0.0)
-                                            - pt.get("read_gb", 0.0)) / dt)
-                self.cpu_pct = clamp(
-                    (sysd.get("cpu_s", 0.0) - ps.get("cpu_s", 0.0)) / dt * 100.0,
-                    0.0, 999.0)
-                self.prev_snap = {
-                    "sys": dict(sysd),
-                    "cache": dict(cache),
-                    "trunk": dict(trunk),
-                }
+                                         - self.prev_snap.get("io_read_gb", 0.0))
+                                   / dt)
+                self.prev_snap = dict(sysd)
                 self.prev_snap_t = now
         else:
-            self.prev_snap = {
-                "sys": dict(sysd),
-                "cache": dict(cache),
-                "trunk": dict(trunk),
-            }
+            self.prev_snap = dict(sysd)
             self.prev_snap_t = now
         self.last = ev
 

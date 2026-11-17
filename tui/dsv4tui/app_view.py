@@ -3,36 +3,13 @@
 
 from __future__ import annotations
 
-import curses
 import time
 from pathlib import Path
 
+from .defaults import DEFAULT_MODEL
+
 
 class ViewMixin:
-    def values(self) -> dict:
-        cfg = self.ready.get("config") or {}
-        sysd = self.last.get("sys") or self.ready.get("sys") or {}
-        cache = self.last.get("cache") or self.ready.get("cache") or {}
-        trunk = self.last.get("trunk") or self.ready.get("trunk") or {}
-        prof = self.last.get("prof") or {}
-
-        if self.decode_spt:
-            recent = list(self.decode_spt)[-16:]
-            spt = sum(recent) / len(recent)
-        elif self.last_done.get("s_per_token"):
-            spt = float(self.last_done["s_per_token"])
-        else:
-            spt = 0.0
-        tps = 1.0 / spt if spt > 0 else 0.0
-
-        elapsed = (time.monotonic() - self.turn_start) if self.generating else \
-            float(self.last_done.get("seconds") or 0.0)
-
-        return {
-            "cfg": cfg, "sys": sysd, "cache": cache, "trunk": trunk,
-            "prof": prof, "spt": spt, "tps": tps, "elapsed": elapsed,
-        }
-
     def render(self, stdscr: "curses.window") -> None:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -62,7 +39,7 @@ class ViewMixin:
         self.dirty = False
 
     def _draw_header(self, scr: "curses.window", w: int) -> None:
-        model = Path(self.args.model).name if not self.demo else "demo"
+        model = Path(DEFAULT_MODEL).name if not self.demo else "demo"
         brand = f" DSV4  {model}"
         status = self.status
         if self.demo:
@@ -100,15 +77,13 @@ class ViewMixin:
             if self.demo:
                 text = f"{spin} starting demo backend"
             else:
-                text = f"{spin} loading checkpoint (this is the 2 GB embed/head read)"
+                text = f"{spin} loading checkpoint (embed/head read)"
             color = "active"
         elif self.status == "failed":
             text = "engine failed; see the error in the transcript"
             color = "error"
         else:
             text = (f"context {self.context_used}/{self.context_cap}  "
-                    f"gen limit {self.gen_limit}  "
-                    f"thinking {'on' if self.think else 'off'}  "
-                    f"layers {'on' if self.show_layers else 'off'}")
+                    f"gen limit {self.gen_limit}")
             color = "status"
         self._add(scr, row, 0, text, w - 1, self.attr(color))

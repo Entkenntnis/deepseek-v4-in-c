@@ -57,13 +57,12 @@ class StatsMixin:
             # The engine's own prompt timer, measured without the head.
             tokens = self.prefill_tokens
             seconds = self.prefill_s
-            total = done = tokens
+            total = tokens
             status = "done"
         else:
             tokens = int(p.get("tokens_done") or 0)
             seconds = float(p.get("elapsed") or 0.0)
             total = int(p.get("tokens_total") or self.prompt_tokens or 0)
-            done = tokens
             if stage == "layer":
                 status = f"layer {layer}/{layers}"
             elif stage == "head":

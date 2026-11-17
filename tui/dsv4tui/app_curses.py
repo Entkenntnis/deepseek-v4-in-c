@@ -99,7 +99,7 @@ class CursesMixin:
             "default": 0, "value": 0, "dim": curses.A_DIM,
             "title": curses.A_BOLD, "status": 0, "active": curses.A_BOLD,
             "user": 0, "assistant": 0, "system": 0, "error": curses.A_BOLD,
-            "section": curses.A_BOLD, "reasoning": curses.A_DIM,
+            "section": curses.A_BOLD,
             "input": 0, "prefill": 0, "decode": 0,
             "muted": curses.A_DIM, "cancel": curses.A_BOLD,
         }

@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 class Message:
     role: str                     # user | assistant | system | error
     text: str = ""
-    think: bool = False
     meta: dict = field(default_factory=dict)
     md_cache_key: tuple = ()
     md_cache_lines: list[list[Span]] = field(default_factory=list)

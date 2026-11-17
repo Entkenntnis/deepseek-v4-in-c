@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from .backend import EventSink
+from .defaults import DEFAULT_CTX, DEFAULT_GEN
 from .demo_gen import DemoGenerateMixin
 
 
@@ -129,8 +130,8 @@ class DemoBackend(DemoGenerateMixin):
                 "hc_mult": 4, "max_pos": 1048576,
                 "compress_ratios": [0, 0, 4, 128] * 10 + [0, 0, 0],
             },
-            "context": {"used": 0, "cap": 4096},
-            "gen_default": 256, "think_default": 0,
+            "context": {"used": 0, "cap": DEFAULT_CTX},
+            "gen_default": DEFAULT_GEN,
             **self._base(),
         })
 
