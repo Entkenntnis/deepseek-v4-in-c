@@ -620,6 +620,8 @@ class App:
         self.generating = False
         self.cancel_pending = False
         self.cancel_rect: Optional[tuple[int, int, int]] = None
+        self.chat_rect: Optional[tuple[int, int, int]] = None
+        self.max_scroll = 0
         self.backend_alive = True
         self.generation = 0
         self.gen_max = args.gen
@@ -1277,12 +1279,31 @@ class App:
             _, mx, my, _, bstate = curses.getmouse()
         except curses.error:
             return
+
+        # Wheel: BUTTON4 is up, BUTTON5 is down. Some curses builds only define
+        # the PRESSED bits, so look them up defensively. RELEASED is ignored on
+        # purpose: terminals that report it would otherwise scroll twice.
+        up = bstate & (getattr(curses, "BUTTON4_PRESSED", 0)
+                       | getattr(curses, "BUTTON4_CLICKED", 0))
+        down = bstate & (getattr(curses, "BUTTON5_PRESSED", 0)
+                         | getattr(curses, "BUTTON5_CLICKED", 0))
+        rect = self.chat_rect
+        over_chat = (rect is not None and rect[0] <= my <= rect[1]
+                     and 0 <= mx < rect[2])
+        if (up or down) and over_chat:
+            if up:
+                self.scroll = min(self.max_scroll, self.scroll + 3)
+            else:
+                self.scroll = max(0, self.scroll - 3)
+            self.dirty = True
+            return
+
         buttons = (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
                    | curses.BUTTON1_RELEASED)
         if not (bstate & buttons):
             return
-        rect = self.cancel_rect
-        if rect and my == rect[0] and rect[1] <= mx < rect[1] + rect[2]:
+        cancel = self.cancel_rect
+        if cancel and my == cancel[0] and cancel[1] <= mx < cancel[1] + cancel[2]:
             self.cancel()
             self.dirty = True
 
@@ -1358,6 +1379,7 @@ class App:
         sep_x = w - panel_w - 1
         chat_w = sep_x - 1
         body_top, body_bottom = 2, h - 3
+        self.chat_rect = (body_top, body_bottom, chat_w)
 
         self._draw_header(stdscr, w)
         self._draw_status(stdscr, w, body_top - 1)
@@ -1460,6 +1482,12 @@ class App:
                 label, color = "··", "system"
 
             body = msg.text
+            label_prefix = f"{label} › "
+            indent = " " * len(label_prefix)
+            # The first line carries the speaker prefix, so the body has to wrap
+            # to the remaining columns. Wrapping to width-4 made the first line
+            # one column too wide ("v4 › ") and the renderer clipped its tail.
+            body_width = max(8, width - len(label_prefix))
             if msg.role == "assistant" and msg.think:
                 if "</think>" in body:
                     reasoning, body = body.split("</think>", 1)
@@ -1469,14 +1497,14 @@ class App:
                     reasoning, body = body, ""
                 reasoning = reasoning.strip()
                 if reasoning:
-                    for ln in self._wrap(reasoning, width - 4):
-                        lines.append([Span("    " + ln, named="reasoning")])
+                    for ln in self._wrap(reasoning, body_width):
+                        lines.append([Span(indent + ln, named="reasoning")])
                     lines.append([])
 
             use_md = (msg.role == "assistant" and self.markdown_enabled
                       and RICH_AVAILABLE)
             if use_md:
-                md_width = max(10, width - 4)
+                md_width = max(10, body_width)
                 # The body only grows while streaming, so (length, width) is a
                 # sufficient cache key for this prototype.
                 key = (len(body), md_width)
@@ -1488,12 +1516,12 @@ class App:
                     msg.md_cache_key = key
                 md_lines = msg.md_cache_lines or [[]]
                 for i, spans in enumerate(md_lines):
-                    prefix = Span(f"{label} › " if i == 0 else "    ",
+                    prefix = Span(label_prefix if i == 0 else indent,
                                   named=color)
                     lines.append([prefix] + list(spans))
             else:
-                for i, ln in enumerate(self._wrap(body, width - 4)):
-                    prefix = f"{label} › " if i == 0 else "    "
+                for i, ln in enumerate(self._wrap(body, body_width)):
+                    prefix = label_prefix if i == 0 else indent
                     lines.append([Span(prefix + ln, named=color)])
 
             if msg.meta:
@@ -1503,7 +1531,8 @@ class App:
                         f"{float(m.get('s_per_token') or 0):.2f} s/tok · "
                         f"ttft {float(m.get('ttft') or 0):.1f}s · "
                         f"{m.get('stop', '')}")
-                lines.append([Span("    " + meta, named="dim")])
+                for ln in self._wrap(meta, body_width):
+                    lines.append([Span(indent + ln, named="dim")])
             lines.append([])
         return lines
 
@@ -1512,6 +1541,7 @@ class App:
         view_h = bottom - top + 1
         lines = self.chat_lines(max(10, width))
         max_scroll = max(0, len(lines) - view_h)
+        self.max_scroll = max_scroll
         self.scroll = min(self.scroll, max_scroll)
         end = max(0, len(lines) - self.scroll)
         start = max(0, end - view_h)
@@ -1864,14 +1894,14 @@ class App:
     def _draw_footer(self, scr: "curses.window", h: int, w: int) -> None:
         self.cancel_rect = None
         if self.generating:
-            hint = "PgUp/PgDn scroll  ·  Ctrl-C quit  ·  "
+            hint = "Mausrad/PgUp/PgDn scroll  ·  Ctrl-C quit  ·  "
             label = "[cancelling]" if self.cancel_pending else "[cancel]"
             self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
             self._add(scr, h - 2, len(hint), label, w - len(hint) - 1,
                       self.attr("cancel"))
             self.cancel_rect = (h - 2, len(hint), len(label))
         else:
-            hint = "Enter send  ·  /help commands  ·  PgUp/PgDn scroll  ·  Ctrl-C quit"
+            hint = "Enter send  ·  /help commands  ·  Mausrad/PgUp/PgDn scroll  ·  Ctrl-C quit"
             self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
 
     def _draw_input(self, scr: "curses.window", h: int, w: int) -> None:
