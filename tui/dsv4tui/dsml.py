@@ -18,8 +18,10 @@ TOOL_NAME = "run_python"
 
 TOOL_SCHEMA = {
     "name": TOOL_NAME,
-    "description": ("Run Python 3 in a persistent interpreter. Returns "
-                    "stdout/stderr; input() is disabled; output is truncated."),
+    "description": ("Run Python 3 in a fresh interpreter for every call. "
+                    "Variables and imports never carry over between calls. "
+                    "Returns stdout/stderr; input() is disabled; output is "
+                    "truncated."),
     "parameters": {
         "type": "object",
         "properties": {

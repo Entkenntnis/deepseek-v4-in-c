@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A persistent CPython session behind the JSON-lines pipe in pyproc.py.
+"""A one-shot CPython runner behind the JSON-lines pipe in pyproc.py.
 
-One interpreter stays alive for the whole TUI session so variables and imports
-survive between calls -- a one-shot `python3 -c` per call would force the model
-to rebuild its working state every round. This module owns the harness, the
-reply interpretation and the async wrapper; the process plumbing lives in
-pyproc.py.
+Every call starts a new interpreter process with a fresh global namespace, so
+variables and imports from one call are never visible to the next. This module
+owns the harness, the reply interpretation and the async wrapper; the process
+plumbing lives in pyproc.py.
 
 `run_async` is called from the UI thread and its callback runs on a worker, so
 callers must hand results back through the event queue (see ToolMixin).
@@ -33,22 +32,21 @@ class _NoStdin:
         raise RuntimeError("stdin is unavailable; input() is disabled")
 
 sys.stdin = _NoStdin()
-ns = {"__name__": "__main__"}
 
 def _run(code):
-    tree = ast.parse(code, "<python>", "exec")
-    last = None
-    if tree.body and isinstance(tree.body[-1], ast.Expr):
-        last = ast.Expression(tree.body.pop().value)
-        ast.fix_missing_locations(last)
+    ns = {"__name__": "__main__"}
     out, err = io.StringIO(), io.StringIO()
     ok = True
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            tree = ast.parse(code, "<python>", "exec")
+            last = None
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last = ast.Expression(tree.body.pop().value)
+                ast.fix_missing_locations(last)
             exec(compile(tree, "<python>", "exec"), ns)
             if last is not None:
                 value = eval(compile(last, "<python>", "eval"), ns)
-                ns["_"] = value
                 if value is not None:
                     print(repr(value))
     except BaseException:
@@ -56,14 +54,13 @@ def _run(code):
         err.write(traceback.format_exc())
     return {"ok": ok, "stdout": out.getvalue(), "stderr": err.getvalue()}
 
-for _line in _proto:
-    try:
-        _code = json.loads(_line)["code"]
-        _res = _run(_code)
-    except BaseException as _exc:
-        _res = {"ok": False, "stdout": "", "stderr": "harness error: %r" % (_exc,)}
-    sys.stdout.write(json.dumps(_res) + "\n")
-    sys.stdout.flush()
+try:
+    _code = json.loads(_proto.readline())["code"]
+    _res = _run(_code)
+except BaseException as _exc:
+    _res = {"ok": False, "stdout": "", "stderr": "harness error: %r" % (_exc,)}
+sys.stdout.write(json.dumps(_res) + "\n")
+sys.stdout.flush()
 '''
 
 
@@ -81,57 +78,66 @@ class PySession:
     def __init__(self, timeout: float = 30.0, max_output: int = 6000) -> None:
         self.timeout = timeout
         self.max_output = max_output
-        self.proc = PyProc(HARNESS)
+        self.proc: PyProc | None = None
         self._io = threading.Lock()
         self._busy = threading.Lock()
         self._cancelled = False
 
+    def _kill(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            proc.kill()
+
     def stop(self) -> None:
-        self.proc.kill()
+        self._kill()
 
     def reset(self) -> None:
-        """Drop all user state; the next run starts a fresh interpreter."""
-        self.proc.kill()
+        """Stop any in-flight call; every call already starts fresh."""
+        self._kill()
 
     def cancel(self) -> None:
         self._cancelled = True
-        self.proc.kill()
+        self._kill()
 
     def run(self, code: str) -> dict:
-        """Execute `code`, blocking the calling thread. Never raises."""
+        """Execute `code` in a fresh interpreter. Never raises."""
         with self._io:
             self._cancelled = False
-            note = ""
-            if not self.proc.alive():
-                if self.proc.started_once:
-                    note = "interpreter restarted; earlier variables are gone"
-                self.proc.spawn()
             started = time.monotonic()
-            status, line = self.proc.request({"code": code}, self.timeout)
+            proc = PyProc(HARNESS)
+            self.proc = proc
+            tail = ""
+            try:
+                try:
+                    proc.spawn()
+                except OSError as exc:
+                    return self._failure(
+                        f"could not start interpreter: {exc}", started)
+                if self._cancelled:
+                    status, line = "eof", ""
+                else:
+                    status, line = proc.request({"code": code}, self.timeout)
+                    tail = proc.stderr_tail()
+            finally:
+                proc.kill()
+                if self.proc is proc:
+                    self.proc = None
             elapsed = time.monotonic() - started
             if self._cancelled:
                 self._cancelled = False
-                self.proc.kill()
                 return self._failure("cancelled by user", started)
             if status == "timeout":
-                self.proc.kill()
                 return self._failure(
-                    f"timed out after {self.timeout:g}s; interpreter restarted, "
-                    "variables are gone", started)
+                    f"timed out after {self.timeout:g}s", started)
             if status == "eof":
-                tail = self.proc.stderr_tail()
-                self.proc.kill()
                 return self._failure(
-                    "interpreter exited" + (f": {tail}" if tail else "")
-                    + "; restarted, variables are gone", started)
+                    "interpreter exited" + (f": {tail}" if tail else ""),
+                    started)
             try:
                 result = json.loads(line)
             except json.JSONDecodeError:
-                self.proc.kill()
-                return self._failure("unreadable reply from interpreter; "
-                                     "restarted, variables are gone", started)
-            if note:
-                result["note"] = note
+                return self._failure(
+                    "unreadable reply from interpreter", started)
             result["stdout"] = _truncate(
                 str(result.get("stdout") or ""), self.max_output)
             result["stderr"] = _truncate(

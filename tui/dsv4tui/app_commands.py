@@ -71,7 +71,7 @@ class CommandMixin:
             self.add_system(
                 "commands:\n"
                 "  /help                 this list\n"
-                "  /reset                clear model context and interpreter\n"
+                "  /reset                clear model context\n"
                 "  /gen N                max tokens per turn\n"
                 "  /py                   let the model call run_python (default off)\n"
                 "  /exit                 quit")
@@ -95,7 +95,7 @@ class CommandMixin:
             self.context_used = 0
             self.decode_spt.clear()
             self.stats_force = True
-            self.add_system("context and interpreter reset; cache stays warm")
+            self.add_system("context reset; cache stays warm")
         elif cmd == "/py":
             if arg:
                 state = "on" if self.tool_enabled else "off"

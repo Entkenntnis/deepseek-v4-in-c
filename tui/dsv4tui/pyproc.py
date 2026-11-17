@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Process plumbing for one persistent interpreter child.
+"""Process plumbing for one short-lived interpreter child.
 
 Kept apart from pytool.py so the harness/reply logic stays readable: this file
 only knows how to spawn, feed and kill a JSON-lines child and read one line
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -41,17 +42,12 @@ class PyProc:
         self.code = code
         self.python = python or os.environ.get("DSV4_PYTHON", "python3")
         self.proc: "subprocess.Popen[bytes] | None" = None
-        self.started_once = False
         self.cwd = ""
         self._buf = b""
         self._stderr: deque[str] = deque(maxlen=20)
 
-    def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
-
     def spawn(self) -> None:
-        if not self.cwd:
-            self.cwd = tempfile.mkdtemp(prefix="dsv4-py-")
+        self.cwd = tempfile.mkdtemp(prefix="dsv4-py-")
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", tempfile.gettempdir()),
@@ -66,7 +62,6 @@ class PyProc:
         )
         self._buf = b""
         self._stderr.clear()
-        self.started_once = True
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 
     def _drain_stderr(self) -> None:
@@ -81,19 +76,21 @@ class PyProc:
 
     def kill(self) -> None:
         proc, self.proc = self.proc, None
-        if proc is None:
-            return
-        try:
-            proc.kill()
-            proc.wait(timeout=2.0)
-        except Exception:
-            pass
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if proc is not None:
             try:
-                if pipe:
-                    pipe.close()
+                proc.kill()
+                proc.wait(timeout=2.0)
             except Exception:
                 pass
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if pipe:
+                        pipe.close()
+                except Exception:
+                    pass
+        cwd, self.cwd = self.cwd, ""
+        if cwd:
+            shutil.rmtree(cwd, ignore_errors=True)
 
     def stderr_tail(self) -> str:
         return " | ".join(list(self._stderr)[-3:])
