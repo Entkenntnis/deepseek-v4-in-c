@@ -20,9 +20,9 @@ THE ASSUMPTION K3 MADE THAT IS FALSE HERE
 
         trunk x22  ->  EXPERT x768  ->  trunk x11  ->  EXPERT x768
 
-    On layer 3 the first run is 13.28 MB (norms, hc_*, compressor, gate, and
-    every attention .scale) and the second is 126 MB (the big F8_E4M3 .weight
-    tensors), 192 MB apart. A weight and its own scale are in different runs.
+    The first run is small (norms, hc_*, compressor, gate, and every attention
+    .scale) and the second holds the big F8_E4M3 .weight tensors, far apart. A
+    weight and its own scale are in different runs.
 
     So this packer does NOT derive offsets from a single translation. It reads
     each tensor individually and records where it actually landed in the
@@ -30,8 +30,8 @@ THE ASSUMPTION K3 MADE THAT IS FALSE HERE
     the only property the streamer needs -- and the streamer is unchanged.
 
 WHAT IS DELIBERATELY NOT PACKED
-    The routed experts. They are 137 GB of the 160, they are streamed on demand
-    by the LRU cache, and copying them here would defeat the point.
+    The routed experts. They are most of the checkpoint, they are streamed on
+    demand by the LRU cache, and copying them here would defeat the point.
 """
 import argparse
 import json

@@ -10,9 +10,9 @@
  * is exactly (v0 + v1) + (v2 + v3), elementwise, with the same grouping. The
  * final (b0 + b1) + (b2 + b3) is then done on the four extracted lanes in the
  * scalar order. _mm256_fmadd_pd is the same IEEE fused multiply-add as fma(),
- * and float -> double is exact, so every intermediate is bit-for-bit what the
- * scalar path computes. That is a claim the matmul gate checks at runtime
- * rather than a claim this comment makes.
+ * and float -> double is exact, so every intermediate is the same arithmetic
+ * the scalar path computes. BF16 happens to match bit for bit; the model-level
+ * numerical contract is the L2 gate in `make test`, not bit identity.
  *
  * LOAD4(i) must return the four weights at logical columns i..i+3 as doubles. */
 #ifndef DSV4_DEC_REDUCE_H

@@ -52,12 +52,12 @@ static const uint32_t dsv4_e4m3_bits[256] = {
 
 /* EIGHT FP8 VALUES FROM THE SAME 256-ENTRY TABLE, IN ONE GATHER.
  *
- * This is the only AVX2 FP8 decoder. It was rejected once because Skymont's
- * vpgatherdd is microcoded and made it ~2x slower than four scalar loads. The
- * engine now runs its compute team on the four P-cores (Lion Cove), where the
- * interleaved benchmark puts it 1.20-1.29x ahead on all four shapes, and the
- * whole-model A/B agrees: attention 7.5-7.7 -> 6.3-6.5 s, shared expert
- * 1.5-1.6 -> 1.3 s, and 1.04 -> 0.95 s/token with identical ids.
+ * This is the only AVX2 FP8 table decoder. It was rejected once because
+ * Skymont's vpgatherdd is microcoded and made it slower than four scalar
+ * loads. The engine now runs its compute team on the P-cores (Lion Cove),
+ * where it wins the interleaved benchmark. Reproduce the per-core comparison
+ * with `./bin/bench --pin p` versus `./bin/bench --pin e`, and the whole-model
+ * effect with `make e2e`.
  *
  * The table entries are exact f32 bit patterns generated from
  * dsv4_e4m3_to_f32, and test_matmul checks the AVX2 path against the scalar

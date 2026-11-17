@@ -41,9 +41,9 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
 
     /* COMPRESSOR PROJECTIONS ARE GEMMs, NOT GEMVs. They read x1 and carry no
      * position dependency, so the block's weights are read once and used for
-     * every token instead of being streamed again per token (measured 55 GF/s
-     * against ~150 for the same shapes batched). compress_step below still
-     * runs per token and reads its row. */
+     * every token instead of being streamed again per token. The prefill stage
+     * report (`make e2e --detailed`) shows the difference. compress_step below
+     * still runs per token and reads its row. */
     if (comp) {
         if (dsv4_prefill_pm_stats(p, p->comp_kv_b, p->x1, &w->attn.comp.wkv,
                                   n, &p->st.comp_proj, &p->st.f_comp))

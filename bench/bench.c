@@ -8,8 +8,11 @@
  * regression, not an I/O one.
  *
  * The working set of each GEMV/GEMM is rotated over several matrix copies so
- * it exceeds the 12 MB L3 of the target CPU; otherwise the benchmark would
- * report LLC bandwidth instead of the RAM-fed decode path.
+ * it exceeds the target CPU's L3; otherwise the benchmark would report LLC
+ * bandwidth instead of the RAM-fed decode path.
+ *
+ * Compare runs only on AC power in performance mode. Battery power states and
+ * thermal throttling change the numbers enough to make A/B results misleading.
  *
  * USAGE
  *   ./bin/bench [--filter SUBSTR] [--threads N] [--pin off|all|p|e]
@@ -120,8 +123,9 @@ int main(int argc, char **argv)
     bench_qmat("head",        "129280x4096", DSV4_WBF16, 129280, 4096, 1, 1, 1, 40);
 
     /* prefill GEMM, at the token counts the engine actually tiles with: a
-     * routed expert sees ~5 tokens of the block (54 tokens x top-6 / 256
-     * experts, deduped), the dense projections see the whole 54-token block. */
+     * routed expert sees only a few tokens of the block (top-k requests spread
+     * over the expert set, deduped), the dense projections see the whole
+     * block. */
     bench_qmat("expert_w1_nt5", "2048x4096 nt5", DSV4_WFP4, 2048, 4096, 5, 1, 4, 40);
     bench_qmat("expert_w1_nt16", "2048x4096 nt16", DSV4_WFP4, 2048, 4096, 16, 1, 4, 40);
     bench_qmat("expert_w1_nt128", "2048x4096 nt128", DSV4_WFP4, 2048, 4096, 128, 1, 4, 40);

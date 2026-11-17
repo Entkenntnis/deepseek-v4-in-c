@@ -10,9 +10,10 @@
 
 /* Request every distinct expert this layer's block needs, in first-use order,
  * so the reader pool sees the whole layer instead of six requests at a time.
- * The per-token end() barrier exposed ~24% of prefill as expert I/O; here
- * there is one barrier per group and each expert's bucket is computed as soon
- * as its read lands. The per-token k-order sum is unchanged. */
+ * The per-token end() barrier exposed a large share of prefill as expert I/O;
+ * here there is one barrier per group and each expert's bucket is computed as
+ * soon as its read lands. `make e2e --detailed` shows the I/O share; the
+ * per-token k-order sum is unchanged. */
 int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
 {
     const DSV4Cfg *c = p->c;

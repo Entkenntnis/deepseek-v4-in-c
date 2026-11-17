@@ -40,7 +40,8 @@ static int grow_i(int **pp, int cap, size_t per)
 /* Per-token prefill state. Sized from what the block path actually reads:
  * attention's compressor/indexer working rows plus the one accumulator that
  * must survive the whole layer. Sizing this like the decode DSV4Scratch wasted
- * 5.7x the memory and made a long prompt look far more expensive than it is. */
+ * several times the memory and made a long prompt look far more expensive than
+ * it is. */
 static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c, int max_pos)
 {
     memset(s, 0, sizeof *s);

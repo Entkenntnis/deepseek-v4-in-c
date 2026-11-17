@@ -47,7 +47,7 @@
  *   This was worth pinning down rather than assuming. Getting it wrong swaps
  *   adjacent weights within every pair, and the value HISTOGRAM is unchanged,
  *   so no statistical check could ever have caught it -- only a normative
- *   statement or a bit-exact reference comparison.
+ *   statement or an exact element-by-element reference comparison.
  *
  *   Two routes were tried first and both dead-ended, which is why the citation
  *   above is the evidence rather than a measurement: torch implements NO

@@ -24,10 +24,9 @@ static inline void fp8_decode_block_128(const uint8_t *wb, float *wf)
 
 /* Keep the rare gather body OUT of the hot function. When it was `static
  * inline`, GCC hoisted its vpmovzxbd loads and spilled eight YMM registers to
- * the stack *before* the special/not-special branch, so the 98.2% fast path
- * paid for the 1.8% slow path on every block. `perf annotate` showed those
- * spills at 5-12% of the kernel's cycles. One call on a special block is
- * nothing next to that. */
+ * the stack *before* the special/not-special branch, so the common fast path
+ * paid for the rare slow path on every block. A profile showed those spills
+ * costing cycles; one call on a special block is nothing next to that. */
 static __attribute__((noinline)) __m256
 fp8_block_sum_128_gather(const uint8_t *wb, const float *xb)
 {
@@ -46,7 +45,8 @@ static inline __m256 fp8_block_sum_128(const uint8_t *wb, const float *xb)
 
 /* FP8. Both schedules accumulate four consecutive block sums and four scales
  * as one float vector, into four partial accumulators, with the same final
- * tree and tail order, so batched output stays bitwise-equal to nt GEMVs. */
+ * tree and tail order, so the CPU batch has the same per-row arithmetic as nt
+ * GEMVs; the gate in `make test` checks it in L2. */
 void fp8_n(float *y, const float *x, const uint8_t *W,
            const uint8_t *S, int in, int out, int blk_r, int blk_c, int nt)
 {

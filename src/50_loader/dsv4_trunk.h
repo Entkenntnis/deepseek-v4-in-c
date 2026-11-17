@@ -4,11 +4,10 @@
  * Ported in design from kimi-k3-in-c/src/io/k3_trunk.c (Apache-2.0).
  *
  * WHY STREAM IT
- *   Flash's trunk is 6.37 GB (measured: 21 indexed layers at 165.47 MB, 20
- *   compressed at 139.28, 2 dense at 131.03) and Pro's is ~50 GB. Holding it
- *   resident is the floor that decides which machine can run the model at all.
- *   Streaming turns that floor into a dial: pin as many layers as the budget
- *   allows, read the rest.
+ *   Flash's trunk is several gigabytes and Pro's is much larger; trunk.json
+ *   records the exact per-layer sizes. Holding it resident is the floor that
+ *   decides which machine can run the model at all. Streaming turns that floor
+ *   into a dial: pin as many layers as the budget allows, read the rest.
  *
  * WHY LRU WOULD BE THE WORST POSSIBLE POLICY HERE
  *   The trunk is walked 0, 1, ... N-1 on EVERY token. That cyclic scan is the
@@ -23,15 +22,16 @@
  *
  * WHY THE READ IS AFFORDABLE
  *   Unlike expert routing, the trunk's access order is FIXED, so the next read
- *   is always known before it is needed. Measured on this machine: one pread
- *   per layer from a packed trunk runs at 4.80 GB/s with O_DIRECT.
+ *   is always known before it is needed. The layer runs are large enough that
+ *   one pread per layer with O_DIRECT is efficient; `make e2e --detailed`
+ *   reports the observed trunk I/O.
  *
  * LAYOUT
  *   tools/pack_trunk.py writes trunk.bin, where each layer is ONE contiguous
  *   run at a 4096-aligned offset, and trunk.json, which records every tensor's
  *   offset WITHIN its run. The offsets are recorded rather than derived because
  *   the source checkpoint splits a layer's trunk across two runs with the
- *   routed experts in between -- see the packer for the measurement.
+ *   routed experts in between -- see the packer for the layout.
  */
 #ifndef DSV4_TRUNK_H
 #define DSV4_TRUNK_H
@@ -61,8 +61,8 @@ typedef struct {
     int              nbind;
     /* A pinned layer's run never moves, and its widened vectors are
      * independent of the token, so its binding can be built once. Rebuilding
-     * it per token re-widens ~3.3 MB of mHC/compressor vectors every pass,
-     * which dominated the "bind / widen" profile row. */
+     * it per token re-widens the mHC/compressor vectors every pass, which
+     * dominated the "bind / widen" profile row. */
     DSV4LayerW       bind_cached;
     unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
     int              bind_ready;

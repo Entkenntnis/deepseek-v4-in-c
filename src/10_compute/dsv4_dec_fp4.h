@@ -21,16 +21,15 @@
  * eight 32-bit lanes, then shift the odd lanes down by four so lane k holds the
  * nibble of logical element base+k.
  *
- * Measured honestly: this is worth almost nothing on its own (81.5 GF/s against
- * 80.9 for the four-lookup form). FP4 was never dequant-bound. It is kept
- * because it is not slower and it removes the table from the hot loop, but the
- * gain in dsv4_matmul.c came from elsewhere -- see the batch kernels.
+ * The gain is deliberately small: FP4 was never dequant-bound. This form is
+ * kept because it is not slower and it removes the table from the hot loop;
+ * the larger win came from the batch kernels. Compare with `make bench`.
  *
  * THE TWO MASKS THAT WERE NOT NEEDED. The shift result used to be masked with
  * 0x0F and then masked again with 7 for the magnitude permute. Neither mask
  * can change the result: vpermps indexes with the low three bits, and the sign
  * test reads bit 3, which the 0x0F mask left untouched. Dropping them removes
- * two vector ops per eight weights and leaves every output bitwise identical.
+ * two vector ops per eight weights and leaves the decoded values unchanged.
  * `sh` still selects the low or high nibble; an even lane's shifted value
  * contains the rest of the byte, but no instruction ever reads those bits.
  *
@@ -47,14 +46,13 @@
  * only reads bit 3, so all the higher bits the shift leaves behind are
  * irrelevant. The nibble order is unchanged: lane 0 is the low nibble of the
  * first byte, lane 1 its high nibble, lane 2 the low nibble of the second
- * byte, and so on. That makes this a bit-for-bit replacement, not merely an
- * equivalent decode; test_matmul's FP4 gate checks the result. */
+ * byte, and so on. That makes this a value-for-value replacement, not merely
+ * an equivalent decode; the matmul gate in `make test` checks the result. */
 /* THIRTY-TWO E2M1 VALUES AT ONCE, EACH AS TWICE ITS MAGNITUDE.
  *
- * The per-eight decode below costs 6 uops per 8 weights, three of them on the
- * shuffle port, and `perf annotate` put the FP4 GEMV at 25 GB/s against the
- * FP8 GEMV's 41 GB/s on the same shapes. The byte
- * form removes the per-eight broadcast and permute entirely: 16 packed bytes
+ * The per-eight decode below costs uops per eight weights, mostly on the
+ * shuffle port. The byte form removes the per-eight broadcast and permute
+ * entirely: 16 packed bytes
  * hold 32 nibbles, two vpshufb turns each nibble into a signed byte, and the
  * low/high nibble halves interleave back into element order.
  *
@@ -64,9 +62,9 @@
  * same byte LUT, and vpmovsxbd + vcvtdq2ps are exact. Every weight in this
  * path is 2*w, so every block sum, the fold4 tree and the four partial
  * accumulators all hold exactly 2x their true value: adding and scaling by a
- * power of two commute with rounding, so fl(2a+2b) == 2*fl(a+b) bit for bit.
+ * power of two commute with rounding, so doubling does not change the result.
  * The kernels divide by two ONCE per output element, which is exact, and the
- * result is bitwise identical to the old decoder -- except for the sign of a
+ * result matches the old decoder -- except for the sign of a
  * zero: code 8 is -0.0, and an integer LUT cannot produce one. A row whose
  * weights and activations all vanish can therefore yield +0.0 where the old
  * kernel produced -0.0. Nothing downstream distinguishes the two.

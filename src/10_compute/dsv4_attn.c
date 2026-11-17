@@ -48,13 +48,13 @@
  *
  * Each head reads the same q/kv and writes its own row of o, and the reduction
  * ORDER INSIDE a head is untouched -- the loops below run in the same sequence
- * whatever thread executes them. So the output is bit-identical to the serial
- * version, which is the contract the whole engine is arranged around: a
- * performance change must never become an accuracy change.
+ * whatever thread executes them. So the result does not depend on the thread
+ * count, which is the scheduling property the engine relies on. The model-level
+ * numerical contract is the L2 gate in `make test`.
  *
- * It was worth doing because this was the largest single-threaded loop left.
- * Measured: ~180M double-precision fma per token across 43 layers, running on
- * one core while nineteen idled.
+ * It was worth doing because this was the largest single-threaded loop left:
+ * one core did the whole score pass while the other P-cores idled. Profile it
+ * with `./bin/bench --filter sparse_attn` and `make e2e --detailed`.
  *
  * `scratch` becomes per-head rather than shared, since heads now run at once. */
 void dsv4_sparse_attn(float *o, const float *q, const float *kv,

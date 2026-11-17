@@ -11,8 +11,9 @@
 #include "dsv4_prefill_vk.h"
 
 /* Below this bucket size the three GPU submissions and their copies cost more
- * than the CPU FP4 GEMM. Measured break-even is ~6 tokens/expert; 8 leaves
- * room for the synchronous submit/fence overhead. */
+ * than the CPU FP4 GEMM. The threshold is empirical and leaves room for the
+ * synchronous submit/fence overhead; compare the paths with
+ * `DSV4_PREFILL_CPU=1 make e2e` and `make e2e`. */
 #define VK_EXPERT_MIN_COUNT 8
 
 /* Routed-expert matmul, timed per matrix so FP4 MM is not confused with the

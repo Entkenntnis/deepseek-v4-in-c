@@ -7,31 +7,31 @@
 
 #include <immintrin.h>
 
-/* FAST PATH FOR THE COMMON CASE, WITH A BLOCK-LEVEL EXACTNESS FALLBACK.
+/* FAST PATH FOR THE COMMON CASE, WITH A BLOCK-LEVEL SCALAR FALLBACK.
  *
- * `perf` on a real decode put 42.7% of this kernel's cycles on vpgatherdd and
- * 19.7% on the vpmovzxbd feeding it. A gather is eight load uops, and the
- * kernel issued 1.33 load uops per weight -- it was load-port bound, not
- * DRAM-bound. The table lookup is only needed for 16 of the 256 E4M3 codes
- * (the subnormals) and for the two NaNs.
+ * A decode profile put most of this kernel's cycles on vpgatherdd and the
+ * vpmovzxbd feeding it. A gather is several load uops per eight weights, and
+ * the kernel was load-port bound, not DRAM-bound. The table lookup is only
+ * needed for the subnormal E4M3 codes and for the two NaNs.
  *
- * The model's own weights almost never contain either: in a sampled
- * layers.0.attn.wo_b tensor 0.0145% of bytes are subnormal and none are NaN.
- * A 128-byte block is therefore special-free 98.2% of the time. For those
- * blocks the decode is the closed form
+ * The model's own weights almost never contain either: in a sampled trunk
+ * tensor essentially no bytes are subnormal and none are NaN. A 128-byte block
+ * is therefore almost always special-free. For those blocks the decode is the
+ * closed form
  *
  *     0x3C000000 + ((byte & 0x7F) << 20) | sign
  *
  * -- five integer ops and one load per eight weights, against one eight-way
- * gather per eight weights. The other 1.8% take the exact gather path, so the
- * result is bitwise identical to the previous kernel, not merely inside its
- * L2 bound.
+ * gather per eight weights. The rare special block takes the exact gather
+ * path. The model-level contract is the L2 gate in `make test`, not bit
+ * identity.
  *
  * The scan is 4 x 32 bytes and walks a block that is about to be read anyway;
- * the second read hits L1. A uniformly random matrix has 6.25% subnormals, so
- * almost every block takes the fallback and this path is slower there. That
- * is a property of the benchmark input, not of the model: random bytes are a
- * far worse approximation to E4M3 weights than the measured 0.0145%. */
+ * the second read hits L1. A uniformly random matrix contains far more
+ * subnormals, so almost every block takes the fallback and this path is slower
+ * there. That is a property of the benchmark input, not of the model: random
+ * bytes are a far worse approximation to E4M3 weights. Compare with
+ * `make bench`. */
 static inline __m256 fp8_8_normal(const uint8_t *wb, int i)
 {
     const __m128i b8 = _mm_loadl_epi64((const __m128i *)(wb + i));

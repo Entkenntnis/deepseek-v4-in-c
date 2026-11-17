@@ -67,8 +67,8 @@ static void fill_bf16_pattern(uint8_t *pat)
 static void fill_fp8_pattern(uint8_t *pat)
 {
     for (int i = 0; i < PAT_BYTES; i++) {
-        /* One subnormal per ~6800 bytes is the measured rate, and makes about
-         * 1.8% of 128-byte blocks take the exact slow path. */
+        /* A sparse subnormal rate matching a sampled trunk tensor, so only a
+         * small fraction of 128-byte blocks take the exact slow path. */
         if ((bench_rnd32() % 6800u) == 0u) {
             pat[i] = 0x01u;
             continue;

@@ -8,8 +8,8 @@
 #include "ref_kernels.h"
 
 /* The exact-table 128-wide block sum, as a double so the gate has a stable
- * scalar comparison. Deliberately not bitwise-equal to the production float
- * fold; test_matmul bounds the L2 relative error. */
+ * scalar comparison. Not expected to match the production float fold bit for
+ * bit; test_matmul bounds the L2 relative error. */
 static inline double fp8_block_dot_f32_128(const uint8_t *wb,
                                            const float *xb)
 {

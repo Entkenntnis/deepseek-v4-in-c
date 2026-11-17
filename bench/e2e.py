@@ -8,13 +8,16 @@ warm-up (disk, expert cache and allocator); runs 2 and 3 are the measured ones.
 expert cache and the pinned trunk, which is what makes the measured runs
 comparable.
 
-The golden output is the generated token-id sequence. It is compared exactly:
-the engine's reduction order is designed to be independent of cache hits and
-read completion order, so a different sequence is a functional regression, not
-noise. Use --update-golden only after an intentional model/kernel change.
+The golden output is the generated token-id sequence. It is compared exactly as
+a functional regression: a fixed build is deterministic for a fixed prompt, so
+a different sequence is a real change, not noise. This is not the numerical
+contract -- kernel tolerances live in the L2 gates (`make test`). The Vulkan
+prefill uses a different reduction order from the CPU, so compare backends with
+`make e2e` and `DSV4_PREFILL_CPU=1 make e2e` rather than assuming identical
+bits. Use --update-golden only after an intentional model/kernel change.
 
 Examples:
-    python3 bench/e2e.py                  # table + minimal progress
+    make e2e                              # table + minimal progress
     python3 bench/e2e.py --detailed       # serve diagnostics + per-run detail
     python3 bench/e2e.py --runs 3 --update-golden
     python3 bench/e2e.py --json

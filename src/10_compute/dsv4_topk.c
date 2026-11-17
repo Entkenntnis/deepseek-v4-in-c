@@ -17,8 +17,8 @@
  * THE OLD LOOP WAS O(k*n*k). For every one of k selections it rescanned n
  * candidates and, for each, rescanned the already-chosen prefix to see whether
  * it was taken. At the indexer's real geometry (n up to a few thousand, k=512)
- * that is hundreds of millions of comparisons per layer; it only looked cheap
- * because the benchmark prompt leaves the context at ~23 tokens.
+ * that is far too many comparisons per layer; it only looked cheap on short
+ * benchmark prompts. Compare with `./bin/bench --filter topk_2048`.
  *
  * A bounded min-heap of the current best k is O(n log k). The root is the entry
  * that would be dropped first under the reference ordering: lower score, or

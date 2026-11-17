@@ -6,8 +6,8 @@
 #include "dsv4_matmul_int.h"
 #include "dsv4_qmat_dec.h"
 
-/* Float inner block, float cross-block fold. Bounded by the matmul gate in
- * L2, not bitwise equal to the scalar double kernel. */
+/* Float inner block, float cross-block fold. The matmul gate bounds it in L2
+ * against the scalar double kernel. */
 static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
                                        const float *xb, int n)
 {
@@ -42,8 +42,8 @@ static inline double fp4_block_dot_f32(const uint8_t *row, int64_t base,
 /* FP4. One token decodes four 32-wide blocks at a time; more than one token
  * decodes each 128-weight group once into wf[128]. Both accumulate four block
  * sums and four scales as one float vector, with the same four partial
- * accumulators and the same final tree, so batched output remains bitwise
- * equal to nt one-token calls. */
+ * accumulators and the same final tree, so the CPU batch has the same per-row
+ * arithmetic as nt one-token calls; the gate in `make test` checks it in L2. */
 void fp4_n(float *y, const float *x, const uint8_t *W,
            const uint8_t *S, int in, int out, int blk_r, int blk_c, int nt)
 {

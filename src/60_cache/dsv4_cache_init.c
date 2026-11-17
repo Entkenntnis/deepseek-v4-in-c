@@ -71,8 +71,8 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
 
     /* SAY SO WHEN THE CACHE CANNOT POSSIBLY WORK. Under LRU a hit needs the
      * entry to survive until the next layer visit; below a full pass's working
-     * set the hit rate is exactly zero. This happened: 160 slots
-     * against 258 returned 0 hits on 2,580 requests while reading 32 GB. */
+     * set the hit rate is exactly zero. This happened on a real run, which read
+     * the whole expert working set without a single hit. */
     const int64_t ws = (int64_t)cfg->n_layers * cfg->topk;
     if ((int64_t)c->nslot < ws)
         fprintf(stderr,

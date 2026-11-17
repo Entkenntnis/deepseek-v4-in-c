@@ -14,12 +14,15 @@
  *   resident. Unpacking happens in the inner loop, where the byte is already
  *   in a register.
  *
- * THE REDUCTION ORDER IS PART OF THE CONTRACT
- *   The scalar reference and the vector paths accumulate in a fixed tree.
- *   BF16 is bitwise equal to that reference; FP4 and FP8 form and accumulate
- *   their block sums in float with four partials and a pairwise final tree, so
- *   the matmul gate bounds them in L2 (measured ~6-8e-8). The scalar reference
- *   stays double. -ffp-contract=off keeps the compiler out of it.
+ * THE REDUCTION ORDER IS PART OF THE CPU CONTRACT
+ *   The scalar reference and the CPU vector paths accumulate in a fixed tree.
+ *   BF16 happens to match that reference bit for bit; FP4 and FP8 form and
+ *   accumulate their block sums in float with four partials and a pairwise
+ *   final tree. The numerical contract is L2 relative error, checked by the
+ *   gates in `make test` against the double scalar reference. The Vulkan
+ *   prefill GEMMs use a different reduction order and are held to the same
+ *   L2/oracle rule, not to bit identity. The scalar reference stays double;
+ *   -ffp-contract=off keeps the compiler out of the CPU path.
  */
 #include <stdio.h>
 #include <stdlib.h>

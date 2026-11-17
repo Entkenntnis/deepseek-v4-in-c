@@ -13,9 +13,9 @@
  * there is nothing for a dynamic schedule to balance. It was introduced when
  * these loops also ran on the E-cores, where the P/E cost ratio left the fast
  * cores waiting at the barrier. That reason is gone: dynamic chunk 4 now only
- * adds a dispatch fetch per four rows. Interleaved 3-rep A/B in both orders
- * measured static at 0.945 s/token against dynamic's 0.9525, which is neutral
- * inside the noise; static is kept because it is simpler, not faster.
+ * adds a dispatch fetch per four rows. A/B runs are neutral inside the noise
+ * (see `make bench`); static is kept because it is simpler, not because it is
+ * faster.
  *
  * This cannot change a result: a row's dot product depends only on its own
  * columns, and the reduction inside the row is untouched. Only which thread

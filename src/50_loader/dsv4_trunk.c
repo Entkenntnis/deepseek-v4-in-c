@@ -3,7 +3,7 @@
 
 /* O_DIRECT is a GNU extension, so the feature macro has to precede EVERY libc
  * header. Defining it after an include silently leaves O_DIRECT undeclared and
- * the fallback path becomes the only path -- a 15x slowdown that compiles. */
+ * the fallback path becomes the only path -- a large slowdown that compiles. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -62,7 +62,7 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
 
     /* Spend the budget on pinned layers first, keeping one ring slot. A pinned
      * layer gets an EXACT allocation: sizing every pin like the widest layer
-     * would waste 34 MB per pin between an indexed and a dense layer. */
+     * would waste the difference on every narrower layer. */
     int64_t left = budget_bytes - tr->slot_bytes - (int64_t)tr->widen_cap;
     int npin = 0;
     while (npin < tr->n_layers && tr->lay[npin].nbytes > 0
@@ -76,9 +76,9 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
      * over-provisioned machine could not open the trunk at all.
      *
      * Zero is the right answer when every layer is pinned. The old clamp kept
-     * one slot "just in case", which allocated 165 MB on Flash that bind() can
-     * never touch (its ring branch requires L >= npin) and charged it against
-     * the budget, costing the expert cache slots. */
+     * one slot "just in case", which allocated a whole layer's worth of memory
+     * that bind() can never touch (its ring branch requires L >= npin) and
+     * charged it against the budget, costing the expert cache slots. */
     {
         const int tail = tr->n_layers - tr->npin;
         if (tail <= 0) {

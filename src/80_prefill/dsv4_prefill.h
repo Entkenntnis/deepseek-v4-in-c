@@ -1,20 +1,22 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_prefill.h - batched dense prompt prefill, CPU only.
+/* dsv4_prefill.h - batched dense prompt prefill, CPU and optional Vulkan.
  *
  * WHY THIS IS A SEPARATE PATH
  *   Decode is one token by one token: a weight matrix is read once and used for
  *   that token. Prefill has the opposite shape -- the same weight is needed by
  *   every prompt token -- so the right unit of work is a batch of tokens
  *   through one layer. Keeping the batch code here means the decode path keeps
- *   its bit-exact reference loop, its gates and its profile, and a change to
- *   one cannot silently move the other.
+ *   its reference loop, gates and profile, and a change to one cannot silently
+ *   move the other. The model-level numerical contract is L2 relative error,
+ *   not bit identity; `make test` holds the matmul gates.
  *
  * WHAT IS BATCHED
  *   The dense matrices: q/kv/output projections, the shared expert and the
  *   router, read once per block and used for every token in it. The routed
  *   experts are batched too, by layer-level union: every distinct expert the
  *   block routes to is requested once, and each expert's whole token bucket is
- *   run through one FP4 batch kernel.
+ *   run through one CPU FP4 batch kernel, or the FP4 Vulkan GEMM when that
+ *   backend is available and the bucket is large enough.
  *
  * WHAT IS NOT BATCHED, DELIBERATELY
  *   mHC, RoPE, the compressor's sequential state, the CSA indexer and sparse
@@ -24,9 +26,13 @@
  * SCHEDULING
  *   The prompt is one block and is walked layer-major: every token of layer L
  *   runs before L+1. That keeps L's dense weights and routed-expert working set
- *   resident for the whole prompt. The matmul entry point splits the block into
- *   fixed kernel tiles internally, so a very long block does not turn the dense
- *   GEMMs into a DRAM stream.
+ *   resident for the whole prompt. The CPU matmul entry point splits the block
+ *   into fixed kernel tiles internally; the Vulkan backend tiles it too, with
+ *   its own tile size. Either way a very long block does not turn the dense
+ *   GEMMs into a DRAM stream. Set DSV4_PREFILL_CPU=1 to force the CPU path;
+ *   otherwise Vulkan is used when available and falls back per matrix when a
+ *   geometry is unsupported. `make e2e` and `DSV4_PREFILL_CPU=1 make e2e`
+ *   compare the two paths.
  */
 #ifndef DSV4_PREFILL_H
 #define DSV4_PREFILL_H

@@ -18,6 +18,9 @@
  *   looking for -- a wrong block stride, a scale applied per element instead of
  *   per block, a packed row read at full width -- all produce answers that are
  *   plausibly close. Only exactness, or a bound this tight, separates them.
+ *   The exact comparisons are a structural instrument, not a model-level
+ *   promise: the numerical contract for production kernels is the L2 bound,
+ *   and the Vulkan prefill has its own reduction order.
  *
  * WHAT IS DELIBERATELY NOT ASSERTED
  *   Agreement with PyTorch. That needs torch and the real checkpoint, and it is
@@ -436,14 +439,14 @@ int main(void)
     printf("\n");
     printf("\n-- GATE  the AVX2 path matches the scalar reference --\n");
     {
-        /* bf16 must still be bitwise: -ffp-contract=off exists so that a
-         * faster kernel cannot quietly become a different kernel.
+        /* bf16 currently matches bitwise because it uses the same double tree;
+         * -ffp-contract=off keeps the compiler from changing that.
          *
          * FP4 and FP8 are the deliberate exceptions. Their AVX2 paths form one
          * scale block in float and fold blocks in double, so exact bits are
          * not the contract any more. The gate instead bounds the L2 relative
-         * error at 1e-6, which is far below any structural bug but far above
-         * the measured 7-10e-8.
+         * error at 1e-6, which is far below any structural bug; the observed
+         * value is printed by `make test`.
          *
          * OUT is deliberately not a multiple of the vector width. IN=256 takes
          * the specialised 128-wide FP8 block and the 32-wide FP4 block; the
@@ -633,8 +636,8 @@ int main(void)
 #if defined(__AVX2__) && defined(__FMA__)
     printf("\n-- GATE  normal-only fast decode, and the exact fallback --\n");
     {
-        /* The random gate above uses uniform bytes, which are 6.25%
-         * subnormal, so nearly every 128-byte block takes the gather fallback.
+        /* The random gate above uses uniform bytes, which contain many more
+         * subnormals, so nearly every 128-byte block takes the gather fallback.
          * This gate deliberately fills every block with NORMAL codes first, so
          * the closed-form decode is the path actually tested, then injects one
          * subnormal, one NaN and one zero into a single block to exercise the
@@ -687,7 +690,12 @@ int main(void)
     printf("\n-- GATE  batched matmul equals nt separate GEMVs --\n");
     {
         /* NT > DSV4_MAX_BATCH on purpose: this walks dsv4_mmq_n()'s tiling
-         * path as well as the per-token reduction. */
+         * path as well as the per-token reduction.
+         *
+         * The comparisons below are exact because the CPU GEMV and batch share
+         * the same per-row arithmetic. That is a stronger local scheduling
+         * invariant than the model contract, which is the L2 bound above; the
+         * Vulkan prefill path is outside this test. */
         enum { NT = 130, IN = 256, OUT = 130 };
         static float x[NT * IN], ya[NT * OUT], yb[NT * OUT];
         unsigned r = 123456789u;
@@ -702,7 +710,8 @@ int main(void)
                     (float)((int)((r >> 16) & 0x3ff) - 512) * 0.017f;
             }
 
-        /* BF16: bitwise, same reduction tree per token. */
+        /* BF16: same reduction tree per token, so the CPU paths match exactly.
+         * The model-level check is the L2 gate, not this equality. */
         {
             static uint16_t W[(size_t)OUT * IN];
             static uint8_t S[1];
@@ -735,7 +744,8 @@ int main(void)
         }
 
         /* FP8: the batch body is compared against nt one-token calls, with a
-         * block forced through the exactness fallback. */
+         * block forced through the scalar fallback. This checks the CPU
+         * schedule; the numerical contract is the L2 gate. */
         {
             static uint8_t W[(size_t)OUT * IN];
             static uint8_t S[(2 * (IN / 128))];
@@ -757,7 +767,8 @@ int main(void)
                   "FP8 batched output is not bitwise-equal to nt GEMVs");
         }
 
-        /* FP4: the batch kernel must reproduce the production GEMV bitwise. */
+        /* FP4: the batch kernel must reproduce the CPU GEMV here. This is a
+         * scheduling invariant, not the model-level numerical contract. */
         {
             static uint8_t W[(size_t)OUT * IN / 2];
             static uint8_t S[(size_t)OUT * (IN / 32)];

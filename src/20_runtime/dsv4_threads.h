@@ -7,11 +7,11 @@
  *     CPUs 0-3   P-cores (Lion Cove), 4.7-4.8 GHz
  *     CPUs 4-7   LP E-cores (Skymont), 3.7 GHz
  *
- * The measurements behind the defaults, in short: E-cores are 2.4x slower at
- * the FP4 expert kernel and worse still at the FP64 mHC
- * dot products, while FP8 attention is nearly as fast on them. The compute team
- * therefore runs on the P-cores and the expert-reader pthreads can be sent to
- * the E-cores, where they mostly sleep in pread().
+ * The defaults follow what this machine does: the E-cores are much slower at
+ * the FP4 expert kernel and the FP64 mHC dot products, while FP8 attention is
+ * closer. The compute team therefore runs on the P-cores and the expert-reader
+ * pthreads can be sent to the E-cores, where they mostly sleep in pread().
+ * Reproduce with `./bin/bench --pin p` and `./bin/bench --pin e`.
  *
  * If this is built for another CPU, pass `--pin off` (or `--pin all`), or edit
  * DSV4_P_LO..DSV4_E_HI in dsv4_threads.c. The engine still works; it simply

@@ -6,9 +6,11 @@
  *   These blocks used to exist twice, once in the core matmul file and once in
  *   the prefill batch kernels. The arithmetic -- which bytes are decoded, in
  *   which order the products are accumulated, where the block scale is applied
- *   -- is part of the model's bit-identity contract, so it lives here and both
- *   paths include it. Only the scheduling around it is allowed to differ:
- *   decode keeps one token in flight, prefill keeps a block of token rows.
+ *   -- is part of the CPU reference contract, so it lives here and both paths
+ *   include it. It is checked in L2 against the scalar reference, not by bit
+ *   identity; the Vulkan prefill path has its own reduction order. Only the
+ *   scheduling around it is allowed to differ: decode keeps one token in
+ *   flight, prefill keeps a block of token rows.
  *
  *   The kernels themselves still take different shapes on purpose. The point of
  *   this header is that a decoder or a reduction tree cannot drift between

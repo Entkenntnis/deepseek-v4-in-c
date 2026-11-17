@@ -29,7 +29,8 @@ typedef struct {
     int have_estats;
 } DSV4PrefillStats;
 
-/* One matrix over `n` token rows: the CPU seam the prefill module is built on. */
+/* One matrix over `n` token rows: the batched-matmul seam. It uses the Vulkan
+ * backend when available and falls back to the CPU kernels otherwise. */
 typedef struct {
     const DSV4QMat *m;
     const float    *x;
@@ -61,7 +62,7 @@ struct DSV4Prefill {
     DSV4LayerState  *lst;
     const DSV4ExpertSrc *src;
     const DSV4ModelW *mw;
-    struct DSV4PrefillVk *vk;   /* NULL = CPU kernels */
+    struct DSV4PrefillVk *vk;   /* NULL = no GPU backend, use CPU kernels */
     DSV4PrefillOpts  opt;
     int              cap;          /* allocated token rows in the block buffers */
     int              scratch_cap;  /* allocated DSV4PrefillTok entries */

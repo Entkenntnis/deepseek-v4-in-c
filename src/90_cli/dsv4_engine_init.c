@@ -64,8 +64,9 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
         const int64_t model_bytes = dsv4_bind_model_bytes(&e->st, &e->c, 1);
         const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
         /* Scratch, KV state, rope tables, tokenizer and allocator overhead.
-         * The budget does not cover these; measured at about 0.34 GiB on Flash.
-         * Keep half a gigabyte so the 1 GiB above is actually spare. */
+         * The budget does not cover these; the `--budget auto` output shows the
+         * allowance. Keep enough spare that the reserve above is actually
+         * spare. */
         const int64_t runtime = (int64_t)512 << 20;
         if (avail <= 0) {
             fprintf(stderr, "--budget auto: cannot read available memory; "

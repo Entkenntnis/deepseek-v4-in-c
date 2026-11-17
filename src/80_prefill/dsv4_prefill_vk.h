@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_prefill_vk.h - prefill-only Vulkan GEMM offload. */
+/* dsv4_prefill_vk.h - prefill-only Vulkan GEMM offload.
+ *
+ * NUMERICS. The shaders accumulate in float and use a tile-dependent reduction
+ * order, so their output is not bit-identical to the CPU kernels. The contract
+ * is the same L2 relative-error rule as the rest of the matmul layer; `make
+ * test` holds the CPU gates, and `make e2e` versus `DSV4_PREFILL_CPU=1 make
+ * e2e` compares the backends end to end.
+ */
 #ifndef DSV4_PREFILL_VK_H
 #define DSV4_PREFILL_VK_H
 
