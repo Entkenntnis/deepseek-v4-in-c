@@ -42,13 +42,17 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
      * prompt length is allocated by dsv4_prefill_reserve() once the caller
      * knows how many tokens this block has. */
     p->xh = xcalloc((size_t)c->hidden * sizeof(float));
+    /* One score row per head, for the head-parallel sparse attention. */
+    p->attn_scratch = xcalloc(
+        (size_t)c->n_heads *
+        ((size_t)c->sliding_window + (size_t)c->index_topk) * sizeof(float));
     p->ex_count = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_order = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
     p->ex_fill = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_seen = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
-    if (!p->xh || !p->ex_count || !p->ex_order || !p->ex_off ||
-        !p->ex_fill || !p->ex_seen) {
+    if (!p->xh || !p->attn_scratch || !p->ex_count || !p->ex_order ||
+        !p->ex_off || !p->ex_fill || !p->ex_seen) {
         dsv4_prefill_free(p);
         return -1;
     }
@@ -114,6 +118,7 @@ void dsv4_prefill_free(DSV4Prefill *p)
     p->vk = NULL;
     dsv4_prefill_release(p);
     free(p->xh);
+    free(p->attn_scratch);
     free(p->ex_count); free(p->ex_order); free(p->ex_off);
     free(p->ex_fill); free(p->ex_seen);
     free(p);

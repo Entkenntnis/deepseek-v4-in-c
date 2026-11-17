@@ -48,6 +48,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
+    import resource
+except ImportError:  # non-Unix; the TUI also runs on Windows in demo mode
+    resource = None
+
+try:
     from markdown_render import RICH_AVAILABLE, RICH_ERROR, Span, render_markdown
 except ImportError:  # running as `python3 -m tui.dsv4_tui`
     from .markdown_render import (RICH_AVAILABLE, RICH_ERROR, Span,
@@ -189,6 +194,21 @@ class EventSink:
                 return out
 
 
+def _disable_core_dumps() -> None:
+    """Make a crashed engine exit at once.
+
+    The model process holds ~10 GB resident; letting the kernel write a core of
+    that size takes minutes and looks exactly like a frozen TUI. Cores are
+    still available when the binary is started under gdb by hand.
+    """
+    if resource is None:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError):
+        pass
+
+
 class RealBackend:
     def __init__(self, argv: list[str], sink: EventSink) -> None:
         self.argv = argv
@@ -205,6 +225,7 @@ class RealBackend:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            preexec_fn=_disable_core_dumps,
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()

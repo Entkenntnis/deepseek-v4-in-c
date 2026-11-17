@@ -166,7 +166,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
         ts = dsv4_now_s();
         dsv4_sparse_attn(ot, qt, kvc, w->attn.sink, p->scratch[t].idxs,
                          H, hd, n_idx, 1.0f / sqrtf((float)hd),
-                         p->scratch[t].attn_scratch);
+                         p->attn_scratch);
         p->st.attn_core += dsv4_now_s() - ts;
         p->st.f_attn += 4.0 * (double)H * (double)hd * (double)n_idx * 1e-9;
 

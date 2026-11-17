@@ -22,7 +22,7 @@ typedef struct {
     float *comp_kv_in, *comp_sc_in;    /* compressor projections, one token */
     float *idx_q, *idx_w, *idx_scores; /* CSA indexer working set          */
     int    idx_cap;                    /* how many scores idx_scores holds  */
-    float *attn_scratch;
+    float *attn_scratch;               /* [n_heads][sliding_window+index_topk] */
     int   *idxs;
     int    topk_idx[DSV4_MAX_TOPK];
     float  topk_w[DSV4_MAX_TOPK];

@@ -92,7 +92,8 @@ int dsv4_scratch_init(DSV4Scratch *s, const DSV4Cfg *c, int max_pos)
     s->expert_gate = p;  p += inter;
     s->expert_up = p;    p += inter;
     s->expert_out = p;   p += inter;
-    s->attn_scratch = p; p += nidx;
+    /* Head-parallel sparse attention: one score row per head. */
+    s->attn_scratch = p; p += heads * nidx;
     s->expert_acc = p;   p += (size_t)c->topk * d;
     s->expert_acc_stride = c->hidden;
     s->shared_acc = p;   p += d;

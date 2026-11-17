@@ -50,7 +50,6 @@ typedef struct {
     float *idx_scores;      /* [max_pos/4 + 1] compressed-row scores         */
     int    idx_cap;
     int   *idxs;            /* [sliding_window + index_topk]                  */
-    float *attn_scratch;    /* [sliding_window + index_topk]                  */
     float *expert_acc;      /* [topk][hidden]                                 */
     int    expert_acc_stride;
     void  *arena;           /* one allocation backing the float buffers       */
@@ -91,6 +90,10 @@ struct DSV4Prefill {
     float *out;        /* [B][hidden] */
     float *xh;         /* [hidden] embed scratch */
     DSV4PrefillTok *scratch; /* [B] per-token state for the sequential parts */
+    /* dsv4_sparse_attn() is parallel over heads and needs one score row per
+     * head: [n_heads][sliding_window + index_topk]. The token loop is serial,
+     * so one block-wide buffer serves every token instead of one per token. */
+    float *attn_scratch;
 
     /* Expert-union scheduling: one bucket per expert for the whole layer. */
     int   *ex_tok, *ex_k;    /* [B*topk] request -> token and k              */

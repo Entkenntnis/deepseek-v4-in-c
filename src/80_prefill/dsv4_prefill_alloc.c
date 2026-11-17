@@ -48,7 +48,9 @@ static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c, int max_pos)
     const size_t nidx  = (size_t)c->sliding_window + (size_t)c->index_topk;
     /* Only a ratio-4 layer runs the indexer, so n_compressed <= max_pos/4. */
     const size_t ncomp = (size_t)max_pos / 4 + 1;
-    const size_t nf    = hd + ncomp + nidx
+    /* attn_scratch is block-wide (see DSV4Prefill): it is consumed inside the
+     * serial per-token loop, so it must not be charged to every token. */
+    const size_t nf    = hd + ncomp
                        + (size_t)c->topk * (size_t)c->hidden;
 
     float *a = (float *)calloc(nf, sizeof(float));
@@ -58,7 +60,6 @@ static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c, int max_pos)
     float *p = a;
     s->kv = p;           p += hd;
     s->idx_scores = p;   p += ncomp;
-    s->attn_scratch = p; p += nidx;
     s->expert_acc = p;   p += (size_t)c->topk * (size_t)c->hidden;
     s->idx_cap = (int)ncomp;
     s->expert_acc_stride = c->hidden;
