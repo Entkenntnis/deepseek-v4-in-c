@@ -21,7 +21,7 @@ TOOL_SCHEMA = {
     "description": ("Run Python 3 in a fresh interpreter for every call. "
                     "Variables and imports never carry over between calls. "
                     "Returns stdout/stderr; input() is disabled; output is "
-                    "truncated."),
+                    "truncated beyond 750 chars"),
     "parameters": {
         "type": "object",
         "properties": {
