@@ -18,6 +18,17 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
 {
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, topk = c->topk, ne = c->n_experts;
+    const double tu0 = dsv4_now_s();
+    DSV4PrefillLayerInstr *li =
+        (p->instr && L >= 0 && L < c->n_layers) ? &p->linstr[L] : NULL;
+    p->cur_layer = L;
+    if (li) {
+        memset(li, 0, sizeof *li);
+        li->requests = n * topk;
+    }
+    DSV4ExpertStats es0, es1;
+    const int have_estats = p->instr && p->src->stats
+                         && p->src->stats(p->src->ctx, &es0) == 0;
 
     memset(p->ex_count, 0, (size_t)ne * sizeof *p->ex_count);
     for (int t = 0; t < n; t++)
@@ -47,6 +58,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
                 p->ex_order[nord++] = e;
             }
         }
+    if (li) li->experts = nord;
 
     for (int base = 0; base < nord; base += DSV4_MAX_PREFETCH) {
         if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
@@ -63,6 +75,11 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         double td = dsv4_now_s() - t0;
         p->t_io += td;
         p->st.expert_io += td;
+        if (p->instr) {
+            p->st.io_begin_s += td;
+            p->st.io_groups++;
+            if (li) li->begin_s += td;
+        }
         if (rc != 0) {
             p->src->end(p->src->ctx, ex);
             return -1;
@@ -73,6 +90,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
          * returning with reads outstanding would race the reset that follows a
          * cancelled prefill. */
         int cancelled = 0;
+        const double tc0 = dsv4_now_s();
         for (int j = 0; j < ng; j++) {
             if (dsv4_prefill_cancelled(p)) cancelled = 1;
             if (cancelled || !ex[j]) continue;
@@ -82,6 +100,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
                                        p->ex_k + p->ex_off[e]);
             done[j] = 1;
         }
+        if (p->instr && li) li->compute_s += dsv4_now_s() - tc0;
 
         if (p->src->wait_any) {
             for (;;) {
@@ -91,14 +110,20 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
                 td = dsv4_now_s() - t0;
                 p->t_io += td;
                 p->st.expert_io += td;
+                if (p->instr) {
+                    p->st.io_wait_s += td;
+                    if (li) li->wait_s += td;
+                }
                 if (!got) break;
                 if (j < 0 || j >= ng || done[j] || !ex[j]) continue;
                 if (dsv4_prefill_cancelled(p)) cancelled = 1;
                 if (cancelled) continue;
+                const double tb0 = dsv4_now_s();
                 const int e = p->ex_order[base + j];
                 dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
                                            p->ex_tok + p->ex_off[e],
                                            p->ex_k + p->ex_off[e]);
+                if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
                 done[j] = 1;
             }
         }
@@ -108,9 +133,14 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         td = dsv4_now_s() - t0;
         p->t_io += td;
         p->st.expert_io += td;
+        if (p->instr) {
+            p->st.io_end_s += td;
+            if (li) li->end_s += td;
+        }
 
         if (cancelled) return dsv4_prefill_cancel_code(p);
 
+        const double tt0 = dsv4_now_s();
         for (int j = 0; j < ng; j++) {
             if (done[j]) continue;
             if (!ex[j]) {
@@ -126,6 +156,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
                                        p->ex_k + p->ex_off[e]);
             done[j] = 1;
         }
+        if (p->instr && li) li->compute_s += dsv4_now_s() - tt0;
     }
 
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
@@ -146,5 +177,14 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
     }
     p->st.expert_sum += dsv4_now_s() - tsum;
     p->t_moe += dsv4_now_s() - tsum;
+
+    if (p->instr) {
+        if (li) {
+            li->union_s = dsv4_now_s() - tu0;
+            if (have_estats
+                && p->src->stats(p->src->ctx, &es1) == 0)
+                li->bytes = es1.bytes_read - es0.bytes_read;
+        }
+    }
     return 0;
 }

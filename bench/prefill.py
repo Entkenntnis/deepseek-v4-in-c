@@ -33,6 +33,7 @@ Examples:
     make prefill
     python3 bench/prefill.py --detailed
     python3 bench/prefill.py --runs 5 --json
+    python3 bench/prefill.py --instrument --instrument-file /tmp/prefill.txt
     python3 bench/prefill.py --update-golden
     DSV4_PREFILL_CPU=1 python3 bench/prefill.py --no-golden
 """
@@ -96,7 +97,22 @@ def parse_args():
                    help="print a JSON summary instead of the table")
     p.add_argument("--detailed", action="store_true",
                    help="show serve stderr and per-run counters")
+    p.add_argument("--instrument", action="store_true",
+                   help="enable deep prefill instrumentation in serve "
+                        "(summary + per-layer lines)")
+    p.add_argument("--instrument-file", default=None, metavar="FILE",
+                   help="write instrumentation lines to FILE instead of stderr")
     return p.parse_args()
+
+
+def build_env(a):
+    env = os.environ.copy()
+    if a.instrument or a.instrument_file:
+        env["DSV4_PREFILL_INSTRUMENT"] = "2"
+    if a.instrument_file:
+        env["DSV4_PREFILL_INSTRUMENT_FILE"] = str(
+            Path(os.path.expanduser(a.instrument_file)))
+    return env
 
 
 def build_command(a):
@@ -328,6 +344,17 @@ def main():
               file=sys.stderr)
         return 2
 
+    if a.instrument_file:
+        a.instrument_file = str(Path(os.path.expanduser(a.instrument_file)))
+        Path(a.instrument_file).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            Path(a.instrument_file).unlink()
+        except FileNotFoundError:
+            pass
+    elif a.instrument:
+        print("prefill: instrumentation goes to serve stderr; use "
+              "--instrument-file or --detailed to keep it", file=sys.stderr)
+
     try:
         preamble = load_preamble(a.preamble_file)
     except (OSError, RuntimeError) as exc:
@@ -348,11 +375,14 @@ def main():
               f"(run 1 warm-up)", file=sys.stderr)
         print(f"prefill: preamble {len(preamble)} chars, "
               f"user prompt {len(a.prompt)} chars", file=sys.stderr)
+        if a.instrument_file:
+            print(f"prefill: instrument {a.instrument_file}", file=sys.stderr)
 
     progress.update("loading model", force=True)
     proc = subprocess.Popen(build_command(a), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=errfile,
-                            text=True, encoding="utf-8", bufsize=1)
+                            text=True, encoding="utf-8", bufsize=1,
+                            env=build_env(a))
     try:
         ready = wait_for(proc, "ready")
         if ready is None:

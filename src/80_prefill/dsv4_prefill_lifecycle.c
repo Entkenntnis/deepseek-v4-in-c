@@ -37,6 +37,7 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     if (!p) return -1;
     p->c = c; p->tr = tr; p->lst = lst; p->src = src; p->mw = mw;
     p->opt = *opt;
+    dsv4_prefill_instr_init(p);
 
     /* Only the block-independent buffers live here. Everything scaled by the
      * prompt length is allocated by dsv4_prefill_reserve() once the caller
@@ -114,6 +115,8 @@ void dsv4_prefill_release(DSV4Prefill *p)
 void dsv4_prefill_free(DSV4Prefill *p)
 {
     if (!p) return;
+    if (p->instr_fp) fclose(p->instr_fp);
+    p->instr_fp = NULL;
     dsv4_prefill_vk_free(p->vk);
     p->vk = NULL;
     dsv4_prefill_release(p);

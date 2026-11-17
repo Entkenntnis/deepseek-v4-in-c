@@ -20,7 +20,8 @@ static int pm(DSV4Prefill *p, int layer, const DSV4PMJob *jobs, int nj)
     for (int j = 0; j < nj; j++) {
         if (jobs[j].n < 1) continue;
         if (p->vk && dsv4_prefill_vk_gemm(p->vk, jobs[j].y, jobs[j].x,
-                                          jobs[j].m, jobs[j].n) == 0)
+                                          jobs[j].m, jobs[j].n,
+                                          DSV4_VK_KIND_DENSE) == 0)
             continue;
         dsv4_mmq_n(jobs[j].y, jobs[j].x, jobs[j].m, jobs[j].n);
     }

@@ -25,6 +25,18 @@ int dsv4_cache_rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j)
     return 0;
 }
 
+static int read_lat_bin(double s)
+{
+    if (s < 0.005) return 0;
+    if (s < 0.010) return 1;
+    if (s < 0.020) return 2;
+    if (s < 0.040) return 3;
+    if (s < 0.080) return 4;
+    if (s < 0.160) return 5;
+    if (s < 0.320) return 6;
+    return 7;
+}
+
 static void *reader_main(void *arg)
 {
     ReaderArg *ra = (ReaderArg *)arg;
@@ -62,6 +74,13 @@ static void *reader_main(void *arg)
         pthread_mutex_lock(&c->rmx);
         b->failed[j] = bad;
         b->got[j]    = got;
+        c->read_n++;
+        const double load_s = load_ms * 1e-3;
+        c->read_s += load_s;
+        if (load_s > c->read_max_s) c->read_max_s = load_s;
+        const int lb = read_lat_bin(load_s);
+        c->lat_n[lb]++;
+        c->lat_s[lb] += load_s;
         if (b->is_prefetch) {
             /* Publish immediately: a layer's begin() may be waiting on this
              * exact slot, and there is no end() call for a prefetch batch. */

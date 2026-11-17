@@ -75,6 +75,13 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     if (dsv4_prefill_cancelled(p)) return DSV4_PREFILL_CANCELLED;
     if (dsv4_prefill_reserve(p, n) != 0) return -1;
     p->n = n;
+    if (p->instr) {
+        p->instr_call++;
+        memset(p->linstr, 0, sizeof p->linstr);
+        memset(p->vk_stats, 0, sizeof p->vk_stats);
+    }
+    DSV4PrefillVkStats vk0[DSV4_VK_KIND_COUNT];
+    if (p->instr) dsv4_prefill_vk_stats(p->vk, vk0);
     const DSV4Cfg *c = p->c;
     const int hc = c->hc_mult, d = c->hidden;
     const size_t hcd = (size_t)hc * d;
@@ -113,6 +120,13 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     for (int L = 0; L < c->n_layers; L++) {
         if (dsv4_prefill_cancelled(p))
             return dsv4_prefill_cancel_code(p);
+        const double tl0 = dsv4_now_s();
+        const double ta0 = p->t_attn, tm0 = p->t_moe;
+        const double tg0 = p->t_gate, ts0 = p->t_shared;
+        const double th0 = p->t_hc, tio0 = p->t_io;
+        DSV4PrefillVkStats lvk0[DSV4_VK_KIND_COUNT];
+        if (p->instr >= 2) dsv4_prefill_vk_stats(p->vk, lvk0);
+        p->cur_layer = L;
         DSV4LayerW lw;
         const double tb = dsv4_now_s();
         const double io0 = p->tr->load_seconds;
@@ -138,6 +152,33 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         p->state_dirty = 1;
         const int lrc = prefill_layer(p, L, &lw, n, pos0, ids, cs, sn);
         if (lrc) return lrc;
+        if (p->instr >= 2) {
+            DSV4PrefillLayerInstr *li = &p->linstr[L];
+            li->total_s = dsv4_now_s() - tl0;
+            li->attn_s = p->t_attn - ta0;
+            li->moe_s = p->t_moe - tm0;
+            li->gate_s = p->t_gate - tg0;
+            li->shared_s = p->t_shared - ts0;
+            li->hc_s = p->t_hc - th0;
+            li->io_s = p->t_io - tio0;
+            DSV4PrefillVkStats lvk1[DSV4_VK_KIND_COUNT];
+            dsv4_prefill_vk_stats(p->vk, lvk1);
+            for (int k = 0; k < DSV4_VK_KIND_COUNT; k++) {
+                const DSV4PrefillVkStats *a = &lvk0[k], *b = &lvk1[k];
+                DSV4PrefillVkStats *vd = &li->vk[k];
+                vd->calls = b->calls - a->calls;
+                vd->tiles = b->tiles - a->tiles;
+                vd->xbytes = b->xbytes - a->xbytes;
+                vd->ybytes = b->ybytes - a->ybytes;
+                vd->desc_s = b->desc_s - a->desc_s;
+                vd->copy_in_s = b->copy_in_s - a->copy_in_s;
+                vd->record_s = b->record_s - a->record_s;
+                vd->submit_s = b->submit_s - a->submit_s;
+                vd->copy_out_s = b->copy_out_s - a->copy_out_s;
+                vd->total_s = b->total_s - a->total_s;
+            }
+            dsv4_prefill_instr_layer(p, L);
+        }
     }
 
     dsv4_prefill_progress(p, "done", c->n_layers, n, n, dsv4_now_s() - t0, 1.0);
@@ -149,6 +190,15 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             p->st.e_hits = es1.hits - es0.hits;
             p->st.e_misses = es1.misses - es0.misses;
             p->st.e_bytes = es1.bytes_read - es0.bytes_read;
+            p->st.io_read_n = es1.read_n - es0.read_n;
+            p->st.io_read_s = es1.read_s - es0.read_s;
+            p->st.io_read_max_s = es1.read_max_s;
+            for (int i = 0; i < DSV4_PF_HIST_BINS; i++) {
+                p->st.read_lat_n[i] = es1.lat_n[i] - es0.lat_n[i];
+                p->st.read_lat_s[i] = es1.lat_s[i] - es0.lat_s[i];
+            }
+            p->st.cache_slots = es1.slots;
+            p->st.cache_readers = es1.readers;
         }
     }
     if (p->tr) p->st.trunk_bytes = p->tr->bytes_read - trunk0;
@@ -173,5 +223,25 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             p->t_total / (double)n, p->t_attn, p->t_moe, p->t_io,
             p->t_bind, p->t_hc);
     dsv4_prefill_report(p, n);
+
+    if (p->instr) {
+        DSV4PrefillVkStats vk1[DSV4_VK_KIND_COUNT];
+        dsv4_prefill_vk_stats(p->vk, vk1);
+        for (int k = 0; k < DSV4_VK_KIND_COUNT; k++) {
+            const DSV4PrefillVkStats *a = &vk0[k], *b = &vk1[k];
+            DSV4PrefillVkStats *vd = &p->vk_stats[k];
+            vd->calls = b->calls - a->calls;
+            vd->tiles = b->tiles - a->tiles;
+            vd->xbytes = b->xbytes - a->xbytes;
+            vd->ybytes = b->ybytes - a->ybytes;
+            vd->desc_s = b->desc_s - a->desc_s;
+            vd->copy_in_s = b->copy_in_s - a->copy_in_s;
+            vd->record_s = b->record_s - a->record_s;
+            vd->submit_s = b->submit_s - a->submit_s;
+            vd->copy_out_s = b->copy_out_s - a->copy_out_s;
+            vd->total_s = b->total_s - a->total_s;
+        }
+        dsv4_prefill_instr_summary(p, n, pos0);
+    }
     return 0;
 }

@@ -47,6 +47,8 @@ struct DSV4PrefillVk {
     void          *xmap, *ymap;
     size_t         xbytes, ybytes;
 
+    DSV4PrefillVkStats st[DSV4_VK_KIND_COUNT];
+
     DSV4VkRegion *regions;
     int           nreg, regcap;
 

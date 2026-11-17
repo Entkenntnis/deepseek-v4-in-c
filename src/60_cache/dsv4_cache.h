@@ -60,6 +60,11 @@ typedef struct {
     /* stats */
     uint64_t hits, misses, evictions;
     uint64_t bytes_read;
+    uint64_t read_n;        /* loads completed by the reader pool / sync path */
+    double   read_s;        /* sum of per-load wall time                     */
+    double   read_max_s;    /* slowest single load                           */
+    uint64_t lat_n[8];      /* read-latency bins: <.005,.01,.02,.04,.08,.16,.32,>= */
+    double   lat_s[8];
 
     /* Publish each miss as its read lands and queue at most this many reads at
      * once. 0 keeps the historical end() barrier. This changes WHEN a finished

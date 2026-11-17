@@ -29,9 +29,17 @@ typedef struct {
     void  *arena;
 } DSV4Scratch;
 
-/* Optional accounting for the expert source, used by prefill instrumentation. */
+/* Optional accounting for the expert source, used by prefill instrumentation.
+ * read_s is the sum of reader wall time (not wall time of the prefill), so a
+ * six-reader pool can show six times the useful read overlap. */
 typedef struct {
     uint64_t hits, misses, bytes_read;
+    uint64_t read_n;
+    double   read_s, read_max_s;
+    uint64_t lat_n[8];
+    double   lat_s[8];
+    int      slots, readers;
+    uint64_t evictions;
 } DSV4ExpertStats;
 
 /* A source of routed experts.

@@ -31,6 +31,16 @@ static int run_expert_stats(void *ctx, DSV4ExpertStats *out)
     out->hits = c->hits;
     out->misses = c->misses;
     out->bytes_read = c->bytes_read;
+    out->read_n = c->read_n;
+    out->read_s = c->read_s;
+    out->read_max_s = c->read_max_s;
+    for (int i = 0; i < 8; i++) {
+        out->lat_n[i] = c->lat_n[i];
+        out->lat_s[i] = c->lat_s[i];
+    }
+    out->slots = c->nslot;
+    out->readers = c->nrth;
+    out->evictions = c->evictions;
     return 0;
 }
 

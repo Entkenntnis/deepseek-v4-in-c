@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_prefill_report.c - progress callbacks and the stage report. */
+/* dsv4_prefill_report.c - progress callbacks, the stage report and the
+ * opt-in deep instrumentation. */
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
@@ -127,3 +131,170 @@ void dsv4_prefill_report(DSV4Prefill *p, int n)
         fprintf(stderr, "    trunk data: %.2f GB read over prefill\n", gb);
     }
 }
+
+/* ---- deep instrumentation ------------------------------------------------ */
+
+static void pf_instr_emit(DSV4Prefill *p, const char *fmt, ...)
+{
+    if (!p || p->instr <= 0) return;
+    FILE *f = p->instr_fp ? p->instr_fp : stderr;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    fputc('\n', f);
+    fflush(f);
+    va_end(ap);
+}
+
+void dsv4_prefill_instr_init(DSV4Prefill *p)
+{
+    if (!p) return;
+    const char *e = getenv("DSV4_PREFILL_INSTRUMENT");
+    const char *layers = getenv("DSV4_PREFILL_INSTRUMENT_LAYERS");
+    p->instr_file = getenv("DSV4_PREFILL_INSTRUMENT_FILE");
+
+    if (e && *e && strcmp(e, "0") != 0) {
+        const int v = atoi(e);
+        p->instr = v >= 2 ? 2 : 1;
+    }
+    if (layers && *layers && strcmp(layers, "0") != 0) p->instr = 2;
+    if (p->instr_file && *p->instr_file) {
+        if (p->instr < 1) p->instr = 1;
+        p->instr_fp = fopen(p->instr_file, "a");
+        if (!p->instr_fp)
+            fprintf(stderr, "prefill: cannot open instrumentation file %s\n",
+                    p->instr_file);
+    }
+}
+
+static void pf_instr_hist(DSV4Prefill *p, const char *tag, int L,
+                          const int *hist, const int *tokens)
+{
+    char buf[512];
+    int n = snprintf(buf, sizeof buf, "PF_%s call=%d L=%d", tag,
+                     p->instr_call, L);
+    for (int i = 0; i < DSV4_PF_HIST_BINS && n < (int)sizeof buf; i++)
+        n += snprintf(buf + n, sizeof buf - (size_t)n, " h%d=%d", i, hist[i]);
+    for (int i = 0; i < DSV4_PF_HIST_BINS && n < (int)sizeof buf; i++)
+        n += snprintf(buf + n, sizeof buf - (size_t)n, " t%d=%d", i, tokens[i]);
+    pf_instr_emit(p, "%s", buf);
+}
+
+void dsv4_prefill_instr_layer(DSV4Prefill *p, int L)
+{
+    if (!p || p->instr < 2) return;
+    const DSV4PrefillLayerInstr *l = &p->linstr[L];
+    pf_instr_emit(p,
+        "PF_LAYER call=%d L=%d total_s=%.6f attn_s=%.6f moe_s=%.6f "
+        "hc_s=%.6f io_s=%.6f gate_s=%.6f shared_s=%.6f experts=%d "
+        "requests=%d cpu_buckets=%d gpu_buckets=%d fallbacks=%d "
+        "cpu_s=%.6f gpu_s=%.6f union_s=%.6f begin_s=%.6f wait_s=%.6f "
+        "end_s=%.6f compute_s=%.6f bytes=%llu",
+        p->instr_call, L, l->total_s, l->attn_s, l->moe_s, l->hc_s,
+        l->io_s, l->gate_s, l->shared_s, l->experts, l->requests,
+        l->buckets_cpu, l->buckets_gpu, l->gpu_fallbacks,
+        l->cpu_mm, l->gpu_mm, l->union_s, l->begin_s, l->wait_s,
+        l->end_s, l->compute_s, (unsigned long long)l->bytes);
+    pf_instr_hist(p, "LAYER_HIST", L, l->hist, l->hist_tokens);
+
+    const DSV4PrefillVkStats *d = &l->vk[DSV4_VK_KIND_DENSE];
+    const DSV4PrefillVkStats *e = &l->vk[DSV4_VK_KIND_EXPERT];
+    pf_instr_emit(p,
+        "PF_LAYER_VK call=%d L=%d "
+        "dense_calls=%llu dense_tiles=%llu dense_desc_s=%.6f "
+        "dense_copy_in_s=%.6f dense_record_s=%.6f dense_submit_s=%.6f "
+        "dense_copy_out_s=%.6f expert_calls=%llu expert_tiles=%llu "
+        "expert_desc_s=%.6f expert_copy_in_s=%.6f expert_record_s=%.6f "
+        "expert_submit_s=%.6f expert_copy_out_s=%.6f",
+        p->instr_call, L,
+        (unsigned long long)d->calls, (unsigned long long)d->tiles,
+        d->desc_s, d->copy_in_s, d->record_s, d->submit_s, d->copy_out_s,
+        (unsigned long long)e->calls, (unsigned long long)e->tiles,
+        e->desc_s, e->copy_in_s, e->record_s, e->submit_s, e->copy_out_s);
+}
+
+void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0)
+{
+    if (!p || p->instr < 1) return;
+    const DSV4PrefillStats *s = &p->st;
+    const double routed_s = p->t_moe;
+    const double expert_phase_s = routed_s + s->expert_io;
+    const double read_avg_ms = s->io_read_n
+        ? 1000.0 * s->io_read_s / (double)s->io_read_n : 0.0;
+    const double read_busy = (s->cache_readers > 0 && p->t_total > 0.0)
+        ? 100.0 * s->io_read_s / ((double)s->cache_readers * p->t_total)
+        : 0.0;
+    double union_s = 0.0;
+    if (p->instr >= 2)
+        for (int L = 0; L < p->c->n_layers; L++) union_s += p->linstr[L].union_s;
+    const double read_busy_union = (s->cache_readers > 0 && union_s > 0.0)
+        ? 100.0 * s->io_read_s / ((double)s->cache_readers * union_s)
+        : 0.0;
+    const double union_gbs = union_s > 0.0
+        ? (double)s->e_bytes / 1e9 / union_s : 0.0;
+
+    pf_instr_emit(p,
+        "PF_CALL call=%d n=%d pos=%d total_s=%.6f attn_s=%.6f gate_s=%.6f "
+        "shared_s=%.6f routed_s=%.6f io_block_s=%.6f expert_phase_s=%.6f "
+        "hc_s=%.6f trunk_s=%.6f bind_s=%.6f union_s=%.6f",
+        p->instr_call, n, pos0, p->t_total, p->t_attn, p->t_gate,
+        p->t_shared, routed_s, s->expert_io, expert_phase_s, p->t_hc,
+        s->trunk_io, s->bind, union_s);
+    pf_instr_emit(p,
+        "PF_EXPERT call=%d buckets=%d cpu_buckets=%d gpu_buckets=%d "
+        "fallbacks=%d cpu_s=%.6f gpu_s=%.6f mm_s=%.6f swiglu_s=%.6f "
+        "pack_s=%.6f sum_s=%.6f",
+        p->instr_call, s->buckets_total, s->buckets_cpu, s->buckets_gpu,
+        s->gpu_fallbacks, s->expert_mm_cpu, s->expert_mm_gpu,
+        s->expert_mm, s->expert_swiglu, s->expert_pack, s->expert_sum);
+    pf_instr_hist(p, "HIST", -1, s->bucket_hist, s->bucket_tokens);
+    {
+        char buf[512];
+        int pos = snprintf(buf, sizeof buf, "PF_HIST_TIME call=%d",
+                           p->instr_call);
+        for (int i = 0; i < DSV4_PF_HIST_BINS && pos < (int)sizeof buf; i++)
+            pos += snprintf(buf + pos, sizeof buf - (size_t)pos,
+                            " s%d=%.6f", i, s->bucket_s[i]);
+        for (int i = 0; i < DSV4_PF_HIST_BINS && pos < (int)sizeof buf; i++)
+            pos += snprintf(buf + pos, sizeof buf - (size_t)pos,
+                            " m%d=%.6f", i, s->bucket_mm_s[i]);
+        pf_instr_emit(p, "%s", buf);
+    }
+    pf_instr_emit(p,
+        "PF_IO call=%d groups=%d hits=%llu misses=%llu bytes=%llu reads=%llu "
+        "read_sum_s=%.6f read_avg_ms=%.6f read_max_ms=%.6f busy_pct=%.2f "
+        "busy_union_pct=%.2f union_gbs=%.3f slots=%d readers=%d "
+        "begin_s=%.6f wait_s=%.6f end_s=%.6f",
+        p->instr_call, s->io_groups,
+        (unsigned long long)s->e_hits, (unsigned long long)s->e_misses,
+        (unsigned long long)s->e_bytes, (unsigned long long)s->io_read_n,
+        s->io_read_s, read_avg_ms, 1000.0 * s->io_read_max_s, read_busy,
+        read_busy_union, union_gbs, s->cache_slots, s->cache_readers,
+        s->io_begin_s, s->io_wait_s, s->io_end_s);
+    {
+        char buf[512];
+        int pos = snprintf(buf, sizeof buf, "PF_LAT call=%d", p->instr_call);
+        for (int i = 0; i < DSV4_PF_HIST_BINS && pos < (int)sizeof buf; i++)
+            pos += snprintf(buf + pos, sizeof buf - (size_t)pos,
+                            " n%d=%llu", i,
+                            (unsigned long long)s->read_lat_n[i]);
+        for (int i = 0; i < DSV4_PF_HIST_BINS && pos < (int)sizeof buf; i++)
+            pos += snprintf(buf + pos, sizeof buf - (size_t)pos,
+                            " s%d=%.6f", i, s->read_lat_s[i]);
+        pf_instr_emit(p, "%s", buf);
+    }
+
+    for (int k = 0; k < DSV4_VK_KIND_COUNT; k++) {
+        const DSV4PrefillVkStats *v = &p->vk_stats[k];
+        pf_instr_emit(p,
+            "PF_VK call=%d kind=%s calls=%llu tiles=%llu xbytes=%llu "
+            "ybytes=%llu desc_s=%.6f copy_in_s=%.6f record_s=%.6f "
+            "submit_s=%.6f copy_out_s=%.6f total_s=%.6f",
+            p->instr_call, k == DSV4_VK_KIND_DENSE ? "dense" : "expert",
+            (unsigned long long)v->calls, (unsigned long long)v->tiles,
+            (unsigned long long)v->xbytes, (unsigned long long)v->ybytes,
+            v->desc_s, v->copy_in_s, v->record_s, v->submit_s,
+            v->copy_out_s, v->total_s);
+    }
+}
+

@@ -4,9 +4,29 @@
 #define DSV4_PREFILL_INT_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "dsv4.h"
 #include "dsv4_prefill.h"
+#include "dsv4_prefill_vk.h"
+
+/* Instrumentation: bucket sizes are token requests per distinct expert. */
+#define DSV4_PF_HIST_BINS 8
+
+typedef struct {
+    int experts;            /* distinct experts in this layer               */
+    int requests;           /* n * topk, duplicates included                */
+    int buckets_cpu, buckets_gpu, gpu_fallbacks;
+    int hist[DSV4_PF_HIST_BINS];
+    int hist_tokens[DSV4_PF_HIST_BINS];
+    double cpu_mm, gpu_mm;  /* expert matmul time by path                    */
+    double total_s;         /* whole layer                                   */
+    double attn_s, moe_s, gate_s, shared_s, hc_s, io_s;
+    double union_s;         /* begin + compute + waits + end                 */
+    double begin_s, wait_s, end_s, compute_s;
+    uint64_t bytes;
+    DSV4PrefillVkStats vk[DSV4_VK_KIND_COUNT];
+} DSV4PrefillLayerInstr;
 
 /* Fine-grained accounting for one dsv4_prefill_range call. The public profile
  * only knows broad buckets, which cannot tell a kernel problem from a
@@ -27,6 +47,22 @@ typedef struct {
 
     uint64_t e_hits, e_misses, e_bytes, trunk_bytes;
     int have_estats;
+
+    /* Instrumentation. The histograms are filled from the routed-expert
+     * buckets, not from the routing table, so they describe what actually ran. */
+    int buckets_total, buckets_cpu, buckets_gpu, gpu_fallbacks;
+    int bucket_hist[DSV4_PF_HIST_BINS];
+    int bucket_tokens[DSV4_PF_HIST_BINS];
+    double bucket_s[DSV4_PF_HIST_BINS];      /* whole bucket wall time      */
+    double bucket_mm_s[DSV4_PF_HIST_BINS];   /* matmul part of that time    */
+    double expert_mm_cpu, expert_mm_gpu;
+    int io_groups;
+    double io_begin_s, io_wait_s, io_end_s;
+    uint64_t io_read_n;
+    double io_read_s, io_read_max_s;
+    uint64_t read_lat_n[DSV4_PF_HIST_BINS];
+    double read_lat_s[DSV4_PF_HIST_BINS];
+    int cache_slots, cache_readers;
 } DSV4PrefillStats;
 
 /* One matrix over `n` token rows: the batched-matmul seam. It uses the Vulkan
@@ -120,7 +156,21 @@ struct DSV4Prefill {
     double t_io, t_trunk, t_bind, t_hc;
 
     DSV4PrefillStats st;   /* per-call sub-stage accounting */
+
+    /* Deep instrumentation, opt-in with DSV4_PREFILL_INSTRUMENT. */
+    int          instr;        /* 0 off, 1 summary, 2 summary + per layer */
+    int          instr_call;   /* 1-based prefill call counter            */
+    int          cur_layer;    /* layer being filled by the union         */
+    const char  *instr_file;
+    FILE        *instr_fp;
+    DSV4PrefillVkStats vk_stats[DSV4_VK_KIND_COUNT];
+    DSV4PrefillLayerInstr linstr[DSV4_MAX_LAYERS];
 };
+
+/* Reporting hooks (dsv4_prefill_report.c). */
+void dsv4_prefill_instr_init(DSV4Prefill *p);
+void dsv4_prefill_instr_layer(DSV4Prefill *p, int L);
+void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0);
 
 /* Cancellation polling. The caller can distinguish a stop before any layer
  * touched model state from one that left partially written KV/compressor rows;

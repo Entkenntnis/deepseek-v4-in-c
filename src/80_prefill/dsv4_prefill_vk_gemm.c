@@ -2,6 +2,7 @@
 /* Synchronous 128-token GEMM tiles for FP8, BF16 and FP4 weights. */
 #include <string.h>
 
+#include "dsv4_prof.h"
 #include "dsv4_prefill_vk_int.h"
 
 static size_t qmat_wbytes(const DSV4QMat *m)
@@ -24,9 +25,11 @@ static size_t qmat_sbytes(const DSV4QMat *m)
     return 0;
 }
 
-static int run_tile(DSV4PrefillVk *v, VkPipeline pipe, uint32_t M, uint32_t K,
-                    uint32_t N, uint32_t w_off, uint32_t s_off)
+static int run_tile(DSV4PrefillVk *v, int kind, VkPipeline pipe,
+                    uint32_t M, uint32_t K, uint32_t N,
+                    uint32_t w_off, uint32_t s_off)
 {
+    double t0 = dsv4_now_s();
     if (vkResetCommandBuffer(v->cmd, 0) != VK_SUCCESS) return -1;
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof bi);
@@ -41,7 +44,9 @@ static int run_tile(DSV4PrefillVk *v, VkPipeline pipe, uint32_t M, uint32_t K,
                        sizeof pc, &pc);
     vkCmdDispatch(v->cmd, (M + 63u) / 64u, (N + 15u) / 16u, 1);
     if (vkEndCommandBuffer(v->cmd) != VK_SUCCESS) return -1;
+    v->st[kind].record_s += dsv4_now_s() - t0;
 
+    t0 = dsv4_now_s();
     if (vkResetFences(v->dev, 1, &v->fence) != VK_SUCCESS) return -1;
     VkSubmitInfo si;
     memset(&si, 0, sizeof si);
@@ -49,18 +54,24 @@ static int run_tile(DSV4PrefillVk *v, VkPipeline pipe, uint32_t M, uint32_t K,
     si.commandBufferCount = 1;
     si.pCommandBuffers = &v->cmd;
     if (vkQueueSubmit(v->queue, 1, &si, v->fence) != VK_SUCCESS) return -1;
-    return vkWaitForFences(v->dev, 1, &v->fence, VK_TRUE, UINT64_MAX)
-         == VK_SUCCESS ? 0 : -1;
+    const int rc = vkWaitForFences(v->dev, 1, &v->fence, VK_TRUE,
+                                   UINT64_MAX);
+    v->st[kind].submit_s += dsv4_now_s() - t0;
+    return rc == VK_SUCCESS ? 0 : -1;
 }
 
 int dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
-                         const DSV4QMat *m, int n)
+                         const DSV4QMat *m, int n, int kind)
 {
     if (!v || v->dead || !m || !x || !y || n <= 0) return -1;
+    if (kind < 0 || kind >= DSV4_VK_KIND_COUNT) return -1;
     if (m->rows <= 0 || m->cols <= 0) return -1;
     if ((m->rows & 63) || (m->cols & 127)) return -1;
     if (m->wdt != DSV4_WFP8 && m->wdt != DSV4_WBF16
         && m->wdt != DSV4_WFP4) return -1;
+    const double tall0 = dsv4_now_s();
+    DSV4PrefillVkStats *st = &v->st[kind];
+    st->calls++;
 
     const size_t wb = qmat_wbytes(m);
     if (!wb) return -1;
@@ -101,7 +112,9 @@ int dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
         wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         wr[i].pBufferInfo = &bi[i];
     }
+    const double td = dsv4_now_s();
     vkUpdateDescriptorSets(v->dev, 4, wr, 0, NULL);
+    st->desc_s += dsv4_now_s() - td;
 
     const uint32_t M = (uint32_t)m->rows, K = (uint32_t)m->cols;
     for (int n0 = 0; n0 < n; n0 += (int)DSV4_VK_TILE_N) {
@@ -110,12 +123,27 @@ int dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
         const size_t xb = (size_t)t * K * sizeof(float);
         const size_t yb = (size_t)t * M * sizeof(float);
         if (xb > v->xbytes || yb > v->ybytes) return -1;
+        const double tx = dsv4_now_s();
         memcpy(v->xmap, x + (size_t)n0 * K, xb);
-        if (run_tile(v, pipe, M, K, t, w_off, s_off) != 0) {
+        st->copy_in_s += dsv4_now_s() - tx;
+        st->xbytes += xb;
+        if (run_tile(v, kind, pipe, M, K, t, w_off, s_off) != 0) {
             v->dead = 1;
             return -1;
         }
+        st->tiles++;
+        const double ty = dsv4_now_s();
         memcpy(y + (size_t)n0 * M, v->ymap, yb);
+        st->copy_out_s += dsv4_now_s() - ty;
+        st->ybytes += yb;
     }
+    st->total_s += dsv4_now_s() - tall0;
     return 0;
+}
+
+void dsv4_prefill_vk_stats(const DSV4PrefillVk *v,
+                           DSV4PrefillVkStats out[DSV4_VK_KIND_COUNT])
+{
+    for (int i = 0; i < DSV4_VK_KIND_COUNT; i++)
+        out[i] = v ? v->st[i] : (DSV4PrefillVkStats){ 0 };
 }
