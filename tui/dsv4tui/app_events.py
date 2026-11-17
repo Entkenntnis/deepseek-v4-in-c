@@ -140,11 +140,19 @@ class EventMixin:
             self.dirty = True
 
         elif name == "done":
+            stop = ev.get("stop")
+            generated = int(ev.get("generated") or 0)
+            # No token was emitted, so a cancel rolled the engine back to the
+            # previous turn. The message stays in the transcript as a record,
+            # but it is not in the model context. A reset event (the
+            # no-snapshot fallback) has already taken the whole transcript.
+            dropped = (stop == "cancel" and generated == 0
+                       and self.current_msg is not None)
             self.generating = False
             self.cancel_pending = False
             self.cancel_on_start = False
             self.prefill_active = False
-            self.status = "ready" if ev.get("stop") != "error" else "failed"
+            self.status = "ready" if stop != "error" else "failed"
             self.last_done = ev
             self.context_used = int(ev.get("context_used") or self.context_used)
             if self.current_msg is not None:
@@ -153,11 +161,15 @@ class EventMixin:
                     "seconds": ev.get("seconds"),
                     "s_per_token": ev.get("s_per_token"),
                     "ttft": ev.get("ttft"),
-                    "stop": ev.get("stop"),
+                    "stop": stop,
                 }
                 if not self.current_msg.text.strip():
-                    self.current_msg.text = "(no tokens)"
+                    self.current_msg.text = ("(cancelled)" if dropped
+                                             else "(no tokens)")
+            if dropped:
+                self.add_system("turn cancelled; context unchanged")
             self.current_msg = None
+            self.current_user_msg = None
             self.dirty = True
 
         elif name == "reset":
@@ -167,6 +179,7 @@ class EventMixin:
             self.status = "ready"
             self.context_used = 0
             self.current_msg = None
+            self.current_user_msg = None
             self.decode_spt.clear()
             self.prefill_active = False
             self.prefill_progress = {}
@@ -175,6 +188,12 @@ class EventMixin:
             self.prefill_elapsed = 0.0
             self.prefill_rate = 0.0
             self.prefill_sample_ts = 0.0
+            if ev.get("reason") == "cancel":
+                # The no-snapshot fallback: a partially written block cannot
+                # be resumed, so the engine dropped the whole context. The
+                # transcript no longer matches it; start a new one.
+                self.messages.clear()
+                self.add_system("prefill cancelled; context reset")
             self.stats_force = True
             self.dirty = True
 
@@ -188,6 +207,7 @@ class EventMixin:
                 except ValueError:
                     pass
             self.current_msg = None
+            self.current_user_msg = None
             self.generating = False
             self.cancel_pending = False
             self.cancel_on_start = False

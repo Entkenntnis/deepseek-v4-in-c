@@ -7,6 +7,31 @@
 #include "dsv4_serve_int.h"
 #include "dsv4_trace.h"
 
+/* Stop a turn before its first token. With a snapshot the layer state and the
+ * token array roll back to the end of the previous turn, so the conversation
+ * survives and only this new message is dropped. Without one, the partial
+ * prefill cannot be resumed and the whole context has to go. */
+static void cancel_prefill_turn(Engine *e, int rollback, int start_pos,
+                                int prompt_tokens, double t0, double tp0)
+{
+    e->prefill_s = dsv4_now_s() - tp0;
+    e->prefill_tokens = 0;   /* nothing from this turn is in the context */
+    if (rollback) {
+        dsv4_state_snapshot_restore(e->snap);
+        e->n_ids = start_pos;
+        e->pending_forward = 0;
+    } else {
+        if (dsv4_engine_reset_context(e) != 0) {
+            dsv4_emit_error("prefill cancelled; context reset failed");
+            dsv4_cancel = 0;
+            return;
+        }
+        dsv4_emit_reset(e, "cancel");
+    }
+    dsv4_emit_done(e, prompt_tokens, 0, dsv4_now_s() - t0, 0.0, "cancel");
+    dsv4_cancel = 0;
+}
+
 void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
                           int emit_layers)
 {
@@ -86,6 +111,11 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
     dsv4_emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat",
                     use_batched ? n_added : 0);
 
+    /* Save the old context before the first layer can touch it. The snapshot is
+     * model-sized, not prompt-sized, and is overwritten every turn. */
+    const int snap_ok =
+        e->snap && dsv4_state_snapshot_save(e->snap) == 0;
+
     TopK top;
     memset(&top, 0, sizeof top);
 
@@ -103,18 +133,33 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
          * instead of turning the longest prompt ever seen into a permanent
          * high-water mark for the resident engine. */
         dsv4_prefill_release(e->pf);
+        if (rc == DSV4_PREFILL_CANCELLED || rc == DSV4_PREFILL_ABORTED) {
+            cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+            return;
+        }
         if (rc != 0) {
             dsv4_emit_error("block prefill failed at position %d; reset the "
                             "context before continuing", start_pos);
             return;
         }
     } else {
-        for (int i = start_pos; i < e->n_ids; i++)
+        for (int i = start_pos; i < e->n_ids; i++) {
+            if (dsv4_cancel) {
+                cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+                return;
+            }
             if (dsv4_forward(e, e->ids[i], i, 0, emit_layers, "prompt",
                              dsv4_now_s() - t0, &top) != 0) return;
+        }
     }
     e->prefill_s = dsv4_now_s() - tp0;
     e->prefill_tokens = n_added;
+    /* No token has been emitted yet, so a stop here still drops this turn and
+     * restores the context from before it. */
+    if (dsv4_cancel) {
+        cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+        return;
+    }
     if (use_batched) {
         const DSV4PrefillProgress hp = {
             .stage = "head",
@@ -128,6 +173,10 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
         dsv4_emit_prefill_progress(e, &hp);
     }
     dsv4_head_from_h(e, &top);
+    if (dsv4_cancel) {
+        cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+        return;
+    }
 
     int generated = 0;
     double ttft = 0.0;
@@ -136,6 +185,13 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
 
     while (generated < ngen) {
         if (dsv4_cancel) {
+            /* Before the first token there is nothing to keep from this turn,
+             * so a stop rolls the context back rather than leaving a prompt
+             * with no answer in it. */
+            if (generated == 0) {
+                cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+                return;
+            }
             stop = "cancel";
             break;
         }

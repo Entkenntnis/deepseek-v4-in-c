@@ -18,6 +18,7 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const int inter = c->moe_inter * c->n_shared;
     const int topk = c->topk;
 
+    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
     const double tg = dsv4_now_s();
     if (dsv4_prefill_pm_stats(p, p->gate, p->x1, &w->moe.gate, n,
                               &p->st.gate_mm, &p->st.f_gate)) return -1;
@@ -58,9 +59,12 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                               &p->st.shared_mm, &p->st.f_shared)) return -1;
     p->t_shared += dsv4_now_s() - tsh;
 
+    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
+
     /* ROUTED EXPERTS: layer-level union and expert-major. begin()/end() are
      * required by dsv4_prefill_init(), so this is the only path. */
-    if (dsv4_prefill_moe_union(p, L, n)) return -1;
+    const int urc = dsv4_prefill_moe_union(p, L, n);
+    if (urc) return urc;
 
     {
         const double ts = dsv4_now_s();

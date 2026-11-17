@@ -30,6 +30,7 @@ typedef struct {
     DSV4LayerState  *lst;
     DSV4ExpertSrc    src;      /* one source, shared by decode and prefill */
     DSV4Prefill     *pf;       /* NULL when block prefill could not initialise */
+    DSV4StateSnapshot *snap;   /* rollback point for an in-flight prefill */
 
     float           *cs_d, *sn_d, *cs_c, *sn_c;
     int              maxpos;
@@ -69,7 +70,8 @@ typedef struct {
     int    n;
 } TopK;
 
-/* SIGUSR1 sets this; the decode loop stops at the next token boundary. */
+/* SIGUSR1 sets this. Prefill polls it between layers and sequential-stage
+ * tokens; decode stops at the next token boundary. */
 extern volatile sig_atomic_t dsv4_cancel;
 
 /* ---- util ---- */
@@ -96,6 +98,7 @@ void dsv4_emit_token(const Engine *e, int32_t id, int index, int pos,
                      double t_turn, double ttft, const TopK *top);
 void dsv4_emit_done(const Engine *e, int prompt_tokens, int generated,
                     double seconds, double ttft, const char *stop);
+void dsv4_emit_reset(const Engine *e, const char *reason);
 void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p);
 
 /* ---- engine ---- */

@@ -67,6 +67,7 @@ struct DSV4Prefill {
     int              cap;          /* allocated token rows in the block buffers */
     int              scratch_cap;  /* allocated DSV4PrefillTok entries */
     int              n;            /* tokens in the block being run */
+    int              state_dirty;  /* a layer may have written KV/compressor state */
 
     float *H;          /* [B][hc*hidden] */
     float *x1;         /* [B][hidden] */
@@ -120,6 +121,19 @@ struct DSV4Prefill {
 
     DSV4PrefillStats st;   /* per-call sub-stage accounting */
 };
+
+/* Cancellation polling. The caller can distinguish a stop before any layer
+ * touched model state from one that left partially written KV/compressor rows;
+ * only the latter needs a context reset. */
+static inline int dsv4_prefill_cancelled(const DSV4Prefill *p)
+{
+    return p->opt.is_cancelled && p->opt.is_cancelled(p->opt.cancel_ctx);
+}
+
+static inline int dsv4_prefill_cancel_code(const DSV4Prefill *p)
+{
+    return p->state_dirty ? DSV4_PREFILL_ABORTED : DSV4_PREFILL_CANCELLED;
+}
 
 /* Batched-matmul seam and its timed wrappers. */
 int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,

@@ -22,6 +22,7 @@ class AppBase:
 
         self.messages: list[Message] = []
         self.current_msg: Optional[Message] = None
+        self.current_user_msg: Optional[Message] = None
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
         self.ready: dict = {}

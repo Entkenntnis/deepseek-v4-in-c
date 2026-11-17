@@ -102,6 +102,18 @@ void dsv4_emit_token(const Engine *e, int32_t id, int index, int pos,
     fflush(stdout);
 }
 
+void dsv4_emit_reset(const Engine *e, const char *reason)
+{
+    printf("{\"event\":\"reset\",\"reason\":\"%s\",", reason);
+    dsv4_write_sys_full(e);
+    putchar(',');
+    dsv4_write_cache(e);
+    putchar(',');
+    dsv4_write_trunk(e);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}
+
 void dsv4_emit_done(const Engine *e, int prompt_tokens, int generated,
                     double seconds, double ttft, const char *stop)
 {

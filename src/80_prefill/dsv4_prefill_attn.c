@@ -60,6 +60,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
     int idx_batched = 0;
 
     for (int t = 0; t < n; t++) {
+        if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
         const int pos = pos0 + t;
         float *qt = p->q + (size_t)t * (size_t)H * hd;
         double ts = dsv4_now_s();
@@ -177,6 +178,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
         p->st.attn_deroep += dsv4_now_s() - ts;
     }
 
+    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
     if (dsv4_prefill_oproj(p, w, n)) return -1;
 
     p->t_attn += dsv4_now_s() - t0;

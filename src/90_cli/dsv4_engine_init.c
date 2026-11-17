@@ -16,6 +16,12 @@ static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
     dsv4_emit_prefill_progress((Engine *)ctx, p);
 }
 
+static int prefill_cancel_cb(void *ctx)
+{
+    (void)ctx;
+    return dsv4_cancel != 0;
+}
+
 int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                      const char *tokfile, double budget_gb, int budget_auto,
                      int ctx, int gen_default, int think_default,
@@ -135,10 +141,20 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     for (int L = 0; L < e->c.n_layers; L++)
         if (dsv4_state_init(&e->lst[L], &e->c, L, e->maxpos) != 0) return -1;
 
+    /* The context is a few tens of MB, not a prompt-sized buffer: keeping the
+     * rollback point resident lets a cancelled prefill restore it instead of
+     * discarding the conversation. If it cannot be allocated, cancellation
+     * still works, but falls back to a context reset. */
+    e->snap = dsv4_state_snapshot_new(&e->c, e->lst);
+    if (!e->snap)
+        fprintf(stderr, "serve: cannot allocate prefill rollback snapshot; "
+                        "a cancelled prefill will reset the context\n");
+
     {
         const DSV4PrefillOpts po = {
             .max_pos = e->maxpos,
             .on_progress = prefill_progress_cb, .progress_ctx = e,
+            .is_cancelled = prefill_cancel_cb, .cancel_ctx = NULL,
         };
         if (dsv4_prefill_init(&e->pf, &e->c, &e->tr, e->lst, &e->src,
                               &e->mb.w, &po) != 0) {

@@ -9,6 +9,7 @@
 void dsv4_engine_free(Engine *e)
 {
     dsv4_prefill_free(e->pf);
+    dsv4_state_snapshot_free(e->snap);
     for (int L = 0; L < e->c.n_layers && e->lst; L++) dsv4_state_free(&e->lst[L]);
     free(e->lst);
     free(e->h); free(e->xh); free(e->logits); free(e->ids);

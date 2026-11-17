@@ -43,6 +43,109 @@ void dsv4_state_free(DSV4LayerState *st)
     memset(st, 0, sizeof *st);
 }
 
+struct DSV4StateSnapshot {
+    const DSV4Cfg  *c;
+    DSV4LayerState *lst;
+    float          *buf;
+    size_t          floats;
+    int            *ncomp;
+};
+
+/* Size of the compressor's persistent working set for one layer. Mirrors
+ * dsv4_state_init(): [coff*ratio][coff*head_dim], and a layer without a
+ * compressor has none. */
+static size_t comp_state_floats(const DSV4Cfg *c, int layer)
+{
+    int ratio = dsv4_compress_ratio(c, layer);
+    if (ratio < 0) ratio = 0;
+    if (ratio == 0) return 0;
+    const int coff = (ratio == 4) ? 2 : 1;
+    return (size_t)coff * (size_t)coff * (size_t)ratio *
+           (size_t)c->head_dim;
+}
+
+DSV4StateSnapshot *dsv4_state_snapshot_new(const DSV4Cfg *c,
+                                           DSV4LayerState *lst)
+{
+    if (!c || !lst || c->n_layers <= 0 || c->sliding_window <= 0 ||
+        c->head_dim <= 0)
+        return NULL;
+
+    DSV4StateSnapshot *s = (DSV4StateSnapshot *)calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->c = c;
+    s->lst = lst;
+    s->floats = (size_t)c->n_layers * (size_t)c->sliding_window *
+                (size_t)c->head_dim;
+    for (int L = 0; L < c->n_layers; L++)
+        s->floats += 2 * comp_state_floats(c, L);
+
+    s->buf = (float *)malloc(s->floats * sizeof(float));
+    s->ncomp = (int *)malloc((size_t)c->n_layers * sizeof(int));
+    if (!s->buf || !s->ncomp) {
+        dsv4_state_snapshot_free(s);
+        return NULL;
+    }
+    return s;
+}
+
+void dsv4_state_snapshot_free(DSV4StateSnapshot *s)
+{
+    if (!s) return;
+    free(s->buf);
+    free(s->ncomp);
+    free(s);
+}
+
+int dsv4_state_snapshot_save(DSV4StateSnapshot *s)
+{
+    if (!s) return -1;
+    const DSV4Cfg *c = s->c;
+    const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
+    float *q = s->buf;
+
+    for (int L = 0; L < c->n_layers; L++) {
+        DSV4LayerState *st = &s->lst[L];
+        if (!st->kv_cache) return -1;
+        memcpy(q, st->kv_cache, wn * sizeof(float));
+        q += wn;
+
+        const size_t cn = comp_state_floats(c, L);
+        if (cn) {
+            if (!st->comp_kv || !st->comp_score) return -1;
+            memcpy(q, st->comp_kv, cn * sizeof(float));
+            q += cn;
+            memcpy(q, st->comp_score, cn * sizeof(float));
+            q += cn;
+        }
+        s->ncomp[L] = st->n_compressed;
+    }
+    return 0;
+}
+
+void dsv4_state_snapshot_restore(DSV4StateSnapshot *s)
+{
+    if (!s) return;
+    const DSV4Cfg *c = s->c;
+    const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
+    const float *q = s->buf;
+
+    for (int L = 0; L < c->n_layers; L++) {
+        DSV4LayerState *st = &s->lst[L];
+        memcpy(st->kv_cache, q, wn * sizeof(float));
+        q += wn;
+
+        const size_t cn = comp_state_floats(c, L);
+        if (cn) {
+            memcpy(st->comp_kv, q, cn * sizeof(float));
+            q += cn;
+            memcpy(st->comp_score, q, cn * sizeof(float));
+            q += cn;
+        }
+        st->n_compressed = s->ncomp[L];
+    }
+}
+
 int dsv4_scratch_init(DSV4Scratch *s, const DSV4Cfg *c, int max_pos)
 {
     memset(s, 0, sizeof *s);

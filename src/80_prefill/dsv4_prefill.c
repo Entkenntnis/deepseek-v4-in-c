@@ -38,7 +38,8 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
     }
     p->t_hc += dsv4_now_s() - thc;
 
-    if (dsv4_prefill_attention(p, L, w, n, pos0, cs, sn)) return -1;
+    const int arc = dsv4_prefill_attention(p, L, w, n, pos0, cs, sn);
+    if (arc) return arc;
 
     const double thc2 = dsv4_now_s();
     for (int t = 0; t < n; t++) {
@@ -59,7 +60,8 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
     }
     p->t_hc += dsv4_now_s() - thc2;
 
-    if (dsv4_prefill_moe(p, L, w, n, ids)) return -1;
+    const int mrc = dsv4_prefill_moe(p, L, w, n, ids);
+    if (mrc) return mrc;
     return 0;
 }
 
@@ -69,6 +71,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                        float *h_out)
 {
     if (!p || !ids || n <= 0 || !h_out || pos0 < 0) return -1;
+    p->state_dirty = 0;
+    if (dsv4_prefill_cancelled(p)) return DSV4_PREFILL_CANCELLED;
     if (dsv4_prefill_reserve(p, n) != 0) return -1;
     p->n = n;
     const DSV4Cfg *c = p->c;
@@ -97,6 +101,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
      * weights and routed experts resident for the entire prompt. */
     const double te = dsv4_now_s();
     for (int t = 0; t < n; t++) {
+        if ((t & 63) == 0 && dsv4_prefill_cancelled(p))
+            return dsv4_prefill_cancel_code(p);
         dsv4_embed_row(p->xh, p->mw->embed, p->mw->wdt, ids[t], d);
         for (int j = 0; j < hc; j++)
             memcpy(p->H + (size_t)t * hcd + (size_t)j * d, p->xh,
@@ -105,6 +111,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     p->st.embed += dsv4_now_s() - te;
 
     for (int L = 0; L < c->n_layers; L++) {
+        if (dsv4_prefill_cancelled(p))
+            return dsv4_prefill_cancel_code(p);
         DSV4LayerW lw;
         const double tb = dsv4_now_s();
         const double io0 = p->tr->load_seconds;
@@ -126,7 +134,10 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         const double frac = (double)L / (double)c->n_layers;
         dsv4_prefill_progress(p, "layer", L + 1, (int)(frac * (double)n), n,
                               dsv4_now_s() - t0, frac);
-        if (prefill_layer(p, L, &lw, n, pos0, ids, cs, sn)) return -1;
+        /* From here on layer state can change; a stop now needs a reset. */
+        p->state_dirty = 1;
+        const int lrc = prefill_layer(p, L, &lw, n, pos0, ids, cs, sn);
+        if (lrc) return lrc;
     }
 
     dsv4_prefill_progress(p, "done", c->n_layers, n, n, dsv4_now_s() - t0, 1.0);

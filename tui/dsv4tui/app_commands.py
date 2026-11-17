@@ -32,7 +32,8 @@ class CommandMixin:
             self.add_system("a turn is already generating")
             return
 
-        self.messages.append(Message("user", text))
+        self.current_user_msg = Message("user", text)
+        self.messages.append(self.current_user_msg)
         self.current_msg = Message("assistant", "")
         self.messages.append(self.current_msg)
         self.decoder.reset()
@@ -51,7 +52,12 @@ class CommandMixin:
         self.dirty = True
 
     def cancel(self) -> None:
-        """Stop at the next token; the turn stays in the model context."""
+        """Stop at the next safe point.
+
+        Decode keeps the turn in the model context. A prefill stop rolls the
+        context back to the previous turn; the message stays in the transcript
+        but is not sent to the model.
+        """
         if not self.generating or self.cancel_pending:
             return
         if self.status != "generating":
@@ -89,6 +95,7 @@ class CommandMixin:
                 self.backend.send({"cmd": "reset"})
             self.messages.clear()
             self.current_msg = None
+            self.current_user_msg = None
             self.generating = False
             self.status = "ready"
             self.context_used = 0

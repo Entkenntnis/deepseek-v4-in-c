@@ -119,7 +119,11 @@ class RealBackend:
             return False
 
     def cancel(self) -> bool:
-        """Ask the engine to stop at the next token (SIGUSR1 in dsv4_serve)."""
+        """Ask the engine to stop (SIGUSR1 in dsv4-serve).
+
+        Decode stops after the current token; prefill stops at its next layer or
+        token checkpoint. A mid-prefill stop restores the previous context.
+        """
         if not self.proc or self.proc.poll() is not None:
             return False
         try:

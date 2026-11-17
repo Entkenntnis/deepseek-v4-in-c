@@ -12,6 +12,7 @@
 
 int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
 {
+    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
     const DSV4Cfg *c = p->c;
     const int hc = c->hc_mult, d = c->hidden;
     const int H = c->n_heads, hd = c->head_dim;

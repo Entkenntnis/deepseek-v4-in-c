@@ -79,6 +79,23 @@ int  dsv4_state_init(DSV4LayerState *st, const DSV4Cfg *c, int layer,
                      int max_pos);
 void dsv4_state_free(DSV4LayerState *st);
 
+/* Rollback point for an in-flight prefill.
+ *
+ * Only the mutable part of each layer's context is saved: the sliding-window
+ * KV ring and the compressor's working arrays. Compressed KV rows are
+ * append-only and n_compressed bounds every read, so restoring n_compressed
+ * hides rows a cancelled block appended without copying those rows. The size
+ * is fixed by the model (window + compressor geometry), not by the prompt, so
+ * one snapshot can be saved again before every turn and restored on a
+ * cancellation. */
+typedef struct DSV4StateSnapshot DSV4StateSnapshot;
+
+DSV4StateSnapshot *dsv4_state_snapshot_new(const DSV4Cfg *c,
+                                           DSV4LayerState *lst);
+void dsv4_state_snapshot_free(DSV4StateSnapshot *s);
+int  dsv4_state_snapshot_save(DSV4StateSnapshot *s);
+void dsv4_state_snapshot_restore(DSV4StateSnapshot *s);
+
 /* `h` is [hc_mult][hidden] in and out. cs/sn are the layer's RoPE table; a
  * compressed layer takes the compress table, ratio 0 the plain one. */
 void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,

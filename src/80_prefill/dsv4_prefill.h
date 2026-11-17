@@ -61,10 +61,16 @@ typedef struct {
 typedef void (*DSV4PrefillProgressFn)(void *ctx,
                                       const DSV4PrefillProgress *p);
 
+/* Polled at layer and token boundaries. Returning nonzero asks the block to
+ * stop; the callback must be cheap and must not touch the prefill state. */
+typedef int (*DSV4PrefillCancelFn)(void *ctx);
+
 typedef struct {
     int max_pos;    /* same bound the decode scratch/state were built with */
     DSV4PrefillProgressFn on_progress; /* optional; NULL in one-shot use */
     void *progress_ctx;
+    DSV4PrefillCancelFn is_cancelled;  /* optional; NULL never cancels */
+    void *cancel_ctx;
 } DSV4PrefillOpts;
 
 typedef struct DSV4Prefill DSV4Prefill;
@@ -85,9 +91,21 @@ int  dsv4_prefill_reserve(DSV4Prefill *p, int n_tokens);
  * into a permanent memory high-water mark. */
 void dsv4_prefill_release(DSV4Prefill *p);
 
+/* Return codes for dsv4_prefill_range(), in addition to -1 for an error. */
+#define DSV4_PREFILL_CANCELLED 1   /* stopped before model state was changed */
+#define DSV4_PREFILL_ABORTED   2   /* stopped after KV/compressor state changed */
+
 /* Run tokens ids[0..n-1] through every layer as one block, at absolute
  * positions pos0..pos0+n-1. On return `h_out` is the last token's residual
  * stream, ready for the output head.
+ *
+ * The optional is_cancelled callback is polled between layers and between the
+ * tokens of the sequential stages. A cancelled block is not a shorter block:
+ * the layer-major schedule means a mid-block stop can leave some layers' KV and
+ * compressor rows written and others untouched. DSV4_PREFILL_CANCELLED means
+ * no model state was touched (the caller can drop the new tokens and keep its
+ * old context); DSV4_PREFILL_ABORTED means it was, and the caller must restore
+ * a snapshot or reset the model state before reusing the engine.
  *
  * `pos0` is not cosmetic. A resident engine (dsv4-serve) appends a new turn to
  * an existing KV cache, so the prefill must start where the previous turn

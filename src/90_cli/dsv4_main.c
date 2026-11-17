@@ -71,16 +71,8 @@ static void handle_command(Engine *e, jval *v)
     } else if (!strcmp(cmd, "reset")) {
         if (dsv4_engine_reset_context(e) != 0)
             dsv4_emit_error("context reset failed");
-        else {
-            printf("{\"event\":\"reset\",");
-            dsv4_write_sys_full(e);
-            putchar(',');
-            dsv4_write_cache(e);
-            putchar(',');
-            dsv4_write_trunk(e);
-            fputs("}\n", stdout);
-            fflush(stdout);
-        }
+        else
+            dsv4_emit_reset(e, "user");
     } else if (!strcmp(cmd, "system")) {
         const char *text = jstr(v, "text");
         free(e->system_prompt);

@@ -49,6 +49,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         }
 
     for (int base = 0; base < nord; base += DSV4_MAX_PREFETCH) {
+        if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
         int ng = nord - base;
         if (ng > DSV4_MAX_PREFETCH) ng = DSV4_MAX_PREFETCH;
 
@@ -67,8 +68,14 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
             return -1;
         }
 
+        /* Once a group's reads are in flight, its end() barrier still has to
+         * run. Stop computing buckets, but drain the group before returning:
+         * returning with reads outstanding would race the reset that follows a
+         * cancelled prefill. */
+        int cancelled = 0;
         for (int j = 0; j < ng; j++) {
-            if (!ex[j]) continue;
+            if (dsv4_prefill_cancelled(p)) cancelled = 1;
+            if (cancelled || !ex[j]) continue;
             const int e = p->ex_order[base + j];
             dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
                                        p->ex_tok + p->ex_off[e],
@@ -86,6 +93,8 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
                 p->st.expert_io += td;
                 if (!got) break;
                 if (j < 0 || j >= ng || done[j] || !ex[j]) continue;
+                if (dsv4_prefill_cancelled(p)) cancelled = 1;
+                if (cancelled) continue;
                 const int e = p->ex_order[base + j];
                 dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
                                            p->ex_tok + p->ex_off[e],
@@ -99,6 +108,8 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         td = dsv4_now_s() - t0;
         p->t_io += td;
         p->st.expert_io += td;
+
+        if (cancelled) return dsv4_prefill_cancel_code(p);
 
         for (int j = 0; j < ng; j++) {
             if (done[j]) continue;
@@ -117,8 +128,11 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         }
     }
 
+    if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
+
     const double tsum = dsv4_now_s();
     for (int t = 0; t < n; t++) {
+        if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
         float *o = p->out + (size_t)t * d;
         const float *tw = p->topk_w + (size_t)t * topk;
         for (int i = 0; i < d; i++) o[i] = 0.0f;
