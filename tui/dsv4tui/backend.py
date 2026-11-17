@@ -73,6 +73,10 @@ class RealBackend:
             errors="replace",
             bufsize=1,
             preexec_fn=_disable_core_dumps,
+            # Keep terminal Ctrl-C (SIGINT to the foreground process group)
+            # away from the engine. The TUI handles cancel explicitly through
+            # SIGUSR1; a stray SIGINT would terminate the child instead.
+            start_new_session=True,
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()

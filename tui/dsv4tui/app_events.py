@@ -85,7 +85,12 @@ class EventMixin:
             if not self.current_msg or self.current_msg.role != "assistant":
                 self.current_msg = Message("assistant", "")
                 self.messages.append(self.current_msg)
-            self.cancel_pending = False
+            if self.cancel_on_start:
+                self.cancel_on_start = False
+                self.cancel_pending = False
+                self.cancel()
+            else:
+                self.cancel_pending = False
             self.stats_force = True
             self.dirty = True
 
@@ -137,6 +142,7 @@ class EventMixin:
         elif name == "done":
             self.generating = False
             self.cancel_pending = False
+            self.cancel_on_start = False
             self.prefill_active = False
             self.status = "ready" if ev.get("stop") != "error" else "failed"
             self.last_done = ev
@@ -157,6 +163,7 @@ class EventMixin:
         elif name == "reset":
             self.generating = False
             self.cancel_pending = False
+            self.cancel_on_start = False
             self.status = "ready"
             self.context_used = 0
             self.current_msg = None
@@ -183,6 +190,7 @@ class EventMixin:
             self.current_msg = None
             self.generating = False
             self.cancel_pending = False
+            self.cancel_on_start = False
             self.prefill_active = False
             if self.status not in ("starting",):
                 self.status = "ready" if self.backend_alive else "failed"

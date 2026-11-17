@@ -37,7 +37,7 @@ class LoopMixin:
             except curses.error:
                 continue
             except KeyboardInterrupt:
-                self.running = False
+                self.interrupt()
                 continue
             if ch == curses.KEY_RESIZE:
                 stdscr.erase()

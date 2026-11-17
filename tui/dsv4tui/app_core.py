@@ -47,6 +47,7 @@ class AppBase:
         self.status = "starting"
         self.generating = False
         self.cancel_pending = False
+        self.cancel_on_start = False
         self.cancel_rect: Optional[tuple[int, int, int]] = None
         self.chat_rect: Optional[tuple[int, int, int]] = None
         self.max_scroll = 0

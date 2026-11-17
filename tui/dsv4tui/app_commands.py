@@ -52,7 +52,14 @@ class CommandMixin:
 
     def cancel(self) -> None:
         """Stop at the next token; the turn stays in the model context."""
-        if self.status != "generating" or self.cancel_pending:
+        if not self.generating or self.cancel_pending:
+            return
+        if self.status != "generating":
+            # The generate command is queued but the engine has not emitted
+            # `start` yet. Send the actual cancel from that event instead.
+            self.cancel_on_start = True
+            self.cancel_pending = True
+            self.dirty = True
             return
         if self.backend and self.backend.cancel():
             self.cancel_pending = True

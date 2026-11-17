@@ -50,14 +50,15 @@ class DrawMixin:
     def _draw_footer(self, scr: "curses.window", h: int, w: int) -> None:
         self.cancel_rect = None
         if self.generating:
-            hint = "Mausrad/PgUp/PgDn scroll  ·  Ctrl-C quit  ·  "
+            hint = "Ctrl-C cancel  ·  "
             label = "[cancelling]" if self.cancel_pending else "[cancel]"
             self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
             self._add(scr, h - 2, len(hint), label, w - len(hint) - 1,
                       self.attr("cancel"))
             self.cancel_rect = (h - 2, len(hint), len(label))
         else:
-            hint = "Enter send  ·  /help commands  ·  Mausrad/PgUp/PgDn scroll  ·  Ctrl-C quit"
+            ctrl_c = "Ctrl-C clear input" if self.input else "Ctrl-C quit"
+            hint = f"Enter send  ·  /help commands  ·  {ctrl_c}"
             self._add(scr, h - 2, 0, hint, w - 1, self.attr("dim"))
 
     def _draw_input(self, scr: "curses.window", h: int, w: int) -> None:

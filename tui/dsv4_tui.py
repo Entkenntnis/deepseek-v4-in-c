@@ -10,7 +10,8 @@ Usage:
     python3 tui/dsv4_tui.py --demo   # no model needed
 
 Keys:
-    Enter send, /help for commands, wheel/PgUp/PgDn scroll, Ctrl-C or /exit quits.
+    Enter send, /help for commands.
+    Ctrl-C cancels a running turn, clears the input, or quits.
 """
 from __future__ import annotations
 

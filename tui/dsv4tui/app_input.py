@@ -8,12 +8,23 @@ from typing import Any
 
 
 class InputMixin:
+    def interrupt(self) -> None:
+        """Ctrl-C: cancel the turn, clear the input, or quit."""
+        if self.generating:
+            self.cancel()
+        elif self.input:
+            self.input = ""
+            self.input_cursor = 0
+            self.dirty = True
+        else:
+            self.running = False
+
     def key(self, ch: Any) -> None:
         if isinstance(ch, int):
             self.key_code(ch)
             return
         if ch == "\x03":                        # Ctrl-C
-            self.running = False
+            self.interrupt()
         elif ch == "\x04":                      # Ctrl-D
             if not self.input:
                 self.running = False
@@ -92,10 +103,6 @@ class InputMixin:
             self.input_cursor = 0
         elif code == curses.KEY_END:
             self.input_cursor = len(self.input)
-        elif code == curses.KEY_PPAGE:
-            self.scroll += 12
-        elif code == curses.KEY_NPAGE:
-            self.scroll = max(0, self.scroll - 12)
         elif code == curses.KEY_UP:
             self.scroll += 1
         elif code == curses.KEY_DOWN:
