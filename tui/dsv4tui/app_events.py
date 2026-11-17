@@ -171,9 +171,15 @@ class EventMixin:
                                              else "(no tokens)")
             if dropped:
                 self.add_system("turn cancelled; context unchanged")
+            if self.tool_turn_done(stop):
+                self.dirty = True
+                return
             self.current_msg = None
             self.current_user_msg = None
             self.dirty = True
+
+        elif name == "tool_done":
+            self.tool_event(ev)
 
         elif name == "reset":
             self.generating = False
@@ -183,6 +189,13 @@ class EventMixin:
             self.context_used = 0
             self.current_msg = None
             self.current_user_msg = None
+            # An engine-side reset invalidates any tool round in flight: the
+            # conversation the model saw no longer exists.
+            self.chain_id += 1
+            self.tool_running = False
+            self.tool_cancelled = False
+            self.pending_tool = None
+            self.py.reset()
             self.decode_spt.clear()
             self.prefill_active = False
             self.prefill_progress = {}

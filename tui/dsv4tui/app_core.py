@@ -10,9 +10,11 @@ from typing import Any, Optional
 
 from .backend import EventSink, RealBackend
 from .defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX, DEFAULT_GEN,
-                       DEFAULT_MODEL, DEFAULT_TOK, DEFAULT_TRUNK)
+                       DEFAULT_MODEL, DEFAULT_TOK, DEFAULT_TRUNK,
+                       TOOL_MAX_OUTPUT, TOOL_TIMEOUT_S)
 from .demo import DemoBackend
 from .messages import Message
+from .pytool import PySession
 
 
 class AppBase:
@@ -80,6 +82,19 @@ class AppBase:
 
         self.gen_limit = DEFAULT_GEN
 
+        # Tool calls are opt-in: the model runs arbitrary code, so the user
+        # has to ask for it with /py.
+        self.tool_enabled = False
+        self.py = PySession(timeout=TOOL_TIMEOUT_S,
+                            max_output=TOOL_MAX_OUTPUT)
+        self.system_armed = True      # send the tools preamble when ctx is empty
+        self.chain_id = 0             # one id per user turn, invalidates strays
+        self.chain_round = 0
+        self.tool_running = False
+        self.tool_cancelled = False
+        self.pending_tool: Optional[Message] = None
+        self.pending_code = ""
+
         self.input = ""
         self.input_cursor = 0
         self.scroll = 0
@@ -125,3 +140,4 @@ class AppBase:
     def close(self) -> None:
         if self.backend:
             self.backend.close()
+        self.py.stop()

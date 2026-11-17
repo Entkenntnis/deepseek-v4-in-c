@@ -45,7 +45,12 @@ class ViewMixin:
         if self.demo:
             brand += "  [demo]"
         progress = ""
-        if status == "generating":
+        if self.tool_running:
+            spin = "|/-\\"[self.spinner]
+            progress = (f"  {spin} python  round {self.chain_round}"
+                        f"  ctx {self.context_used}/{self.context_cap}"
+                        f"  Ctrl-C cancel")
+        elif status == "generating":
             n_layers = int((self.ready.get("config") or {}).get("layers") or 0) or 43
             if self.phase == "prompt":
                 phase = f"prefill {self.current_layer}/{n_layers}"
@@ -84,6 +89,7 @@ class ViewMixin:
             color = "error"
         else:
             text = (f"context {self.context_used}/{self.context_cap}  "
-                    f"gen limit {self.gen_limit}")
+                    f"gen limit {self.gen_limit}  "
+                    f"python {'on' if self.tool_enabled else 'off'}")
             color = "status"
         self._add(scr, row, 0, text, w - 1, self.attr(color))

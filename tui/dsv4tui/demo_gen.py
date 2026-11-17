@@ -7,6 +7,7 @@ import re
 import time
 
 from .defaults import DEFAULT_CTX, DEFAULT_GEN
+from .dsml import DSML, TOOL_NAME
 
 
 class DemoGenerateMixin:
@@ -14,6 +15,24 @@ class DemoGenerateMixin:
 
     def _response(self, prompt: str) -> str:
         low = prompt.lower()
+        if prompt.startswith("<tool_result>"):
+            return (
+                "The interpreter ran the code and returned the result above. "
+                "That is the full round trip: model -> tool call -> Python -> "
+                "tool result -> model. In a real session the next paragraph "
+                "would use those numbers to answer your question.\n"
+            )
+        if "python" in low or "calculate" in low or "compute" in low:
+            return (
+                "I will use the interpreter for that.\n\n"
+                f"<{DSML}tool_calls>\n"
+                f"<{DSML}invoke name=\"{TOOL_NAME}\">\n"
+                f"<{DSML}parameter name=\"code\" string=\"true\">"
+                "total = sum(range(1, 11))\nprint(total)"
+                f"</{DSML}parameter>\n"
+                f"</{DSML}invoke>\n"
+                f"</{DSML}tool_calls>"
+            )
         if "code" in low or "c function" in low or "program" in low:
             return (
                 "Here is a small C function that adds two integers, with the "

@@ -99,7 +99,7 @@ class CursesMixin:
             "default": 0, "value": 0, "dim": curses.A_DIM,
             "title": curses.A_BOLD, "status": 0, "active": curses.A_BOLD,
             "user": 0, "assistant": 0, "system": 0, "error": curses.A_BOLD,
-            "section": curses.A_BOLD,
+            "tool": 0, "section": curses.A_BOLD,
             "input": 0, "prefill": 0, "decode": 0,
             "muted": curses.A_DIM, "cancel": curses.A_BOLD,
         }
@@ -111,6 +111,7 @@ class CursesMixin:
             specs = {
                 "user": (curses.COLOR_CYAN, -1),
                 "assistant": (curses.COLOR_GREEN, -1),
+                "tool": (curses.COLOR_BLUE, -1),
                 "system": (curses.COLOR_YELLOW, -1),
                 "error": (curses.COLOR_RED, -1),
                 "section": (curses.COLOR_BLUE, -1),
@@ -126,6 +127,7 @@ class CursesMixin:
             if curses.COLORS >= 256:
                 specs["muted"] = (240, -1)   # dark grey, quieter than A_DIM
                 specs["cancel"] = (88, -1)   # dark red
+                specs["tool"] = (141, -1)    # soft purple
             for i, (name, (fg, bg)) in enumerate(specs.items(), start=1):
                 curses.init_pair(i, fg, bg)
                 extra = 0

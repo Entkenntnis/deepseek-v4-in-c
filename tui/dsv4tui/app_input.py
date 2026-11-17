@@ -10,7 +10,9 @@ from typing import Any
 class InputMixin:
     def interrupt(self) -> None:
         """Ctrl-C: cancel the turn, clear the input, or quit."""
-        if self.generating:
+        if self.tool_running:
+            self.tool_abort()
+        elif self.generating:
             self.cancel()
         elif self.input:
             self.input = ""

@@ -18,6 +18,12 @@ DEFAULT_BUDGET = "auto"
 DEFAULT_CTX = 8192
 DEFAULT_GEN = 1024
 
+# The Python tool: rounds per user turn, wall-clock limit per call, and how
+# much stdout/stderr is handed back to the model before truncation.
+TOOL_MAX_ROUNDS = 6
+TOOL_TIMEOUT_S = 10.0
+TOOL_MAX_OUTPUT = 400
+
 # These are spelled as they are in the checkpoint's own encoding/README.md.
 BOS = "<｜begin▁of▁sentence｜>"
 EOS = "<｜end▁of▁sentence｜>"

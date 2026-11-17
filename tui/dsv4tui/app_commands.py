@@ -32,23 +32,7 @@ class CommandMixin:
             self.add_system("a turn is already generating")
             return
 
-        self.current_user_msg = Message("user", text)
-        self.messages.append(self.current_user_msg)
-        self.current_msg = Message("assistant", "")
-        self.messages.append(self.current_msg)
-        self.decoder.reset()
-        self.scroll = 0
-        self.generating = True
-        self.status = "waiting"
-        sent = self.backend.send({
-            "cmd": "generate",
-            "prompt": text,
-            "gen": self.gen_limit,
-        })
-        if not sent:
-            self.generating = False
-            self.status = "failed"
-            self.add_system("could not write to the engine")
+        self.tool_begin(text)
         self.dirty = True
 
     def cancel(self) -> None:
@@ -59,6 +43,9 @@ class CommandMixin:
         but is not sent to the model.
         """
         if not self.generating or self.cancel_pending:
+            return
+        if self.tool_running:
+            self.tool_abort()
             return
         if self.status != "generating":
             # The generate command is queued but the engine has not emitted
@@ -84,15 +71,22 @@ class CommandMixin:
             self.add_system(
                 "commands:\n"
                 "  /help                 this list\n"
-                "  /reset                clear model context (keeps the disk cache warm)\n"
+                "  /reset                clear model context and interpreter\n"
                 "  /gen N                max tokens per turn\n"
+                "  /py                   let the model call run_python (default off)\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
-            if self.generating:
+            if self.tool_running:
+                self.tool_abort("python cancelled for /reset")
+            elif self.generating:
                 self.add_system("finish the current turn before resetting")
                 return
             if self.backend_alive:
                 self.backend.send({"cmd": "reset"})
+            self.py.reset()
+            self.chain_id += 1
+            self.tool_cancelled = False
+            self.system_armed = True
             self.messages.clear()
             self.current_msg = None
             self.current_user_msg = None
@@ -101,7 +95,26 @@ class CommandMixin:
             self.context_used = 0
             self.decode_spt.clear()
             self.stats_force = True
-            self.add_system("context reset; expert cache stays warm")
+            self.add_system("context and interpreter reset; cache stays warm")
+        elif cmd == "/py":
+            if arg:
+                state = "on" if self.tool_enabled else "off"
+                self.add_system(f"python is {state}; usage: /py")
+            elif self.tool_enabled:
+                self.add_system("python is already on")
+            else:
+                if self.generating and not self.tool_running:
+                    self.add_system(
+                        "finish the current turn before enabling python")
+                    return
+                self.tool_enabled = True
+                if self.context_used == 0:
+                    self.system_armed = True
+                    self.add_system("python on; the model may call run_python")
+                else:
+                    self.add_system(
+                        "python on, but the tools preamble needs an empty "
+                        "context; /reset before the model can see it")
         elif cmd == "/gen":
             try:
                 n = int(arg)

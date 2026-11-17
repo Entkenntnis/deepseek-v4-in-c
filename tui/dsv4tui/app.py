@@ -7,6 +7,7 @@ order and adds nothing of its own.
 
 from __future__ import annotations
 
+from .agent import ToolMixin
 from .app_chat import ChatMixin
 from .app_commands import CommandMixin
 from .app_core import AppBase
@@ -22,7 +23,7 @@ from .app_stats import StatsMixin
 from .app_view import ViewMixin
 
 
-class App(EventMixin, IngestMixin, CpuMixin, CommandMixin,
+class App(EventMixin, IngestMixin, CpuMixin, ToolMixin, CommandMixin,
           InputMixin, ViewMixin, ChatMixin, StatsMixin, GraphMixin, DrawMixin,
           CursesMixin, LoopMixin, AppBase):
     """deepseek-v4-in-c TUI."""

@@ -41,6 +41,8 @@ class ChatMixin:
                 label, color = "v4", "assistant"
             elif msg.role == "error":
                 label, color = "!!", "error"
+            elif msg.role == "tool":
+                label, color = "py", "tool"
             else:
                 label, color = "··", "system"
 
@@ -52,7 +54,7 @@ class ChatMixin:
             # one column too wide ("v4 › ") and the renderer clipped its tail.
             body_width = max(8, width - len(label_prefix))
 
-            use_md = msg.role == "assistant" and RICH_AVAILABLE
+            use_md = msg.role in ("assistant", "tool") and RICH_AVAILABLE
             if use_md:
                 md_width = max(10, body_width)
                 # The body only grows while streaming, so (length, width) is a
