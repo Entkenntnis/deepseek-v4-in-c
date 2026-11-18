@@ -47,11 +47,6 @@ int  dsv4_threads_apply(const DSV4ThreadOpts *o);
  * reader thread at startup, because those threads inherited the compute mask. */
 void dsv4_threads_pin_current_reader(void);
 
-/* Pin the prefill CPU worker to the P-core group. In async prefill the
- * scheduler thread only waits on the cache and the Vulkan worker, so the CPU
- * worker can use the whole compute mask. */
-void dsv4_threads_pin_current_worker(void);
-
 /* Reader-pool width chosen by the CLI (--readers). Returns 6 when unset. The
  * cache uses this directly; there is no environment override. */
 int  dsv4_threads_readers(void);

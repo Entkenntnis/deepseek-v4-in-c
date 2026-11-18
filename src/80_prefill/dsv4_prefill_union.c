@@ -17,24 +17,13 @@
  * boundary, and begin() queues the whole layer instead of six requests at a
  * time. The per-token k-order sum is unchanged. */
 #include <limits.h>
-#include <pthread.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-#include <omp.h>
 
 #include "dsv4.h"
 #include "dsv4_prof.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
-#include "dsv4_threads.h"
-
-/* The CPU worker takes the small buckets while the GPU worker drives Vulkan.
- * Four threads cover all P-cores; the scheduler thread is only waiting on the
- * cache and does not run OpenMP work in async mode. */
-#define DSV4_PF_WORKER_THREADS 4
 
 static DSV4PrefillLayerInstr *union_instr(DSV4Prefill *p, int L)
 {
@@ -136,230 +125,13 @@ static int union_fill_cpu(void *ctx)
     f->q[best] = -1;
     const int e = f->order[j];
     const double tb0 = dsv4_now_s();
-    DSV4PFStatsSink sink = { &p->st, f->li, &p->t_moe, p->instr };
     dsv4_prefill_expert_bucket_fill(p, f->ex[j], e, p->ex_count[e],
                                     p->ex_tok + p->ex_off[e],
-                                    p->ex_k + p->ex_off[e], &sink, "fill");
+                                    p->ex_k + p->ex_off[e]);
     if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
     f->done[j] = 1;
     (*f->remaining)--;
     return 1;
-}
-
-/* ---- background CPU worker ---------------------------------------------- */
-
-#define PF_WQ_CAP DSV4_MAX_PREFETCH
-
-typedef struct {
-    DSV4Prefill *p;
-    int layer;
-    const DSV4ExpertW **ex;
-    const int *order;
-    int *done;          /* shared with the scheduler, protected by mx */
-    int *remaining;     /* shared with the scheduler, protected by mx */
-
-    pthread_mutex_t mx;
-    pthread_cond_t  work;
-    pthread_cond_t  drained;
-    pthread_t       tid;
-
-    int q[PF_WQ_CAP];
-    int qn;
-    int in_flight;
-    int stop, cancelled, started;
-    int gpu;            /* 1 = owns ex_* and the Vulkan queue */
-
-    DSV4PrefillStats st;       /* private accounting, merged after join */
-    DSV4PrefillLayerInstr li;
-    double t_moe;
-    int instr;
-} PFWorker;
-
-static int pf_worker_enabled(void)
-{
-    const char *e = getenv("DSV4_PREFILL_CPU_WORKER");
-    return e && *e && strcmp(e, "0") != 0;
-}
-
-static int pf_worker_threads(void)
-{
-    const char *e = getenv("DSV4_PREFILL_WORKER_THREADS");
-    const int v = e && *e ? atoi(e) : DSV4_PF_WORKER_THREADS;
-    if (v < 1) return 1;
-    if (v > 8) return 8;
-    return v;
-}
-
-static void *pf_worker_main(void *arg)
-{
-    PFWorker *w = (PFWorker *)arg;
-    DSV4Prefill *p = w->p;
-
-    omp_set_num_threads(pf_worker_threads());
-    dsv4_threads_pin_current_worker();
-
-    pthread_mutex_lock(&w->mx);
-    for (;;) {
-        while (w->qn == 0 && !w->stop && !w->cancelled)
-            pthread_cond_wait(&w->work, &w->mx);
-        if (w->stop || w->cancelled) break;
-
-        /* Longest bucket first: the short ones are cheap to leave as the
-         * exposed tail once the GPU has no more work to submit. */
-        int best = -1, best_count = -1;
-        for (int i = 0; i < PF_WQ_CAP; i++) {
-            const int j = w->q[i];
-            if (j < 0) continue;
-            const int count = p->ex_count[w->order[j]];
-            if (count > best_count) { best = i; best_count = count; }
-        }
-        if (best < 0) { w->qn = 0; continue; }
-        const int j = w->q[best];
-        w->q[best] = -1;
-        w->qn--;
-        w->in_flight++;
-        pthread_mutex_unlock(&w->mx);
-
-        const int e = w->order[j];
-        const int count = p->ex_count[e];
-        DSV4PFStatsSink sink = { &w->st, &w->li, &w->t_moe, w->instr };
-        if (w->gpu) {
-            dsv4_prefill_expert_bucket(p, w->ex[j], e, count,
-                                       p->ex_tok + p->ex_off[e],
-                                       p->ex_k + p->ex_off[e], NULL, NULL,
-                                       &sink);
-        } else {
-            dsv4_prefill_expert_bucket_fill(p, w->ex[j], e, count,
-                                            p->ex_tok + p->ex_off[e],
-                                            p->ex_k + p->ex_off[e],
-                                            &sink, "work");
-        }
-
-        pthread_mutex_lock(&w->mx);
-        __atomic_store_n(&w->done[j], 1, __ATOMIC_RELEASE);
-        __atomic_fetch_sub(w->remaining, 1, __ATOMIC_ACQ_REL);
-        w->in_flight--;
-        pthread_cond_broadcast(&w->drained);
-    }
-    pthread_mutex_unlock(&w->mx);
-    return NULL;
-}
-
-static int pf_worker_start(PFWorker *w, DSV4Prefill *p, int layer,
-                           const DSV4ExpertW **ex, const int *order,
-                           int *done, int *remaining,
-                           DSV4PrefillLayerInstr *li, int gpu)
-{
-    memset(w, 0, sizeof *w);
-    w->p = p;
-    w->layer = layer;
-    w->gpu = gpu;
-    w->ex = ex;
-    w->order = order;
-    w->done = done;
-    w->remaining = remaining;
-    w->instr = p->instr;
-    memset(&w->li, 0, sizeof w->li);   /* only worker-written fields are merged */
-    for (int i = 0; i < PF_WQ_CAP; i++) w->q[i] = -1;
-
-    if (pthread_mutex_init(&w->mx, NULL) != 0) return -1;
-    if (pthread_cond_init(&w->work, NULL) != 0) {
-        pthread_mutex_destroy(&w->mx);
-        return -1;
-    }
-    if (pthread_cond_init(&w->drained, NULL) != 0) {
-        pthread_cond_destroy(&w->work);
-        pthread_mutex_destroy(&w->mx);
-        return -1;
-    }
-    if (pthread_create(&w->tid, NULL, pf_worker_main, w) != 0) {
-        pthread_cond_destroy(&w->drained);
-        pthread_cond_destroy(&w->work);
-        pthread_mutex_destroy(&w->mx);
-        return -1;
-    }
-    w->started = 1;
-    return 0;
-}
-
-static int pf_worker_push(PFWorker *w, int j)
-{
-    int ok = 0;
-    pthread_mutex_lock(&w->mx);
-    for (int i = 0; i < PF_WQ_CAP; i++) {
-        if (w->q[i] < 0) {
-            w->q[i] = j;
-            w->qn++;
-            ok = 1;
-            break;
-        }
-    }
-    if (ok) pthread_cond_signal(&w->work);
-    pthread_mutex_unlock(&w->mx);
-    return ok;
-}
-
-static void pf_worker_cancel(PFWorker *w)
-{
-    if (!w->started) return;
-    pthread_mutex_lock(&w->mx);
-    w->cancelled = 1;
-    pthread_cond_broadcast(&w->work);
-    pthread_cond_broadcast(&w->drained);
-    pthread_mutex_unlock(&w->mx);
-}
-
-static void pf_stats_merge(DSV4PrefillStats *d, const DSV4PrefillStats *s)
-{
-    d->buckets_total += s->buckets_total;
-    d->buckets_cpu += s->buckets_cpu;
-    d->fill_buckets += s->fill_buckets;
-    for (int i = 0; i < DSV4_PF_HIST_BINS; i++) {
-        d->bucket_hist[i] += s->bucket_hist[i];
-        d->bucket_tokens[i] += s->bucket_tokens[i];
-        d->bucket_s[i] += s->bucket_s[i];
-        d->bucket_mm_s[i] += s->bucket_mm_s[i];
-    }
-    d->expert_mm += s->expert_mm;
-    d->expert_mm_cpu += s->expert_mm_cpu;
-    d->expert_swiglu += s->expert_swiglu;
-    d->expert_pack += s->expert_pack;
-    d->f_expert += s->f_expert;
-}
-
-static void pf_layer_stats_merge(DSV4PrefillLayerInstr *d,
-                                 const DSV4PrefillLayerInstr *s)
-{
-    d->buckets_cpu += s->buckets_cpu;
-    d->fill_buckets += s->fill_buckets;
-    d->cpu_mm += s->cpu_mm;
-    for (int i = 0; i < DSV4_PF_HIST_BINS; i++) {
-        d->hist[i] += s->hist[i];
-        d->hist_tokens[i] += s->hist_tokens[i];
-    }
-}
-
-static void pf_worker_stop(PFWorker *w, DSV4Prefill *p, int layer)
-{
-    if (!w->started) return;
-
-    pthread_mutex_lock(&w->mx);
-    w->stop = 1;
-    pthread_cond_broadcast(&w->work);
-    pthread_cond_broadcast(&w->drained);
-    pthread_mutex_unlock(&w->mx);
-
-    pthread_join(w->tid, NULL);
-
-    pf_stats_merge(&p->st, &w->st);
-    p->t_moe += w->t_moe;
-    if (p->instr && layer >= 0 && layer < p->c->n_layers)
-        pf_layer_stats_merge(&p->linstr[layer], &w->li);
-
-    pthread_cond_destroy(&w->drained);
-    pthread_cond_destroy(&w->work);
-    pthread_mutex_destroy(&w->mx);
-    w->started = 0;
 }
 
 /* Consume one batch. Ready GPU buckets start first; while each GPU tile is in
@@ -374,143 +146,80 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
                            const int *order, int ng, DSV4PrefillLayerInstr *li)
 {
     int done[DSV4_MAX_PREFETCH];
-    int claimed[DSV4_MAX_PREFETCH];
     int q[DSV4_MAX_PREFETCH];
     int qh = 0, qt = 0;
     int remaining = ng;
-    for (int j = 0; j < ng; j++) { done[j] = 0; claimed[j] = 0; }
+    for (int j = 0; j < ng; j++) done[j] = 0;
 
     DSV4PFillCtx fill = {
         .p = p, .ex = ex, .order = order, .ng = ng, .done = done,
         .remaining = &remaining, .q = q, .qh = &qh, .qt = &qt, .li = li,
     };
 
-    /* Async mode: one worker owns the Vulkan queue (ex_*), one owns the small
-     * CPU buckets (sm_*). The main thread only discovers published experts and
-     * hands them over, so it never blocks a submit behind its own compute. */
-    PFWorker wcpu, wgpu;
-    int async = 0, use_cpu = 0, use_gpu = 0;
-    if (p->vk && pf_worker_enabled()) {
-        int has_small = 0, has_gpu = 0;
-        for (int j = 0; j < ng; j++) {
-            const int count = p->ex_count[order[j]];
-            if (count < 8) has_small = 1;
-            else has_gpu = 1;
-        }
-        int ok = 1;
-        if (has_gpu)
-            ok = pf_worker_start(&wgpu, p, L, ex, order, done, &remaining,
-                                 li, 1) == 0;
-        if (ok && has_small)
-            ok = pf_worker_start(&wcpu, p, L, ex, order, done, &remaining,
-                                 li, 0) == 0;
-        if (ok && (has_gpu || has_small)) {
-            async = 1;
-            use_gpu = has_gpu;
-            use_cpu = has_small;
-        } else {
-            if (has_gpu && wgpu.started) pf_worker_stop(&wgpu, p, L);
-            if (has_small && wcpu.started) pf_worker_stop(&wcpu, p, L);
-        }
-    }
-
     /* Prime the ready queue with everything the readers have already
-     * published. This is non-blocking and gives the workers real work
-     * immediately; wait_any() is only needed when the queue runs dry. */
+     * published. This is non-blocking and gives a GPU bucket's first fill
+     * window real CPU work immediately; wait_any() is only needed when the
+     * queue runs dry. */
     if (p->src->try_any) {
         int k;
         while (p->src->try_any(p->src->ctx, &k)) {
-            if (k >= 0 && k < ng &&
-                !__atomic_load_n(&done[k], __ATOMIC_ACQUIRE) && ex[k])
-                q[qt++] = k;
+            if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
         }
     }
 
     int cancelled = 0;
     for (;;) {
-        if (dsv4_prefill_cancelled(p)) {
-            cancelled = 1;
-            if (use_gpu) pf_worker_cancel(&wgpu);
-            if (use_cpu) pf_worker_cancel(&wcpu);
-            break;
-        }
-        if (__atomic_load_n(&remaining, __ATOMIC_ACQUIRE) <= 0) break;
+        if (dsv4_prefill_cancelled(p)) { cancelled = 1; break; }
+        if (remaining <= 0) break;
 
-        if (async) {
-            /* Offer every ready bucket to the right owner. GPU work starts as
-             * soon as it is published, independently of the main loop. */
-            int pushed = 0;
-            for (int i = qh; i < qt; i++) {
-                const int j = q[i];
-                if (j < 0 || __atomic_load_n(&done[j], __ATOMIC_ACQUIRE) ||
-                    claimed[j] || !ex[j]) continue;
-                const int count = p->ex_count[order[j]];
-                PFWorker *w = NULL;
-                if (dsv4_prefill_expert_is_gpu(p, count)) {
-                    if (use_gpu) w = &wgpu;
-                } else if (use_cpu) {
-                    w = &wcpu;
-                }
-                if (!w) continue;
-                if (pf_worker_push(w, j)) {
-                    claimed[j] = 1;
-                    q[i] = -1;
-                    pushed = 1;
-                }
-            }
-            if (pushed) continue;
-        } else {
-            /* Synchronous fallback: original behaviour, GPU first, then CPU
-             * with the small-bucket fill callback. */
-            int pick = -1;
-            for (int i = qh; i < qt; i++) {
-                const int j = q[i];
-                if (j < 0 || __atomic_load_n(&done[j], __ATOMIC_ACQUIRE) ||
-                    !ex[j]) continue;
-                if (dsv4_prefill_expert_is_gpu(p, p->ex_count[order[j]])) {
-                    pick = i; break;
-                }
-            }
-            if (pick >= 0) {
-                const int j = q[pick];
-                q[pick] = -1;
-                const int e = order[j];
-                const double tb0 = dsv4_now_s();
-                dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
-                                           p->ex_tok + p->ex_off[e],
-                                           p->ex_k + p->ex_off[e],
-                                           union_fill_cpu, &fill, NULL);
-                if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
-                __atomic_store_n(&done[j], 1, __ATOMIC_RELEASE);
-                __atomic_fetch_sub(&remaining, 1, __ATOMIC_ACQ_REL);
-                continue;
-            }
-
-            pick = -1;
-            for (int i = qh; i < qt; i++) {
-                const int j = q[i];
-                if (j < 0 || __atomic_load_n(&done[j], __ATOMIC_ACQUIRE) ||
-                    !ex[j]) continue;
+        /* 1. A ready GPU bucket: start it and fill its waits with CPU work. */
+        int pick = -1;
+        for (int i = qh; i < qt; i++) {
+            const int j = q[i];
+            if (j < 0 || done[j] || !ex[j]) continue;
+            if (dsv4_prefill_expert_is_gpu(p, p->ex_count[order[j]])) {
                 pick = i;
                 break;
             }
-            if (pick >= 0) {
-                const int j = q[pick];
-                q[pick] = -1;
-                const int e = order[j];
-                const double tb0 = dsv4_now_s();
-                dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
-                                           p->ex_tok + p->ex_off[e],
-                                           p->ex_k + p->ex_off[e],
-                                           NULL, NULL, NULL);
-                if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
-                __atomic_store_n(&done[j], 1, __ATOMIC_RELEASE);
-                __atomic_fetch_sub(&remaining, 1, __ATOMIC_ACQ_REL);
-                continue;
-            }
+        }
+        if (pick >= 0) {
+            const int j = q[pick];
+            q[pick] = -1;
+            const int e = order[j];
+            const double tb0 = dsv4_now_s();
+            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
+                                       p->ex_tok + p->ex_off[e],
+                                       p->ex_k + p->ex_off[e],
+                                       union_fill_cpu, &fill);
+            if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
+            done[j] = 1;
+            remaining--;
+            continue;
         }
 
-        /* Nothing ready: take the next published bucket from the source. */
+        /* 2. No GPU bucket ready: do one ready CPU bucket. */
+        pick = -1;
+        for (int i = qh; i < qt; i++) {
+            const int j = q[i];
+            if (j < 0 || done[j] || !ex[j]) continue;
+            pick = i;
+            break;
+        }
+        if (pick >= 0) {
+            const int j = q[pick];
+            q[pick] = -1;
+            const int e = order[j];
+            const double tb0 = dsv4_now_s();
+            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
+                                       p->ex_tok + p->ex_off[e],
+                                       p->ex_k + p->ex_off[e], NULL, NULL);
+            if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
+            done[j] = 1;
+            remaining--;
+            continue;
+        }
+
+        /* 3. Nothing ready: take the next published bucket from the source. */
         if (!p->src->wait_any) break;
         int k = -1;
         double t0 = dsv4_now_s();
@@ -522,37 +231,14 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
             p->st.io_wait_s += td;
             if (li) li->wait_s += td;
         }
-        if (!got) {
-            /* No more reads can arrive. Let the workers finish their queues;
-             * poll with a short sleep so cancellation stays responsive. */
-            if (async) {
-                const struct timespec nap = { 0, 1000000L };  /* 1 ms */
-                while (__atomic_load_n(&remaining, __ATOMIC_ACQUIRE) > 0) {
-                    nanosleep(&nap, NULL);
-                    if (dsv4_prefill_cancelled(p)) {
-                        cancelled = 1;
-                        if (use_gpu) pf_worker_cancel(&wgpu);
-                        if (use_cpu) pf_worker_cancel(&wcpu);
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-        if (k >= 0 && k < ng && !__atomic_load_n(&done[k], __ATOMIC_ACQUIRE) &&
-            ex[k]) q[qt++] = k;
+        if (!got) break;
+        if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
         if (p->src->try_any) {
             while (p->src->try_any(p->src->ctx, &k)) {
-                if (k >= 0 && k < ng &&
-                    !__atomic_load_n(&done[k], __ATOMIC_ACQUIRE) && ex[k])
-                    q[qt++] = k;
+                if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
             }
         }
     }
-
-    /* Workers must be gone before end() releases the slot claims. */
-    if (use_cpu) pf_worker_stop(&wcpu, p, L);
-    if (use_gpu) pf_worker_stop(&wgpu, p, L);
 
     double t0 = dsv4_now_s();
     p->src->end(p->src->ctx, ex);
@@ -574,7 +260,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
      * trailing pass runs after that lock, so these pointers are safe too. */
     const double tt0 = dsv4_now_s();
     for (int j = 0; j < ng; j++) {
-        if (__atomic_load_n(&done[j], __ATOMIC_ACQUIRE)) continue;
+        if (done[j]) continue;
         if (!ex[j]) {
             fprintf(stderr, "prefill: layer %d could not obtain routed "
                             "expert %d; refusing to emit a token routed "
@@ -585,7 +271,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         const int e = order[j];
         dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
                                    p->ex_tok + p->ex_off[e],
-                                   p->ex_k + p->ex_off[e], NULL, NULL, NULL);
+                                   p->ex_k + p->ex_off[e], NULL, NULL);
         done[j] = 1;
     }
     if (p->instr && li) li->compute_s += dsv4_now_s() - tt0;
