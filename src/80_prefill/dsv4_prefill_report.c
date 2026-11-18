@@ -193,11 +193,13 @@ void dsv4_prefill_instr_layer(DSV4Prefill *p, int L)
         "PF_LAYER call=%d L=%d total_s=%.6f attn_s=%.6f moe_s=%.6f "
         "hc_s=%.6f io_s=%.6f gate_s=%.6f shared_s=%.6f experts=%d "
         "requests=%d cpu_buckets=%d gpu_buckets=%d fallbacks=%d "
-        "fill_buckets=%d cpu_s=%.6f gpu_s=%.6f union_s=%.6f lead_s=%.6f "
+        "fill_buckets=%d mid_cpu=%d mid_gpu=%d "
+        "cpu_s=%.6f gpu_s=%.6f union_s=%.6f lead_s=%.6f "
         "begin_s=%.6f wait_s=%.6f end_s=%.6f compute_s=%.6f bytes=%llu",
         p->instr_call, L, l->total_s, l->attn_s, l->moe_s, l->hc_s,
         l->io_s, l->gate_s, l->shared_s, l->experts, l->requests,
         l->buckets_cpu, l->buckets_gpu, l->gpu_fallbacks, l->fill_buckets,
+        l->mid_cpu, l->mid_gpu,
         l->cpu_mm, l->gpu_mm, l->union_s, l->lead_s, l->begin_s,
         l->wait_s, l->end_s, l->compute_s, (unsigned long long)l->bytes);
     pf_instr_hist(p, "LAYER_HIST", L, l->hist, l->hist_tokens);
@@ -255,10 +257,12 @@ void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0)
         p->t_hc, s->trunk_io, s->bind, union_s);
     pf_instr_emit(p,
         "PF_EXPERT call=%d buckets=%d cpu_buckets=%d gpu_buckets=%d "
-        "fallbacks=%d fill_buckets=%d cpu_s=%.6f gpu_s=%.6f mm_s=%.6f "
+        "fallbacks=%d fill_buckets=%d mid_cpu=%d mid_gpu=%d "
+        "cpu_s=%.6f gpu_s=%.6f mm_s=%.6f "
         "swiglu_s=%.6f pack_s=%.6f sum_s=%.6f",
         p->instr_call, s->buckets_total, s->buckets_cpu, s->buckets_gpu,
-        s->gpu_fallbacks, s->fill_buckets, s->expert_mm_cpu,
+        s->gpu_fallbacks, s->fill_buckets, s->mid_cpu, s->mid_gpu,
+        s->expert_mm_cpu,
         s->expert_mm_gpu, s->expert_mm, s->expert_swiglu, s->expert_pack,
         s->expert_sum);
     pf_instr_hist(p, "HIST", -1, s->bucket_hist, s->bucket_tokens);

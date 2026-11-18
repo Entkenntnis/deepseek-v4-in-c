@@ -87,12 +87,73 @@ typedef struct {
     int *done;
     int *remaining;
     int *q, *qh, *qt;
+    int io_done;
     DSV4PrefillLayerInstr *li;
 } DSV4PFillCtx;
 
-/* Run one ready CPU bucket while the GPU fence is pending. The smallest count
- * wins: a 1-token bucket fits a short GPU tile, while a 5-7 bucket may not.
- * Returns 1 when a bucket ran, 0 when the ready queue has no CPU work. */
+static int union_bucket_count(const DSV4PFillCtx *f, int j)
+{
+    return f->p->ex_count[f->order[j]];
+}
+
+/* Number of not-done 9+ buckets in this group. The in-flight GPU bucket is
+ * included because it is not marked done until after its submit/wait returns. */
+static int union_pending_high(const DSV4PFillCtx *f)
+{
+    int n = 0;
+    for (int j = 0; j < f->ng; j++)
+        if (!f->done[j] && union_bucket_count(f, j) >= DSV4_PF_GPU_ALWAYS_MIN)
+            n++;
+    return n;
+}
+
+/* CPU's contested-band ceiling. With fewer than DSV4_PF_MID_BACKLOG high
+ * buckets pending it stays at 4; each extra high bucket raises it by one until
+ * it reaches 8. This is the "meet in the middle" split. */
+static int union_cpu_mid_limit(const DSV4PFillCtx *f)
+{
+    const int extra = union_pending_high(f) - (DSV4_PF_MID_BACKLOG - 1);
+    int lim = DSV4_PF_CPU_ALWAYS_MAX + (extra > 0 ? extra : 0);
+    if (lim > DSV4_PREFILL_FILL_MAX) lim = DSV4_PREFILL_FILL_MAX;
+    return lim;
+}
+
+/* Highest ready 9+ bucket; if none, highest ready 5..8 bucket. Never picks a
+ * 1..4 bucket: those belong to the CPU. Ties keep queue order. */
+static int union_pick_gpu(const DSV4PFillCtx *f)
+{
+    if (!f->p->vk) return -1;
+    int best_high = -1, best_mid = -1;
+    int high_count = -1, mid_count = -1;
+    for (int i = *f->qh; i < *f->qt; i++) {
+        const int j = f->q[i];
+        if (j < 0 || f->done[j] || !f->ex[j]) continue;
+        const int count = union_bucket_count(f, j);
+        if (count >= DSV4_PF_GPU_ALWAYS_MIN) {
+            if (count > high_count) { best_high = i; high_count = count; }
+        } else if (count > DSV4_PF_CPU_ALWAYS_MAX && count > mid_count) {
+            best_mid = i; mid_count = count;
+        }
+    }
+    return best_high >= 0 ? best_high : best_mid;
+}
+
+/* Smallest ready bucket with count <= max_count. Ties keep queue order. */
+static int union_pick_cpu(const DSV4PFillCtx *f, int max_count)
+{
+    int best = -1, best_count = INT_MAX;
+    for (int i = *f->qh; i < *f->qt; i++) {
+        const int j = f->q[i];
+        if (j < 0 || f->done[j] || !f->ex[j]) continue;
+        const int count = union_bucket_count(f, j);
+        if (count > max_count) continue;
+        if (count < best_count) { best = i; best_count = count; }
+    }
+    return best;
+}
+
+/* Run one ready CPU bucket while the GPU fence is pending. Low buckets always
+ * win; 5..8 only become eligible as the pending high-bucket backlog grows. */
 static int union_fill_cpu(void *ctx)
 {
     DSV4PFillCtx *f = (DSV4PFillCtx *)ctx;
@@ -102,7 +163,7 @@ static int union_fill_cpu(void *ctx)
     /* Readers keep publishing while the GPU tile runs. Pull in whatever has
      * landed since the last window; this is non-blocking and is what lets the
      * later w3/w2 windows find CPU buckets that were not ready for w1. */
-    if (p->src->try_any) {
+    if (!f->io_done && p->src->try_any) {
         int k;
         while (p->src->try_any(p->src->ctx, &k)) {
             if (k >= 0 && k < f->ng && !f->done[k] && f->ex[k])
@@ -110,15 +171,7 @@ static int union_fill_cpu(void *ctx)
         }
     }
 
-    int best = -1, best_count = INT_MAX;
-    for (int i = *f->qh; i < *f->qt; i++) {
-        const int j = f->q[i];
-        if (j < 0 || f->done[j] || !f->ex[j]) continue;
-        const int e = f->order[j];
-        const int count = p->ex_count[e];
-        if (count >= 8 || count > DSV4_PREFILL_FILL_MAX) continue;
-        if (count < best_count) { best = i; best_count = count; }
-    }
+    const int best = union_pick_cpu(f, union_cpu_mid_limit(f));
     if (best < 0) return 0;
 
     const int j = f->q[best];
@@ -134,11 +187,51 @@ static int union_fill_cpu(void *ctx)
     return 1;
 }
 
-/* Consume one batch. Ready GPU buckets start first; while each GPU tile is in
- * flight, fill_cpu() runs one ready CPU bucket. If no ready bucket remains, the
- * scheduler asks wait_any() for the next one, so the batch's I/O tail still
- * overlaps compute. end() drains whatever wait_any() did not consume, and the
- * trailing pass handles resident hits after that synchronization point.
+/* Run at most one ready bucket: GPU class first, then CPU class. */
+static int union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
+{
+    int pick = union_pick_gpu(f);
+    if (pick >= 0) {
+        const int j = f->q[pick];
+        f->q[pick] = -1;
+        const int e = f->order[j];
+        const double tb0 = dsv4_now_s();
+        dsv4_prefill_expert_bucket(p, f->ex[j], e, p->ex_count[e],
+                                   p->ex_tok + p->ex_off[e],
+                                   p->ex_k + p->ex_off[e],
+                                   DSV4_EXPERT_ROUTE_GPU,
+                                   union_fill_cpu, f);
+        if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
+        f->done[j] = 1;
+        (*f->remaining)--;
+        return 1;
+    }
+
+    pick = union_pick_cpu(f, INT_MAX);
+    if (pick >= 0) {
+        const int j = f->q[pick];
+        f->q[pick] = -1;
+        const int e = f->order[j];
+        const double tb0 = dsv4_now_s();
+        dsv4_prefill_expert_bucket(p, f->ex[j], e, p->ex_count[e],
+                                   p->ex_tok + p->ex_off[e],
+                                   p->ex_k + p->ex_off[e],
+                                   DSV4_EXPERT_ROUTE_CPU, NULL, NULL);
+        if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
+        f->done[j] = 1;
+        (*f->remaining)--;
+        return 1;
+    }
+    return 0;
+}
+
+/* Consume one batch. The GPU takes the largest ready 9+ bucket first (or a
+ * 5..8 bucket if no high bucket is ready); while it runs, fill_cpu() works the
+ * CPU end from the smallest bucket upward. 5..8 move to the CPU only as the
+ * pending 9+ backlog grows. If no ready bucket remains, the scheduler asks
+ * wait_any() for the next one, so the batch's I/O tail still overlaps compute.
+ * end() drains whatever wait_any() did not consume, and the trailing pass puts
+ * resident hits back through the same policy.
  *
  * The batch's slot claims are released by end(); on a cancel we still drain it
  * before returning so the reset that follows cannot race a reader. */
@@ -153,7 +246,8 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
 
     DSV4PFillCtx fill = {
         .p = p, .ex = ex, .order = order, .ng = ng, .done = done,
-        .remaining = &remaining, .q = q, .qh = &qh, .qt = &qt, .li = li,
+        .remaining = &remaining, .q = q, .qh = &qh, .qt = &qt,
+        .io_done = 0, .li = li,
     };
 
     /* Prime the ready queue with everything the readers have already
@@ -172,54 +266,12 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         if (dsv4_prefill_cancelled(p)) { cancelled = 1; break; }
         if (remaining <= 0) break;
 
-        /* 1. A ready GPU bucket: start it and fill its waits with CPU work. */
-        int pick = -1;
-        for (int i = qh; i < qt; i++) {
-            const int j = q[i];
-            if (j < 0 || done[j] || !ex[j]) continue;
-            if (dsv4_prefill_expert_is_gpu(p, p->ex_count[order[j]])) {
-                pick = i;
-                break;
-            }
-        }
-        if (pick >= 0) {
-            const int j = q[pick];
-            q[pick] = -1;
-            const int e = order[j];
-            const double tb0 = dsv4_now_s();
-            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
-                                       p->ex_tok + p->ex_off[e],
-                                       p->ex_k + p->ex_off[e],
-                                       union_fill_cpu, &fill);
-            if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
-            done[j] = 1;
-            remaining--;
-            continue;
-        }
+        /* 1. Run one ready bucket through the GPU-first policy. A GPU bucket
+         *    fills its waits with CPU work; if none is ready, the CPU takes
+         *    the smallest available bucket. */
+        if (union_run_one_ready(p, &fill)) continue;
 
-        /* 2. No GPU bucket ready: do one ready CPU bucket. */
-        pick = -1;
-        for (int i = qh; i < qt; i++) {
-            const int j = q[i];
-            if (j < 0 || done[j] || !ex[j]) continue;
-            pick = i;
-            break;
-        }
-        if (pick >= 0) {
-            const int j = q[pick];
-            q[pick] = -1;
-            const int e = order[j];
-            const double tb0 = dsv4_now_s();
-            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
-                                       p->ex_tok + p->ex_off[e],
-                                       p->ex_k + p->ex_off[e], NULL, NULL);
-            if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
-            done[j] = 1;
-            remaining--;
-            continue;
-        }
-
-        /* 3. Nothing ready: take the next published bucket from the source. */
+        /* 2. Nothing ready: take the next published bucket from the source. */
         if (!p->src->wait_any) break;
         int k = -1;
         double t0 = dsv4_now_s();
@@ -256,9 +308,13 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
 
     if (cancelled) return dsv4_prefill_cancel_code(p);
 
-    /* Hits (and anything wait_any never handed out) arrive through end(). The
-     * trailing pass runs after that lock, so these pointers are safe too. */
+    /* Hits (and anything wait_any never handed out) arrive through end(). Put
+     * them back through the same GPU-first policy: resident hits may not
+     * bypass the split. End the I/O phase first so the fill callback stops
+     * polling try_any(). */
+    fill.io_done = 1;
     const double tt0 = dsv4_now_s();
+    qh = qt = 0;
     for (int j = 0; j < ng; j++) {
         if (done[j]) continue;
         if (!ex[j]) {
@@ -268,10 +324,18 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
                     L, order[j]);
             return -1;
         }
+        q[qt++] = j;
+    }
+    while (remaining > 0 && union_run_one_ready(p, &fill))
+        ;
+    for (int j = 0; j < ng; j++) {
+        if (done[j]) continue;
+        /* Should be unreachable: every remaining bucket was queued above. */
         const int e = order[j];
         dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
                                    p->ex_tok + p->ex_off[e],
-                                   p->ex_k + p->ex_off[e], NULL, NULL);
+                                   p->ex_k + p->ex_off[e],
+                                   DSV4_EXPERT_ROUTE_CPU, NULL, NULL);
         done[j] = 1;
     }
     if (p->instr && li) li->compute_s += dsv4_now_s() - tt0;

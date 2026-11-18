@@ -52,8 +52,9 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
     p->ex_fill = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_seen = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
-    /* CPU fill workspace for the GPU overlap. Fixed size: fill buckets are
-     * below VK_EXPERT_MIN_COUNT, never prompt-sized. */
+    /* CPU fill workspace for the GPU overlap. Fixed size: the scheduler never
+     * sends a 9+ bucket to the CPU fill path, so this covers the whole
+     * contested band and is never prompt-sized. */
     const size_t fill_rows = DSV4_PREFILL_FILL_MAX;
     p->sm_x = (float *)xcalloc(fill_rows * (size_t)c->hidden * sizeof(float));
     p->sm_gate = (float *)xcalloc(fill_rows * (size_t)c->moe_inter *

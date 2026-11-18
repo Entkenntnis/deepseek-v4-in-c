@@ -15,16 +15,24 @@
 /* Instrumentation: bucket sizes are token requests per distinct expert. */
 #define DSV4_PF_HIST_BINS 8
 
-/* A CPU bucket that runs inside a GPU submit/wait window. The routed-expert
- * CPU path is used below VK_EXPERT_MIN_COUNT (8), so 8 rows cover every fill
- * bucket and leave one spare if the threshold moves. */
-#define DSV4_PREFILL_FILL_MAX 8
+/* Routed-expert scheduling classes. The scheduler owns the split, not the
+ * bucket function: 1..4 always run on the CPU, 9+ always on the GPU, and 5..8
+ * (the contested band) go to whichever side has capacity. A CPU fill bucket
+ * can therefore be as large as the whole contested band. */
+#define DSV4_PF_CPU_ALWAYS_MAX 4
+#define DSV4_PF_GPU_ALWAYS_MIN 9
+/* Start offloading 5..8 to the CPU once at least this many 9+ buckets are
+ * still pending. With 2 pending high buckets the CPU may take a 5; each
+ * further high bucket moves the CPU limit up by one, until it reaches 8. */
+#define DSV4_PF_MID_BACKLOG    2
+#define DSV4_PREFILL_FILL_MAX  (DSV4_PF_GPU_ALWAYS_MIN - 1)
 
 typedef struct {
     int experts;            /* distinct experts in this layer               */
     int requests;           /* n * topk, duplicates included                */
     int buckets_cpu, buckets_gpu, gpu_fallbacks;
     int fill_buckets;       /* CPU buckets run inside a GPU wait          */
+    int mid_cpu, mid_gpu;   /* contested 5..8 buckets by backend          */
     int hist[DSV4_PF_HIST_BINS];
     int hist_tokens[DSV4_PF_HIST_BINS];
     double cpu_mm, gpu_mm;  /* expert matmul time by path                    */
@@ -61,6 +69,7 @@ typedef struct {
      * buckets, not from the routing table, so they describe what actually ran. */
     int buckets_total, buckets_cpu, buckets_gpu, gpu_fallbacks;
     int fill_buckets;        /* CPU buckets run during a GPU wait           */
+    int mid_cpu, mid_gpu;    /* contested 5..8 buckets by backend           */
     int bucket_hist[DSV4_PF_HIST_BINS];
     int bucket_tokens[DSV4_PF_HIST_BINS];
     double bucket_s[DSV4_PF_HIST_BINS];      /* whole bucket wall time      */
@@ -252,14 +261,22 @@ int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
 void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
                          const DSV4ExpertW *e, int hidden, int inter,
                          float limit);
-/* Whether this bucket is meant for the Vulkan expert path. */
+/* Whether this bucket is in the always-GPU class. */
 int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
+/* Explicit routing for the scheduler-visible bands. AUTO keeps the old
+ * count-based decision (9+ -> GPU). CPU and GPU are used by the union
+ * scheduler so it can place a contested 5..8 bucket on either backend. */
+enum {
+    DSV4_EXPERT_ROUTE_AUTO = -1,
+    DSV4_EXPERT_ROUTE_CPU  =  0,
+    DSV4_EXPERT_ROUTE_GPU  =  1
+};
 /* fill/fill_ctx are optional: when present and the bucket runs on the GPU,
  * they run CPU buckets between each submit and fence wait. */
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
                                 int expert, int count, const int *tok,
-                                const int *ks, DSV4PrefillVkFillFn fill,
-                                void *fill_ctx);
+                                const int *ks, int route,
+                                DSV4PrefillVkFillFn fill, void *fill_ctx);
 /* CPU-only bucket using the sm_* workspace. Never submits GPU work. */
 void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
                                      int expert, int count, const int *tok,

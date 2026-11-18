@@ -15,9 +15,9 @@
  * Output:
  *   - CPU: the production bucket seam, forced onto the CPU kernels.
  *   - GPU: the fused expert kernel called directly for every n, including the
- *     n < VK_EXPERT_MIN_COUNT sizes that production currently keeps on the CPU.
- *   - dispatch: the production seam with the Vulkan backend available, i.e.
- *     what the engine actually chooses today.
+ *     n < 9 sizes that the automatic route keeps on the CPU.
+ *   - dispatch: the production seam with the Vulkan backend available and the
+ *     automatic route, i.e. what the engine chooses without scheduler state.
  *   - overlap: the fused kernel with CPU fill buckets run during its fence
  *     wait, matching the union scheduler's GPU/CPU overlap.
  *
@@ -54,8 +54,8 @@ typedef struct {
     int          tok[EB_MAXTOK];
     int          ks[EB_MAXTOK];
 
-    /* Overlap fill queue. Counts stay below VK_EXPERT_MIN_COUNT so the fill
-     * mirrors union_fill_cpu()'s small CPU buckets. */
+    /* Overlap fill queue. Counts stay inside the contested band so the fill
+     * mirrors union_fill_cpu()'s CPU buckets. */
     int          fill_q;
     int          fill_nq;
     long         fill_total;
@@ -246,7 +246,8 @@ static void run_cpu(void *vp)
     Case *c = (Case *)vp;
     const int base = c->cur++;
     DSV4ExpertW *ew = &c->ex[base % c->ncopies].ew;
-    dsv4_prefill_expert_bucket(c->p, ew, 0, c->n, c->tok, c->ks, NULL, NULL);
+    dsv4_prefill_expert_bucket(c->p, ew, 0, c->n, c->tok, c->ks,
+                               DSV4_EXPERT_ROUTE_CPU, NULL, NULL);
 }
 
 static void run_gpu(void *vp)
@@ -267,7 +268,8 @@ static void run_dispatch(void *vp)
     Case *c = (Case *)vp;
     const int base = c->cur++;
     DSV4ExpertW *ew = &c->ex[base % c->ncopies].ew;
-    dsv4_prefill_expert_bucket(c->p, ew, 0, c->n, c->tok, c->ks, NULL, NULL);
+    dsv4_prefill_expert_bucket(c->p, ew, 0, c->n, c->tok, c->ks,
+                               DSV4_EXPERT_ROUTE_AUTO, NULL, NULL);
 }
 
 static int overlap_fill(void *ctx)
@@ -539,8 +541,8 @@ int main(int argc, char **argv)
     if (first_gpu > 0)
         printf("isolated crossover: GPU first wins at n=%d\n", first_gpu);
     if (vk)
-        printf("production threshold: n>=8 uses Vulkan (VK_EXPERT_MIN_COUNT); "
-               "see the dispatch rows\n");
+        printf("automatic route: n>=%d uses Vulkan; 5..8 are scheduler "
+               "contested (see dispatch rows)\n", DSV4_PF_GPU_ALWAYS_MIN);
 
     if (g_breakdown) {
         printf("\nbreakdown (ms per bucket)\n");

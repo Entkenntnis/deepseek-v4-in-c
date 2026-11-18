@@ -10,16 +10,12 @@
 #include "dsv4_prefill_int.h"
 #include "dsv4_prefill_vk.h"
 
-/* Below this bucket size the fused GPU pipeline (w1/w3/SwiGLU/w2) and its
- * copies still cost more than the CPU FP4 GEMM. The threshold is empirical;
- * `make bench-expert` sweeps n=1..10 with resident weights and reports the
- * isolated CPU/GPU crossover plus the production dispatch choice. The
- * scheduler overlaps CPU fill buckets with each GPU wait, so the isolated
- * crossover is only the first input: validate a threshold change with
- * `make e2e` before moving it. With the fused kernel the old "three
- * submissions" reason no longer applies, so this is worth re-measuring if
- * small-bucket work becomes the bottleneck. */
-#define VK_EXPERT_MIN_COUNT 8
+/* 9+ is the always-GPU class; 5..8 is contested and the union scheduler
+ * decides which backend runs it. `make bench-expert` reports the isolated
+ * crossover (around n=4 here), which is an input to that scheduler but not the
+ * whole policy: CPU fill work overlaps each GPU wait and shares the same DRAM.
+ * With the fused kernel the old "three submissions" reason no longer applies,
+ * so re-measure if small-bucket work becomes the bottleneck. */
 
 static int pf_bucket_bin(int count)
 {
@@ -35,7 +31,7 @@ static int pf_bucket_bin(int count)
 
 int dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count)
 {
-    return p && p->vk && count >= VK_EXPERT_MIN_COUNT;
+    return p && p->vk && count >= DSV4_PF_GPU_ALWAYS_MIN;
 }
 
 /* Routed-expert matmul, timed per matrix so FP4 MM is not confused with the
@@ -87,13 +83,15 @@ void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
 }
 
 /* One expert applied to every token that routed to it: the expert-major seam.
- * count == 1 stays on the GEMV. For count > 1 the activation rows are gathered
- * once, each matrix runs as one count-wide batch, and the result is scattered
- * back into the per-(token, k) accumulators the weighted sum expects. */
+ * count == 1 stays on the CPU GEMV unless the scheduler explicitly forces the
+ * GPU. For count > 1 the activation rows are gathered once, each matrix runs
+ * as one count-wide batch, and the result is scattered back into the
+ * per-(token, k) accumulators the weighted sum expects. `route` lets the union
+ * scheduler place a contested 5..8 bucket on either backend. */
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
                                 int expert, int count, const int *tok,
-                                const int *ks, DSV4PrefillVkFillFn fill,
-                                void *fill_ctx)
+                                const int *ks, int route,
+                                DSV4PrefillVkFillFn fill, void *fill_ctx)
 {
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, rinter = c->moe_inter;
@@ -102,6 +100,11 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
         (p->instr && p->cur_layer >= 0 && p->cur_layer < p->c->n_layers)
             ? &p->linstr[p->cur_layer] : NULL;
     const int tr = dsv4_trace_active();
+
+    const int gpu_wanted =
+        route == DSV4_EXPERT_ROUTE_GPU ? (p->vk != NULL)
+      : route == DSV4_EXPERT_ROUTE_CPU ? 0
+      : dsv4_prefill_expert_is_gpu(p, count);
 
     const int bin = pf_bucket_bin(count);
     if (p->instr) {
@@ -114,7 +117,7 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
         }
     }
 
-    if (count == 1) {
+    if (count == 1 && !gpu_wanted) {
         const int t = tok[0], k = ks[0];
         DSV4PrefillTok *s = &p->scratch[t];
         dsv4_prefill_expert(p, s->expert_acc + (size_t)k * s->expert_acc_stride,
@@ -144,7 +147,7 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     }
     p->st.expert_pack += dsv4_now_s() - t0;
 
-    const int gpu_tried = dsv4_prefill_expert_is_gpu(p, count);
+    const int gpu_tried = gpu_wanted;
     int gpu = 0;
     t0 = dsv4_now_s();
     if (gpu_tried) {
@@ -199,6 +202,16 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
         } else {
             p->st.buckets_cpu++;
             if (li) li->buckets_cpu++;
+        }
+        if (count > DSV4_PF_CPU_ALWAYS_MAX
+            && count < DSV4_PF_GPU_ALWAYS_MIN) {
+            if (gpu) {
+                p->st.mid_gpu++;
+                if (li) li->mid_gpu++;
+            } else {
+                p->st.mid_cpu++;
+                if (li) li->mid_cpu++;
+            }
         }
         p->st.bucket_s[bin] += (dsv4_now_s() - tm0) - fill_s;
     }
@@ -298,6 +311,11 @@ void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
     if (p->instr) {
         p->st.buckets_cpu++;
         if (li) li->buckets_cpu++;
+        if (count > DSV4_PF_CPU_ALWAYS_MAX
+            && count < DSV4_PF_GPU_ALWAYS_MIN) {
+            p->st.mid_cpu++;
+            if (li) li->mid_cpu++;
+        }
         p->st.bucket_s[bin] += dsv4_now_s() - tm0;
     }
     if (count > 1)
