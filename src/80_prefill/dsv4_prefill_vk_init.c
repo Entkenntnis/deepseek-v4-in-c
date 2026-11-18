@@ -9,6 +9,7 @@
 #include "gemm_fp8_spv.h"
 #include "gemm_bf16_spv.h"
 #include "gemm_fp4_spv.h"
+#include "swiglu_spv.h"
 
 int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
                          DSV4Trunk *tr, DSV4Cache *cache)
@@ -74,13 +75,27 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     if (vkCreatePipelineLayout(v->dev, &pli, NULL, &v->pl) != VK_SUCCESS)
         goto fail;
 
+    VkPushConstantRange pcr_sw;
+    pcr_sw.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr_sw.offset = 0;
+    pcr_sw.size = sizeof(DSV4VkSwigluPC);
+    VkPipelineLayoutCreateInfo pli_sw;
+    memset(&pli_sw, 0, sizeof pli_sw);
+    pli_sw.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli_sw.setLayoutCount = 1;
+    pli_sw.pSetLayouts = &v->dsl;
+    pli_sw.pushConstantRangeCount = 1;
+    pli_sw.pPushConstantRanges = &pcr_sw;
+    if (vkCreatePipelineLayout(v->dev, &pli_sw, NULL, &v->pl_sw)
+        != VK_SUCCESS) goto fail;
+
     VkDescriptorPoolSize psz;
     psz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    psz.descriptorCount = 4;
+    psz.descriptorCount = 20;      /* 5 sets x 4 bindings */
     VkDescriptorPoolCreateInfo dpi;
     memset(&dpi, 0, sizeof dpi);
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.maxSets = 1;
+    dpi.maxSets = 5;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &psz;
     if (vkCreateDescriptorPool(v->dev, &dpi, NULL, &v->dpool)
@@ -93,13 +108,24 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     ai.pSetLayouts = &v->dsl;
     if (vkAllocateDescriptorSets(v->dev, &ai, &v->dset) != VK_SUCCESS)
         goto fail;
+    VkDescriptorSetLayout xl[4] = { v->dsl, v->dsl, v->dsl, v->dsl };
+    VkDescriptorSetAllocateInfo xai;
+    memset(&xai, 0, sizeof xai);
+    xai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    xai.descriptorPool = v->dpool;
+    xai.descriptorSetCount = 4;
+    xai.pSetLayouts = xl;
+    if (vkAllocateDescriptorSets(v->dev, &xai, v->xdset) != VK_SUCCESS)
+        goto fail;
 
     if (dsv4_prefill_vk_make_pipeline(v, gemm_fp8_spv, gemm_fp8_spv_len,
                                       &v->pipe_fp8) ||
         dsv4_prefill_vk_make_pipeline(v, gemm_bf16_spv, gemm_bf16_spv_len,
                                       &v->pipe_bf16) ||
         dsv4_prefill_vk_make_pipeline(v, gemm_fp4_spv, gemm_fp4_spv_len,
-                                      &v->pipe_fp4))
+                                      &v->pipe_fp4) ||
+        dsv4_prefill_vk_make_pipeline_layout(v, swiglu_spv, swiglu_spv_len,
+                                             v->pl_sw, &v->pipe_sw))
         goto fail;
 
     uint32_t max_m = (uint32_t)cfg->n_heads * (uint32_t)cfg->head_dim;
@@ -120,6 +146,15 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
                                     &v->xmem, &v->xmap) != 0) goto fail;
     if (dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->ybytes, &v->ybuf,
                                     &v->ymem, &v->ymap) != 0) goto fail;
+    v->expert_mid_bytes = (size_t)DSV4_VK_TILE_N
+                        * (size_t)cfg->moe_inter * sizeof(float);
+    if (dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->expert_mid_bytes,
+                                    &v->gbuf, &v->gmem, &v->gmap) != 0 ||
+        dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->expert_mid_bytes,
+                                    &v->ubuf, &v->umem, &v->umap) != 0 ||
+        dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->expert_mid_bytes,
+                                    &v->mbuf, &v->mmem, &v->mmap) != 0)
+        goto fail;
 
     fprintf(stderr, "prefill: Vulkan GEMM on %s (tile %u tokens, import %llu)\n",
             v->devname, DSV4_VK_TILE_N,

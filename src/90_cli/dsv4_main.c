@@ -98,7 +98,10 @@ int main(int argc, char **argv)
     double budget_gb = 8.0;
     int budget_auto = 0;
     int ctx = 8192, ngen = 128, think = 0, layers = 1;
-    const char *pin = "p", *reader_pin = "off";
+    /* Readers sit on the E-cores by default: the prefill overlap keeps the
+     * P-cores busy with CPU fill while the GPU runs, and active OpenMP
+     * workers otherwise starve the reader pool. */
+    const char *pin = "p", *reader_pin = "e";
     int threads = 4, readers = 6;
     const char *trace_path = NULL;
     long trace_from = 0;

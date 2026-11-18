@@ -112,7 +112,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     /* A resident engine calls this once per turn. Reset so this turn's profile
      * is not the previous turn's plus this one. */
     p->t_total = p->t_attn = p->t_idx = p->t_gate = p->t_shared = 0.0;
-    p->t_moe = p->t_io = p->t_trunk = 0.0;
+    p->t_moe = p->t_moe_wall = p->t_io = p->t_trunk = 0.0;
     p->t_bind = p->t_hc = 0.0;
     memset(&p->st, 0, sizeof p->st);
 
@@ -143,7 +143,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         if (dsv4_prefill_cancelled(p))
             return dsv4_prefill_cancel_code(p);
         const double tl0 = dsv4_now_s();
-        const double ta0 = p->t_attn, tm0 = p->t_moe;
+        const double ta0 = p->t_attn;
+        const double tmw0 = p->t_moe_wall;
         const double tg0 = p->t_gate, ts0 = p->t_shared;
         const double th0 = p->t_hc, tio0 = p->t_io;
         DSV4PrefillVkStats lvk0[DSV4_VK_KIND_COUNT];
@@ -181,7 +182,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             DSV4PrefillLayerInstr *li = &p->linstr[L];
             li->total_s = dsv4_now_s() - tl0;
             li->attn_s = p->t_attn - ta0;
-            li->moe_s = p->t_moe - tm0;
+            li->moe_s = p->t_moe_wall - tmw0;
             li->gate_s = p->t_gate - tg0;
             li->shared_s = p->t_shared - ts0;
             li->hc_s = p->t_hc - th0;
@@ -199,6 +200,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                 vd->copy_in_s = b->copy_in_s - a->copy_in_s;
                 vd->record_s = b->record_s - a->record_s;
                 vd->submit_s = b->submit_s - a->submit_s;
+                vd->wait_s = b->wait_s - a->wait_s;
+                vd->fill_s = b->fill_s - a->fill_s;
                 vd->copy_out_s = b->copy_out_s - a->copy_out_s;
                 vd->total_s = b->total_s - a->total_s;
             }
@@ -234,7 +237,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     dsv4_prof.attn       += p->t_attn;
     dsv4_prof.idxer      += p->t_idx;
     dsv4_prof.gate       += p->t_gate;
-    dsv4_prof.expert_mm  += p->t_moe;
+    dsv4_prof.expert_mm  += p->t_moe_wall;
     dsv4_prof.shared     += p->t_shared;
     dsv4_prof.hc         += p->t_hc;
     dsv4_prof.trunk_io   += p->t_trunk;
@@ -245,7 +248,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             "prefill: %d tokens at pos %d, one block, %.2f s "
             "(%.3f s/token); attn %.2f moe %.2f io %.2f bind %.2f hc %.2f\n",
             n, pos0, p->t_total,
-            p->t_total / (double)n, p->t_attn, p->t_moe, p->t_io,
+            p->t_total / (double)n, p->t_attn, p->t_moe_wall, p->t_io,
             p->t_bind, p->t_hc);
     dsv4_prefill_report(p, n);
 
@@ -263,6 +266,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             vd->copy_in_s = b->copy_in_s - a->copy_in_s;
             vd->record_s = b->record_s - a->record_s;
             vd->submit_s = b->submit_s - a->submit_s;
+            vd->wait_s = b->wait_s - a->wait_s;
+            vd->fill_s = b->fill_s - a->fill_s;
             vd->copy_out_s = b->copy_out_s - a->copy_out_s;
             vd->total_s = b->total_s - a->total_s;
         }

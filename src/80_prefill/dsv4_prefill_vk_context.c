@@ -142,6 +142,12 @@ void dsv4_prefill_vk_free(DSV4PrefillVk *v)
     if (v->xmem) vkFreeMemory(v->dev, v->xmem, NULL);
     if (v->ybuf) vkDestroyBuffer(v->dev, v->ybuf, NULL);
     if (v->ymem) vkFreeMemory(v->dev, v->ymem, NULL);
+    if (v->gbuf) vkDestroyBuffer(v->dev, v->gbuf, NULL);
+    if (v->gmem) vkFreeMemory(v->dev, v->gmem, NULL);
+    if (v->ubuf) vkDestroyBuffer(v->dev, v->ubuf, NULL);
+    if (v->umem) vkFreeMemory(v->dev, v->umem, NULL);
+    if (v->mbuf) vkDestroyBuffer(v->dev, v->mbuf, NULL);
+    if (v->mmem) vkFreeMemory(v->dev, v->mmem, NULL);
     for (int i = 0; i < v->nreg; i++) {
         vkDestroyBuffer(v->dev, v->regions[i].buf, NULL);
         vkFreeMemory(v->dev, v->regions[i].mem, NULL);
@@ -150,7 +156,9 @@ void dsv4_prefill_vk_free(DSV4PrefillVk *v)
     if (v->pipe_fp8) vkDestroyPipeline(v->dev, v->pipe_fp8, NULL);
     if (v->pipe_bf16) vkDestroyPipeline(v->dev, v->pipe_bf16, NULL);
     if (v->pipe_fp4) vkDestroyPipeline(v->dev, v->pipe_fp4, NULL);
+    if (v->pipe_sw) vkDestroyPipeline(v->dev, v->pipe_sw, NULL);
     if (v->dpool) vkDestroyDescriptorPool(v->dev, v->dpool, NULL);
+    if (v->pl_sw) vkDestroyPipelineLayout(v->dev, v->pl_sw, NULL);
     if (v->pl) vkDestroyPipelineLayout(v->dev, v->pl, NULL);
     if (v->dsl) vkDestroyDescriptorSetLayout(v->dev, v->dsl, NULL);
     if (v->cpool) vkDestroyCommandPool(v->dev, v->cpool, NULL);

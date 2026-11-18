@@ -36,7 +36,8 @@ TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
 
 # Prefill GEMM shaders, embedded into dsv4_prefill_vk_init.o.
-VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv
+VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv \
+            build/swiglu.spv
 VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
 
 .PHONY: test serve tui demo bench e2e prefill clean

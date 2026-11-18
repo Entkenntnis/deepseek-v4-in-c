@@ -103,14 +103,19 @@ void dsv4_prefill_report(DSV4Prefill *p, int n)
     /* Top-level buckets. These do not overlap: t_hc is the two hc_pre/norm
      * passes, t_attn the whole attention half, t_gate/t_shared/t_moe the MoE
      * halves, and the two I/O buckets are the blocking calls. */
+    /* t_moe is the sum of per-bucket work and no longer partitions wall time
+     * once CPU fill and GPU execution overlap. Use the routed wall for the
+     * coverage sum; only the prefetch begin sits outside that wall. */
+    const double io_outside = p->instr ? s->io_begin_s : s->expert_io;
     const double covered = s->embed + p->t_hc + p->t_attn + p->t_gate +
-                           p->t_shared + p->t_moe + s->expert_io +
+                           p->t_shared + p->t_moe_wall + io_outside +
                            s->trunk_io + s->bind + s->hc_post_moe;
     fprintf(stderr,
             "    top-level: hc %.3f  attn %.3f  router %.3f  shared %.3f  "
-            "routed %.3f  exp-io %.3f  trunk %.3f  bind %.3f  other %.3f s\n",
-            p->t_hc, p->t_attn, p->t_gate, p->t_shared, p->t_moe,
-            s->expert_io, s->trunk_io, s->bind, T - covered);
+            "routed %.3f (work %.3f)  exp-io %.3f  trunk %.3f  bind %.3f  "
+            "other %.3f s\n",
+            p->t_hc, p->t_attn, p->t_gate, p->t_shared, p->t_moe_wall,
+            p->t_moe, s->expert_io, s->trunk_io, s->bind, T - covered);
 
     if (s->have_estats) {
         const uint64_t req = s->e_hits + s->e_misses;
@@ -188,11 +193,11 @@ void dsv4_prefill_instr_layer(DSV4Prefill *p, int L)
         "PF_LAYER call=%d L=%d total_s=%.6f attn_s=%.6f moe_s=%.6f "
         "hc_s=%.6f io_s=%.6f gate_s=%.6f shared_s=%.6f experts=%d "
         "requests=%d cpu_buckets=%d gpu_buckets=%d fallbacks=%d "
-        "cpu_s=%.6f gpu_s=%.6f union_s=%.6f lead_s=%.6f begin_s=%.6f "
-        "wait_s=%.6f end_s=%.6f compute_s=%.6f bytes=%llu",
+        "fill_buckets=%d cpu_s=%.6f gpu_s=%.6f union_s=%.6f lead_s=%.6f "
+        "begin_s=%.6f wait_s=%.6f end_s=%.6f compute_s=%.6f bytes=%llu",
         p->instr_call, L, l->total_s, l->attn_s, l->moe_s, l->hc_s,
         l->io_s, l->gate_s, l->shared_s, l->experts, l->requests,
-        l->buckets_cpu, l->buckets_gpu, l->gpu_fallbacks,
+        l->buckets_cpu, l->buckets_gpu, l->gpu_fallbacks, l->fill_buckets,
         l->cpu_mm, l->gpu_mm, l->union_s, l->lead_s, l->begin_s,
         l->wait_s, l->end_s, l->compute_s, (unsigned long long)l->bytes);
     pf_instr_hist(p, "LAYER_HIST", L, l->hist, l->hist_tokens);
@@ -203,22 +208,27 @@ void dsv4_prefill_instr_layer(DSV4Prefill *p, int L)
         "PF_LAYER_VK call=%d L=%d "
         "dense_calls=%llu dense_tiles=%llu dense_desc_s=%.6f "
         "dense_copy_in_s=%.6f dense_record_s=%.6f dense_submit_s=%.6f "
-        "dense_copy_out_s=%.6f expert_calls=%llu expert_tiles=%llu "
+        "dense_wait_s=%.6f dense_fill_s=%.6f dense_copy_out_s=%.6f "
+        "expert_calls=%llu expert_tiles=%llu "
         "expert_desc_s=%.6f expert_copy_in_s=%.6f expert_record_s=%.6f "
-        "expert_submit_s=%.6f expert_copy_out_s=%.6f",
+        "expert_submit_s=%.6f expert_wait_s=%.6f expert_fill_s=%.6f "
+        "expert_copy_out_s=%.6f",
         p->instr_call, L,
         (unsigned long long)d->calls, (unsigned long long)d->tiles,
-        d->desc_s, d->copy_in_s, d->record_s, d->submit_s, d->copy_out_s,
+        d->desc_s, d->copy_in_s, d->record_s, d->submit_s, d->wait_s,
+        d->fill_s, d->copy_out_s,
         (unsigned long long)e->calls, (unsigned long long)e->tiles,
-        e->desc_s, e->copy_in_s, e->record_s, e->submit_s, e->copy_out_s);
+        e->desc_s, e->copy_in_s, e->record_s, e->submit_s, e->wait_s,
+        e->fill_s, e->copy_out_s);
 }
 
 void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0)
 {
     if (!p || p->instr < 1) return;
     const DSV4PrefillStats *s = &p->st;
-    const double routed_s = p->t_moe;
-    const double expert_phase_s = routed_s + s->expert_io;
+    const double routed_s = p->t_moe_wall;
+    const double routed_work_s = p->t_moe;
+    const double expert_phase_s = routed_s + s->io_begin_s;
     const double read_avg_ms = s->io_read_n
         ? 1000.0 * s->io_read_s / (double)s->io_read_n : 0.0;
     const double read_busy = (s->cache_readers > 0 && p->t_total > 0.0)
@@ -235,18 +245,22 @@ void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0)
 
     pf_instr_emit(p,
         "PF_CALL call=%d n=%d pos=%d total_s=%.6f attn_s=%.6f gate_s=%.6f "
-        "shared_s=%.6f routed_s=%.6f io_block_s=%.6f expert_phase_s=%.6f "
+        "shared_s=%.6f routed_s=%.6f routed_work_s=%.6f io_block_s=%.6f "
+        "expert_phase_s=%.6f fill_s=%.6f fill_buckets=%d "
         "hc_s=%.6f trunk_s=%.6f bind_s=%.6f union_s=%.6f",
         p->instr_call, n, pos0, p->t_total, p->t_attn, p->t_gate,
-        p->t_shared, routed_s, s->expert_io, expert_phase_s, p->t_hc,
-        s->trunk_io, s->bind, union_s);
+        p->t_shared, routed_s, routed_work_s, s->expert_io,
+        expert_phase_s,
+        p->vk_stats[DSV4_VK_KIND_EXPERT].fill_s, s->fill_buckets,
+        p->t_hc, s->trunk_io, s->bind, union_s);
     pf_instr_emit(p,
         "PF_EXPERT call=%d buckets=%d cpu_buckets=%d gpu_buckets=%d "
-        "fallbacks=%d cpu_s=%.6f gpu_s=%.6f mm_s=%.6f swiglu_s=%.6f "
-        "pack_s=%.6f sum_s=%.6f",
+        "fallbacks=%d fill_buckets=%d cpu_s=%.6f gpu_s=%.6f mm_s=%.6f "
+        "swiglu_s=%.6f pack_s=%.6f sum_s=%.6f",
         p->instr_call, s->buckets_total, s->buckets_cpu, s->buckets_gpu,
-        s->gpu_fallbacks, s->expert_mm_cpu, s->expert_mm_gpu,
-        s->expert_mm, s->expert_swiglu, s->expert_pack, s->expert_sum);
+        s->gpu_fallbacks, s->fill_buckets, s->expert_mm_cpu,
+        s->expert_mm_gpu, s->expert_mm, s->expert_swiglu, s->expert_pack,
+        s->expert_sum);
     pf_instr_hist(p, "HIST", -1, s->bucket_hist, s->bucket_tokens);
     {
         char buf[512];
@@ -289,12 +303,13 @@ void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0)
         pf_instr_emit(p,
             "PF_VK call=%d kind=%s calls=%llu tiles=%llu xbytes=%llu "
             "ybytes=%llu desc_s=%.6f copy_in_s=%.6f record_s=%.6f "
-            "submit_s=%.6f copy_out_s=%.6f total_s=%.6f",
+            "submit_s=%.6f wait_s=%.6f fill_s=%.6f copy_out_s=%.6f "
+            "total_s=%.6f",
             p->instr_call, k == DSV4_VK_KIND_DENSE ? "dense" : "expert",
             (unsigned long long)v->calls, (unsigned long long)v->tiles,
             (unsigned long long)v->xbytes, (unsigned long long)v->ybytes,
-            v->desc_s, v->copy_in_s, v->record_s, v->submit_s,
-            v->copy_out_s, v->total_s);
+            v->desc_s, v->copy_in_s, v->record_s, v->submit_s, v->wait_s,
+            v->fill_s, v->copy_out_s, v->total_s);
     }
 }
 

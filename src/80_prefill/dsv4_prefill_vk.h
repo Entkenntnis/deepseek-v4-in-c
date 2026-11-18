@@ -25,17 +25,26 @@ enum {
 };
 
 /* Per-kind counters accumulated inside the Vulkan backend. All times are
- * wall-clock on the submitting thread; submit_s includes the fence wait, so it
- * is GPU execution plus driver latency, not a pure "submit" cost. */
+ * wall-clock on the submitting thread. submit_s is now only vkQueueSubmit;
+ * wait_s is the fence wait. fill_s is CPU work the caller ran between those
+ * two while the GPU was busy, so it is not GPU execution time. */
 typedef struct {
     uint64_t calls, tiles, xbytes, ybytes;
     double desc_s;       /* vkUpdateDescriptorSets                        */
     double copy_in_s;    /* host memcpy into the mapped X buffer          */
     double record_s;     /* reset/begin/bind/push/dispatch/end            */
-    double submit_s;     /* vkQueueSubmit + vkWaitForFences               */
+    double submit_s;     /* vkQueueSubmit                                 */
+    double wait_s;       /* vkWaitForFences                               */
+    double fill_s;       /* caller's CPU fill while the fence was pending */
     double copy_out_s;   /* host memcpy out of the mapped Y buffer        */
     double total_s;      /* whole dsv4_prefill_vk_gemm() call             */
 } DSV4PrefillVkStats;
+
+/* Called after a tile is submitted and before the fence is waited on. It must
+ * not touch Vulkan state or the caller's in-flight X/Y buffers. Returns 1 when
+ * it did work and 0 when no CPU bucket is ready. The backend calls it in a
+ * loop until the fence signals or it returns 0. */
+typedef int (*DSV4PrefillVkFillFn)(void *ctx);
 
 /* Returns 0 on success, -1 when Vulkan or host import is unavailable. The
  * caller keeps its CPU path then. */
@@ -54,5 +63,22 @@ void dsv4_prefill_vk_stats(const DSV4PrefillVk *v,
  * bucket. */
 int  dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
                           const DSV4QMat *m, int n, int kind);
+
+/* Same GEMM, but calls fill(fill_ctx) once after each tile submit and before
+ * waiting for that tile. fill may be NULL (then this is exactly the synchronous
+ * path). *fill_s, when non-NULL, receives the CPU time spent in fill. */
+int  dsv4_prefill_vk_gemm_overlap(DSV4PrefillVk *v, float *y, const float *x,
+                                  const DSV4QMat *m, int n, int kind,
+                                  DSV4PrefillVkFillFn fill, void *fill_ctx,
+                                  double *fill_s);
+
+/* One routed expert: w1/w3, SwiGLU and w2 in one command buffer. `inter` is
+ * the routed-expert intermediate width; `limit` is the SwiGLU clamp. */
+int  dsv4_prefill_vk_expert_fused(DSV4PrefillVk *v, float *y, const float *x,
+                                  const DSV4QMat *w1, const DSV4QMat *w3,
+                                  const DSV4QMat *w2, int n, int inter,
+                                  float limit,
+                                  DSV4PrefillVkFillFn fill, void *fill_ctx,
+                                  double *fill_s);
 
 #endif /* DSV4_PREFILL_VK_H */

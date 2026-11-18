@@ -13,6 +13,16 @@ void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap)
     c->stream_cap = cap;
 }
 
+int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
+{
+    if (!c || !b || !k || !b->streaming) return 0;
+    int expert = -1;
+    pthread_mutex_lock(&c->rmx);
+    const int got = dsv4_cache_take_ready(c, b, k, &expert);
+    pthread_mutex_unlock(&c->rmx);
+    return got;
+}
+
 int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
 {
     if (!c || !b || !k) return 0;

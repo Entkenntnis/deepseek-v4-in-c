@@ -52,8 +52,21 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
     p->ex_fill = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_seen = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
+    /* CPU fill workspace for the GPU overlap. Fixed size: fill buckets are
+     * below VK_EXPERT_MIN_COUNT, never prompt-sized. */
+    const size_t fill_rows = DSV4_PREFILL_FILL_MAX;
+    p->sm_x = (float *)xcalloc(fill_rows * (size_t)c->hidden * sizeof(float));
+    p->sm_gate = (float *)xcalloc(fill_rows * (size_t)c->moe_inter *
+                                  sizeof(float));
+    p->sm_up = (float *)xcalloc(fill_rows * (size_t)c->moe_inter *
+                                sizeof(float));
+    p->sm_mid = (float *)xcalloc(fill_rows * (size_t)c->moe_inter *
+                                 sizeof(float));
+    p->sm_out = (float *)xcalloc(fill_rows * (size_t)c->hidden *
+                                 sizeof(float));
     if (!p->xh || !p->attn_scratch || !p->ex_count || !p->ex_order ||
-        !p->ex_off || !p->ex_fill || !p->ex_seen) {
+        !p->ex_off || !p->ex_fill || !p->ex_seen ||
+        !p->sm_x || !p->sm_gate || !p->sm_up || !p->sm_mid || !p->sm_out) {
         dsv4_prefill_free(p);
         return -1;
     }
@@ -124,5 +137,7 @@ void dsv4_prefill_free(DSV4Prefill *p)
     free(p->attn_scratch);
     free(p->ex_count); free(p->ex_order); free(p->ex_off);
     free(p->ex_fill); free(p->ex_seen);
+    free(p->sm_x); free(p->sm_gate); free(p->sm_up);
+    free(p->sm_mid); free(p->sm_out);
     free(p);
 }

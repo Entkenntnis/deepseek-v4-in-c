@@ -13,10 +13,16 @@
 /* Instrumentation: bucket sizes are token requests per distinct expert. */
 #define DSV4_PF_HIST_BINS 8
 
+/* A CPU bucket that runs inside a GPU submit/wait window. The routed-expert
+ * CPU path is used below VK_EXPERT_MIN_COUNT (8), so 8 rows cover every fill
+ * bucket and leave one spare if the threshold moves. */
+#define DSV4_PREFILL_FILL_MAX 8
+
 typedef struct {
     int experts;            /* distinct experts in this layer               */
     int requests;           /* n * topk, duplicates included                */
     int buckets_cpu, buckets_gpu, gpu_fallbacks;
+    int fill_buckets;       /* CPU buckets run inside a GPU wait          */
     int hist[DSV4_PF_HIST_BINS];
     int hist_tokens[DSV4_PF_HIST_BINS];
     double cpu_mm, gpu_mm;  /* expert matmul time by path                    */
@@ -52,6 +58,7 @@ typedef struct {
     /* Instrumentation. The histograms are filled from the routed-expert
      * buckets, not from the routing table, so they describe what actually ran. */
     int buckets_total, buckets_cpu, buckets_gpu, gpu_fallbacks;
+    int fill_buckets;        /* CPU buckets run during a GPU wait           */
     int bucket_hist[DSV4_PF_HIST_BINS];
     int bucket_tokens[DSV4_PF_HIST_BINS];
     double bucket_s[DSV4_PF_HIST_BINS];      /* whole bucket wall time      */
@@ -145,6 +152,13 @@ struct DSV4Prefill {
     float *ex_gate, *ex_up, *ex_mid; /* [B][moe_inter] expert working set   */
     float *ex_out;           /* [B][hidden] expert output before scatter     */
 
+    /* A GPU bucket owns ex_* from its first gather until its last scatter.
+     * The CPU buckets that fill the GPU wait use these separate rows, so the
+     * two schedules can overlap without aliasing. */
+    float *sm_x;
+    float *sm_gate, *sm_up, *sm_mid;
+    float *sm_out;
+
     /* Whole-layer expert prefetch. begin() is called as soon as routing is
      * known -- after the gate for scored layers, at the top of the layer for
      * hash layers -- and the batch stays live while the shared expert (and,
@@ -168,6 +182,7 @@ struct DSV4Prefill {
     float *idx_qb, *idx_wb;
 
     double t_total, t_attn, t_idx, t_gate, t_shared, t_moe;
+    double t_moe_wall;       /* wall of the routed phase; t_moe is work sum */
     double t_io, t_trunk, t_bind, t_hc;
 
     DSV4PrefillStats st;   /* per-call sub-stage accounting */
@@ -217,8 +232,16 @@ int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
 void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
                          const DSV4ExpertW *e, int hidden, int inter,
                          float limit);
+/* Whether this bucket is meant for the Vulkan expert path. */
+int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
+/* fill/fill_ctx are optional: when present and the bucket runs on the GPU,
+ * they run CPU buckets between each submit and fence wait. */
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
-                                int count, const int *tok, const int *ks);
+                                int count, const int *tok, const int *ks,
+                                DSV4PrefillVkFillFn fill, void *fill_ctx);
+/* CPU-only bucket using the sm_* workspace. Never submits GPU work. */
+void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
+                                     int count, const int *tok, const int *ks);
 /* Start a whole-layer expert batch early. Returns 0 when the batch is live or
  * when the layer is too large for one batch (the union then groups it); the
  * caller must still run dsv4_prefill_moe_union(), which ends it. */

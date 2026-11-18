@@ -155,4 +155,7 @@ void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);
  * slot that was still reading at begin() counts as one of these. */
 int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
 
+/* Non-blocking variant: hand out one already-published miss, or return 0. */
+int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
+
 #endif /* DSV4_CACHE_H */

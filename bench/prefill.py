@@ -82,7 +82,7 @@ def parse_args():
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--pin", default="p", choices=("off", "all", "p", "e"))
     p.add_argument("--readers", type=int, default=6)
-    p.add_argument("--reader-pin", default="off", choices=("off", "all", "p", "e"))
+    p.add_argument("--reader-pin", default="e", choices=("off", "all", "p", "e"))
     p.add_argument("--stream-miss", type=int, default=6)
     p.add_argument("--prompt", default=USER_PROMPT,
                    help="user text after the tool preamble")

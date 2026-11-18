@@ -39,13 +39,23 @@ struct DSV4PrefillVk {
     VkDescriptorSetLayout dsl;
     VkDescriptorPool      dpool;
     VkDescriptorSet       dset;
-    VkPipelineLayout      pl;
-    VkPipeline            pipe_fp8, pipe_bf16, pipe_fp4;
+    /* Fused expert pipeline: w1, w3, swiglu, w2, with their own sets so all
+     * four dispatches can live in one command buffer. */
+    VkDescriptorSet       xdset[4];
+    VkPipelineLayout      pl, pl_sw;
+    VkPipeline            pipe_fp8, pipe_bf16, pipe_fp4, pipe_sw;
 
     VkBuffer       xbuf, ybuf;
     VkDeviceMemory xmem, ymem;
     void          *xmap, *ymap;
     size_t         xbytes, ybytes;
+    /* Fused expert intermediates: gate, up, swiglu output. Device-only from
+     * the host's point of view, but mapped host-visible memory is simplest on
+     * this integrated device. */
+    VkBuffer       gbuf, ubuf, mbuf;
+    VkDeviceMemory gmem, umem, mmem;
+    void          *gmap, *umap, *mmap;
+    size_t         expert_mid_bytes;
 
     DSV4PrefillVkStats st[DSV4_VK_KIND_COUNT];
 
@@ -63,6 +73,11 @@ typedef struct {
     uint32_t M, K, N, w_off, s_off;
 } DSV4VkPC;
 
+typedef struct {
+    uint32_t n, k;
+    float    limit;
+} DSV4VkSwigluPC;
+
 uint32_t dsv4_prefill_vk_pick_mem_type(
     const VkPhysicalDeviceMemoryProperties *mp, uint32_t allowed);
 int  dsv4_prefill_vk_open(DSV4PrefillVk *v);
@@ -77,5 +92,9 @@ int  dsv4_prefill_vk_make_mapped(DSV4PrefillVk *v, VkDeviceSize bytes,
                                  void **map);
 int  dsv4_prefill_vk_make_pipeline(DSV4PrefillVk *v, const uint32_t *code,
                                    size_t len, VkPipeline *out);
+int  dsv4_prefill_vk_make_pipeline_layout(DSV4PrefillVk *v,
+                                          const uint32_t *code, size_t len,
+                                          VkPipelineLayout layout,
+                                          VkPipeline *out);
 
 #endif /* DSV4_PREFILL_VK_INT_H */

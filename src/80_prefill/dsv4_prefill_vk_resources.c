@@ -29,8 +29,10 @@ int dsv4_prefill_vk_make_mapped(DSV4PrefillVk *v, VkDeviceSize bytes,
          ? 0 : -1;
 }
 
-int dsv4_prefill_vk_make_pipeline(DSV4PrefillVk *v, const uint32_t *code,
-                                  size_t len, VkPipeline *out)
+int dsv4_prefill_vk_make_pipeline_layout(DSV4PrefillVk *v,
+                                         const uint32_t *code, size_t len,
+                                         VkPipelineLayout layout,
+                                         VkPipeline *out)
 {
     VkShaderModuleCreateInfo smi;
     memset(&smi, 0, sizeof smi);
@@ -46,9 +48,15 @@ int dsv4_prefill_vk_make_pipeline(DSV4PrefillVk *v, const uint32_t *code,
     cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cpi.stage.module = mod;
     cpi.stage.pName = "main";
-    cpi.layout = v->pl;
+    cpi.layout = layout;
     const VkResult r = vkCreateComputePipelines(v->dev, VK_NULL_HANDLE, 1,
                                                 &cpi, NULL, out);
     vkDestroyShaderModule(v->dev, mod, NULL);
     return r == VK_SUCCESS ? 0 : -1;
+}
+
+int dsv4_prefill_vk_make_pipeline(DSV4PrefillVk *v, const uint32_t *code,
+                                  size_t len, VkPipeline *out)
+{
+    return dsv4_prefill_vk_make_pipeline_layout(v, code, len, v->pl, out);
 }

@@ -61,6 +61,7 @@ typedef struct {
                  const DSV4ExpertW **out);
     int (*end)(void *ctx, const DSV4ExpertW **out);
     int (*wait_any)(void *ctx, int *k);
+    int (*try_any)(void *ctx, int *k);   /* same, non-blocking, optional */
     int (*stats)(void *ctx, DSV4ExpertStats *out);
     /* Optional: reorder a layer's distinct experts into checkpoint order. */
     void (*sort)(void *ctx, int layer, int *experts, int n);
