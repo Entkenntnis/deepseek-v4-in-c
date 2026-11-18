@@ -12,9 +12,12 @@
 #include "dsv4_prof.h"
 #include "dsv4_trace.h"
 
-/* ~43 layers x ~40 events is ~1,700 per token; 8,192 leaves room for a
- * pathological layer and is still only half a megabyte. */
-#define DSV4_TRACE_CAP 8192
+/* A decode token is ~1,700 events. A prefill layer unions every distinct
+ * expert and can emit a BATCH/Q/R/P per expert plus a bucket event and the
+ * stage spans, so one call can reach ~150k including per-token sequential
+ * spans. Keep enough room for a full block; the allocation only happens when
+ * tracing is enabled. */
+#define DSV4_TRACE_CAP 262144
 
 typedef struct {
     double    t;
@@ -22,11 +25,15 @@ typedef struct {
     int       n, ntodo;
     long long bytes;
     double    ms;
-    char      tag[12];
+    char      tag[20];
 } TraceEv;
+
+enum { BLOCK_NONE = 0, BLOCK_DECODE, BLOCK_PREFILL };
 
 static struct {
     int             on, live;
+    int             block;          /* which begin() opened the live block */
+    int             decode_on, prefill_on;
     FILE           *f;
     pthread_mutex_t mx;
     TraceEv        *ev;
@@ -34,9 +41,12 @@ static struct {
     double          t0;
     long            token;          /* 1-based count of decode tokens */
     long            from, count;
+    long            pf_call;        /* 1-based count of prefill calls */
+    long            pf_from, pf_count;
+    int             pf_tokens;
     int             pos, lo, hi;
     char            phase[12];
-} g = { .lo = -1, .hi = -1 };
+} g = { .lo = -1, .hi = -1, .decode_on = 1 };
 
 static void tag_copy(char *d, const char *s)
 {
@@ -70,8 +80,9 @@ int dsv4_trace_open(const char *path)
     }
     g.cap = DSV4_TRACE_CAP;
     g.n = g.dropped = 0;
-    g.token = 0;
+    g.token = g.pf_call = 0;
     g.live = 0;
+    g.block = BLOCK_NONE;
     g.on = 1;
     fprintf(stderr, "dsv4_trace: writing %s\n", path);
     return 0;
@@ -82,6 +93,7 @@ void dsv4_trace_close(void)
     if (!g.on) return;
     g.on = 0;
     g.live = 0;
+    g.block = BLOCK_NONE;
     fflush(g.f);
     fclose(g.f);
     g.f = NULL;
@@ -90,10 +102,23 @@ void dsv4_trace_close(void)
     g.ev = NULL;
 }
 
+void dsv4_trace_phases(int mask)
+{
+    if (mask <= 0) mask = DSV4_TRACE_PHASE_DECODE;
+    g.decode_on  = (mask & DSV4_TRACE_PHASE_DECODE) != 0;
+    g.prefill_on = (mask & DSV4_TRACE_PHASE_PREFILL) != 0;
+}
+
 void dsv4_trace_window(long from, long count)
 {
     g.from = from < 0 ? 0 : from;
     g.count = count < 0 ? 0 : count;
+}
+
+void dsv4_trace_prefill_window(long from, long count)
+{
+    g.pf_from = from < 0 ? 0 : from;
+    g.pf_count = count < 0 ? 0 : count;
 }
 
 void dsv4_trace_layers(int lo, int hi)
@@ -136,28 +161,26 @@ void dsv4_trace_ev(const DSV4TraceEv *in)
 
 void dsv4_trace_token_begin(int pos, const char *phase)
 {
-    if (!g.on) return;
+    if (!g.on || !g.decode_on) return;
     g.token++;
     const long idx = g.token - 1;
     const int live = idx >= g.from && (g.count <= 0 || idx < g.from + g.count);
 
     pthread_mutex_lock(&g.mx);
     g.live = live;
+    g.block = live ? BLOCK_DECODE : BLOCK_NONE;
     g.n = 0;
     g.dropped = 0;
     g.t0 = dsv4_now_s();
     g.pos = pos;
+    g.pf_tokens = 0;
     tag_copy(g.phase, phase);
     pthread_mutex_unlock(&g.mx);
 }
 
-void dsv4_trace_token_end(void)
+static void trace_flush_locked(const char *header)
 {
-    if (!g.on || !g.live) return;
-
-    pthread_mutex_lock(&g.mx);
-    fprintf(g.f, "# token %ld pos %d phase %s events %d dropped %d\n",
-            g.token - 1, g.pos, g.phase, g.n, g.dropped);
+    fprintf(g.f, "%s", header);
     for (int i = 0; i < g.n; i++) {
         const TraceEv *e = &g.ev[i];
         fprintf(g.f, "%.6f %c %d %d %d %d %d %lld %.3f %d %d %s\n",
@@ -167,5 +190,52 @@ void dsv4_trace_token_end(void)
     fflush(g.f);
     g.n = 0;
     g.live = 0;
+    g.block = BLOCK_NONE;
+}
+
+void dsv4_trace_token_end(void)
+{
+    if (!g.on || !g.live || g.block != BLOCK_DECODE) return;
+
+    char header[128];
+    pthread_mutex_lock(&g.mx);
+    snprintf(header, sizeof header,
+             "# token %ld pos %d phase %s events %d dropped %d\n",
+             g.token - 1, g.pos, g.phase, g.n, g.dropped);
+    trace_flush_locked(header);
+    pthread_mutex_unlock(&g.mx);
+}
+
+void dsv4_trace_prefill_begin(int pos, int tokens)
+{
+    if (!g.on || !g.prefill_on) return;
+    g.pf_call++;
+    const long idx = g.pf_call - 1;
+    const int live = idx >= g.pf_from &&
+                     (g.pf_count <= 0 || idx < g.pf_from + g.pf_count);
+
+    pthread_mutex_lock(&g.mx);
+    g.live = live;
+    g.block = live ? BLOCK_PREFILL : BLOCK_NONE;
+    g.n = 0;
+    g.dropped = 0;
+    g.t0 = dsv4_now_s();
+    g.pos = pos;
+    g.pf_tokens = tokens;
+    tag_copy(g.phase, "prefill");
+    pthread_mutex_unlock(&g.mx);
+}
+
+void dsv4_trace_prefill_end(void)
+{
+    if (!g.on || !g.live || g.block != BLOCK_PREFILL) return;
+
+    char header[160];
+    pthread_mutex_lock(&g.mx);
+    snprintf(header, sizeof header,
+             "# prefill call=%ld pos=%d tokens=%d phase=%s events=%d "
+             "dropped=%d\n",
+             g.pf_call - 1, g.pos, g.pf_tokens, g.phase, g.n, g.dropped);
+    trace_flush_locked(header);
     pthread_mutex_unlock(&g.mx);
 }

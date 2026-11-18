@@ -26,18 +26,22 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const double t0 = dsv4_now_s();
 
     if (dsv4_prefill_pm_stats(p, p->qr, p->x1, &w->attn.wq_a, n,
-                              &p->st.proj_qkv, &p->st.f_qkv)) return -1;
+                              &p->st.proj_qkv, &p->st.f_qkv, L, "qkv_a"))
+        return -1;
     if (dsv4_prefill_pm_stats(p, p->kv, p->x1, &w->attn.wkv, n,
-                              &p->st.proj_qkv, &p->st.f_qkv)) return -1;
+                              &p->st.proj_qkv, &p->st.f_qkv, L, "kv"))
+        return -1;
     {
         const double ts = dsv4_now_s();
         for (int t = 0; t < n; t++)
             dsv4_rmsnorm(p->qr + (size_t)t * ql, p->qr + (size_t)t * ql,
                          w->attn.q_norm, ql, c->rms_eps);
         p->st.q_norm += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "qnorm", ts);
     }
     if (dsv4_prefill_pm_stats(p, p->q, p->qr, &w->attn.wq_b, n,
-                              &p->st.proj_qkv, &p->st.f_qkv)) return -1;
+                              &p->st.proj_qkv, &p->st.f_qkv, L, "qkv_b"))
+        return -1;
 
     /* COMPRESSOR PROJECTIONS ARE GEMMs, NOT GEMVs. They read x1 and carry no
      * position dependency, so the block's weights are read once and used for
@@ -46,10 +50,12 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
      * still runs per token and reads its row. */
     if (comp) {
         if (dsv4_prefill_pm_stats(p, p->comp_kv_b, p->x1, &w->attn.comp.wkv,
-                                  n, &p->st.comp_proj, &p->st.f_comp))
+                                  n, &p->st.comp_proj, &p->st.f_comp, L,
+                                  "comp_kv"))
             return -1;
         if (dsv4_prefill_pm_stats(p, p->comp_sc_b, p->x1, &w->attn.comp.wgate,
-                                  n, &p->st.comp_proj, &p->st.f_comp))
+                                  n, &p->st.comp_proj, &p->st.f_comp, L,
+                                  "comp_sc"))
             return -1;
     }
 
@@ -74,6 +80,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
             dsv4_rope_apply(qh, hd, rd, cs, sn, pos, rd / 2, 0);
         }
         p->st.q_head += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "qhead", ts);
 
         float *kvt = p->kv + (size_t)t * hd;
         ts = dsv4_now_s();
@@ -82,6 +89,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
         memcpy(kvc + (size_t)(pos % c->sliding_window) * hd, kvt,
                (size_t)hd * sizeof(float));
         p->st.kv_norm += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "kv_norm", ts);
 
         if (comp) {
             const int ratio = w->compress_ratio;
@@ -101,12 +109,14 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                 st->n_compressed++;
             }
             p->st.comp_step += dsv4_now_s() - ts;
+            dsv4_pf_trace_stage(L, "comp_step", ts);
         }
 
         ts = dsv4_now_s();
         int n_idx = dsv4_window_idxs(p->scratch[t].idxs, pos,
                                      c->sliding_window);
         p->st.win_idx += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "win_idx", ts);
         const int avail = st->n_compressed;
         if (avail > 0) {
             if (avail > p->scratch[t].idx_cap) {
@@ -124,12 +134,14 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                             p, p->idx_qb + (size_t)t * c->index_n_heads *
                                            c->index_head_dim,
                             p->qr + (size_t)t * ql, &w->attn.idx.wq_b, rem,
-                            &p->st.idx_proj, &p->st.f_idx)) return -1;
+                            &p->st.idx_proj, &p->st.f_idx, L, "idx_q"))
+                        return -1;
                     if (dsv4_prefill_pm_stats(
                             p, p->idx_wb + (size_t)t * c->index_n_heads,
                             p->x1 + (size_t)t * d,
                             &w->attn.idx.weights_proj, rem,
-                            &p->st.idx_proj, &p->st.f_idx)) return -1;
+                            &p->st.idx_proj, &p->st.f_idx, L, "idx_w"))
+                        return -1;
                     idx_batched = 1;
                 }
                 float *iq = p->idx_qb + (size_t)t * c->index_n_heads *
@@ -141,6 +153,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                                     c->index_head_dim, rd, cs, sn, pos,
                                     rd / 2, 0);
                 p->st.idx_rope += dsv4_now_s() - ts;
+                dsv4_pf_trace_stage(L, "idx_rope", ts);
                 ts = dsv4_now_s();
                 dsv4_indexer_score(p->scratch[t].idx_scores,
                                    iq,
@@ -151,6 +164,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                 dsv4_topk(p->scratch[t].idxs + n_idx,
                           p->scratch[t].idx_scores, avail, take);
                 p->st.idx_score += dsv4_now_s() - ts;
+                dsv4_pf_trace_stage(L, "idx_score", ts);
                 p->t_idx += dsv4_now_s() - ti;
             } else {
                 ts = dsv4_now_s();
@@ -169,6 +183,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                          H, hd, n_idx, 1.0f / sqrtf((float)hd),
                          p->attn_scratch);
         p->st.attn_core += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "attn_core", ts);
         p->st.f_attn += 4.0 * (double)H * (double)hd * (double)n_idx * 1e-9;
 
         ts = dsv4_now_s();
@@ -176,6 +191,7 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
             dsv4_rope_apply(ot + (size_t)h * hd, hd, rd, cs, sn, pos,
                             rd / 2, 1);
         p->st.attn_deroep += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "derope", ts);
     }
 
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);

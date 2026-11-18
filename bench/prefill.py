@@ -34,6 +34,7 @@ Examples:
     python3 bench/prefill.py --detailed
     python3 bench/prefill.py --runs 5 --json
     python3 bench/prefill.py --instrument --instrument-file /tmp/prefill.txt
+    python3 bench/prefill.py --trace /tmp/prefill.trace --trace-view
     python3 bench/prefill.py --update-golden
     DSV4_PREFILL_CPU=1 python3 bench/prefill.py --no-golden
 """
@@ -102,6 +103,15 @@ def parse_args():
                         "(summary + per-layer lines)")
     p.add_argument("--instrument-file", default=None, metavar="FILE",
                    help="write instrumentation lines to FILE instead of stderr")
+    p.add_argument("--trace", default=None, metavar="FILE",
+                   help="write a per-layer prefill activity trace to FILE")
+    p.add_argument("--trace-run", type=int, default=2,
+                   help="1-based run to trace (default 2, the first measured)")
+    p.add_argument("--trace-layers", default=None, metavar="A-B",
+                   help="only record these layers")
+    p.add_argument("--trace-view", action="store_true",
+                   help="run tools/prefill_trace_view.py --summary after the "
+                        "turn")
     return p.parse_args()
 
 
@@ -116,7 +126,7 @@ def build_env(a):
 
 
 def build_command(a):
-    return [
+    cmd = [
         str(a.binary),
         "--model", str(a.model),
         "--trunk", str(a.trunk),
@@ -129,6 +139,15 @@ def build_command(a):
         "--reader-pin", a.reader_pin,
         "--stream-miss", str(a.stream_miss),
     ]
+    if a.trace:
+        # One prefill call per run; select the requested 1-based run.
+        cmd += ["--trace", str(a.trace),
+                "--trace-phase", "prefill",
+                "--trace-from", str(a.trace_run - 1),
+                "--trace-tokens", "1"]
+        if a.trace_layers:
+            cmd += ["--trace-layers", a.trace_layers]
+    return cmd
 
 
 def load_preamble(path):
@@ -338,6 +357,9 @@ def main():
     if a.no_golden and a.update_golden:
         print("prefill: --no-golden and --update-golden are mutually exclusive",
               file=sys.stderr)
+        return 2
+    if a.trace and not 1 <= a.trace_run <= a.runs:
+        print("prefill: --trace-run must be within 1..--runs", file=sys.stderr)
         return 2
     if not Path(a.binary).is_file():
         print(f"prefill: {a.binary} not found; run `make serve` first",
@@ -573,6 +595,13 @@ def main():
             print(status)
         else:
             print(f"golden: {status}", file=sys.stderr)
+
+    if a.trace:
+        print(f"trace: {a.trace} (run {a.trace_run})", file=sys.stderr)
+        if a.trace_view:
+            view = REPO / "tools" / "prefill_trace_view.py"
+            subprocess.run([sys.executable, str(view), str(a.trace),
+                            "--summary"], check=False)
 
     if len(measured) >= 2:
         for key in ("prefill_tps", "ttft_s"):

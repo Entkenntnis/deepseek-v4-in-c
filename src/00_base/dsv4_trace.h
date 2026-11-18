@@ -16,8 +16,12 @@
  *   the end of a traced token.
  *
  * SCOPE
- *   Decode only. Prefill and hash-layer prefetch may run while tracing, but
- *   their events are dropped unless a decode token is open.
+ *   Decode tokens and prefill calls. A decode trace block and a prefill trace
+ *   block use the same event ring but separate counters/windows, because the
+ *   two phases have very different lengths and a prefill call is not a token.
+ *   The cache/reader events are shared: when a prefill block is open they
+ *   describe the layer-level expert union exactly as they describe a decode
+ *   token's batch.
  */
 #ifndef DSV4_TRACE_H
 #define DSV4_TRACE_H
@@ -42,6 +46,8 @@ enum {
     DSV4_TR_SHARED      = 'S',  /* the shared expert finished                  */
     DSV4_TR_BARRIER     = 'F',  /* end() had to wait for outstanding reads     */
     DSV4_TR_LAYER_END   = 'E',  /* moe() of this layer is complete             */
+    DSV4_TR_STAGE       = 'D',  /* prefill: one named sequential/GEMM stage    */
+    DSV4_TR_BUCKET      = 'U',  /* prefill: one routed-expert token bucket     */
 };
 
 /* Field use per kind (unused fields are zero):
@@ -59,6 +65,8 @@ enum {
  *   S  layer ms
  *   F  layer ms
  *   E  layer ms
+ *   D  layer ms tag=stage name, at=stage start (prefill only)
+ *   U  layer k=request expert=e n=bucket tokens ms tag=cpu|gpu|fill (prefill)
  */
 typedef struct {
     int        kind;
@@ -76,6 +84,12 @@ typedef struct {
 int  dsv4_trace_open(const char *path);
 void dsv4_trace_close(void);
 
+/* Which phases are recorded. Default is decode only, so existing --trace
+ * behaviour does not change. PREFILL traces whole prefill calls instead. */
+#define DSV4_TRACE_PHASE_DECODE  1
+#define DSV4_TRACE_PHASE_PREFILL 2
+void dsv4_trace_phases(int mask);
+
 /* Trace on/off and token selection. `from` is a 0-based decode-token index;
  * `count` is how many tokens to record, with 0 meaning "all from `from` on".
  * Call before the first token; the window is evaluated per token. */
@@ -89,6 +103,13 @@ int  dsv4_trace_active(void);
  * timer; end() formats and flushes. Both are cheap no-ops when off. */
 void dsv4_trace_token_begin(int pos, const char *phase);
 void dsv4_trace_token_end(void);
+
+/* One prefill call (the whole prompt block). `pos` is the first prompt
+ * position and `tokens` the block length. Selection is a separate prefill-call
+ * index, so tracing decode token N and prefill call N do not collide. */
+void dsv4_trace_prefill_window(long from, long count);
+void dsv4_trace_prefill_begin(int pos, int tokens);
+void dsv4_trace_prefill_end(void);
 
 void dsv4_trace_ev(const DSV4TraceEv *e);
 

@@ -66,7 +66,10 @@ def parse_args():
     p.add_argument("--reader-pin", default="e", choices=("off", "all", "p", "e"))
     p.add_argument("--stream-miss", type=int, default=6)
     p.add_argument("--trace", default=None, metavar="FILE",
-                   help="write a per-token expert-scheduling trace to FILE")
+                   help="write a scheduling trace to FILE")
+    p.add_argument("--trace-phase", default="decode",
+                   choices=("decode", "prefill"),
+                   help="trace decode tokens (default) or one prefill call")
     p.add_argument("--trace-run", type=int, default=2,
                    help="1-based run to trace (default 2, the first measured; "
                         "an early stop=eos shifts later runs)")
@@ -101,11 +104,17 @@ def build_command(a):
         "--stream-miss", str(a.stream_miss),
     ]
     if a.trace:
-        # Decode forwards per run are gen - 1: the last emitted token is not
-        # fed back. Traced indices count forwards, not emitted tokens.
-        cmd += ["--trace", str(a.trace),
-                "--trace-from", str(max(0, (a.trace_run - 1) * (a.gen - 1))),
-                "--trace-tokens", str(a.trace_tokens)]
+        cmd += ["--trace", str(a.trace), "--trace-phase", a.trace_phase]
+        if a.trace_phase == "prefill":
+            # One prefill call per run; trace the requested 1-based run.
+            cmd += ["--trace-from", str(a.trace_run - 1),
+                    "--trace-tokens", "1"]
+        else:
+            # Decode forwards per run are gen - 1: the last emitted token is
+            # not fed back. Traced indices count forwards, not emitted tokens.
+            cmd += ["--trace-from",
+                    str(max(0, (a.trace_run - 1) * (a.gen - 1))),
+                    "--trace-tokens", str(a.trace_tokens)]
         if a.trace_layers:
             cmd += ["--trace-layers", a.trace_layers]
     return cmd
@@ -467,9 +476,13 @@ def main():
         print(f"trace: {a.trace} (run {a.trace_run}, "
               f"{a.trace_tokens} token(s))", file=sys.stderr)
         if a.trace_view:
-            view = REPO / "tools" / "trace_view.py"
-            subprocess.run([sys.executable, str(view), str(a.trace),
-                            "--summary", "--all-tokens"], check=False)
+            if a.trace_phase == "prefill":
+                view = REPO / "tools" / "prefill_trace_view.py"
+                args = [str(a.trace), "--summary"]
+            else:
+                view = REPO / "tools" / "trace_view.py"
+                args = [str(a.trace), "--summary", "--all-tokens"]
+            subprocess.run([sys.executable, str(view)] + args, check=False)
 
     # Warn about the thing the user wants to trust: run-to-run stability.
     if len(measured) >= 2:

@@ -37,22 +37,27 @@ static int pm1(DSV4Prefill *p, int layer, float *y, const float *x,
 
 int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
                           const DSV4QMat *m, int n, double *timer,
-                          double *flops)
+                          double *flops, int layer, const char *tag)
 {
     const double t0 = dsv4_now_s();
-    const int rc = pm1(p, 0, y, x, m, n);
-    *timer += dsv4_now_s() - t0;
+    const int rc = pm1(p, layer, y, x, m, n);
+    const double dt = dsv4_now_s() - t0;
+    *timer += dt;
     if (flops) pf_flops(flops, m, n);
+    dsv4_pf_trace_stage(layer, tag, t0);
     return rc;
 }
 
 int dsv4_prefill_pm_multi_stats(DSV4Prefill *p, const DSV4PMJob *jobs, int nj,
-                                double *timer, double *flops)
+                                double *timer, double *flops, int layer,
+                                const char *tag)
 {
     const double t0 = dsv4_now_s();
-    const int rc = pm(p, 0, jobs, nj);
-    *timer += dsv4_now_s() - t0;
+    const int rc = pm(p, layer, jobs, nj);
+    const double dt = dsv4_now_s() - t0;
+    *timer += dt;
     if (flops)
         for (int j = 0; j < nj; j++) pf_flops(flops, jobs[j].m, jobs[j].n);
+    dsv4_pf_trace_stage(layer, tag, t0);
     return rc;
 }

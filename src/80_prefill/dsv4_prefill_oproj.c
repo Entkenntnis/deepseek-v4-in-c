@@ -50,8 +50,10 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
         jobs[g].n = n;
     }
     p->st.oproj_pack += dsv4_now_s() - ts;
+    dsv4_pf_trace_stage(p->cur_layer, "oproj_pack", ts);
     if (dsv4_prefill_pm_multi_stats(p, jobs, c->o_groups,
-                                    &p->st.oproj, &p->st.f_oproj)) return -1;
+                                    &p->st.oproj, &p->st.f_oproj,
+                                    p->cur_layer, "oproj_a")) return -1;
     ts = dsv4_now_s();
     for (int g = 0; g < c->o_groups; g++)
         for (int t = 0; t < n; t++)
@@ -60,8 +62,10 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
                    p->yg + (size_t)g * p->cap * gr + (size_t)t * gr,
                    (size_t)gr * sizeof(float));
     p->st.oproj_unpack += dsv4_now_s() - ts;
+    dsv4_pf_trace_stage(p->cur_layer, "oproj_unpack", ts);
     if (dsv4_prefill_pm_stats(p, p->out, p->ogrp, &w->attn.wo_b, n,
-                              &p->st.oproj, &p->st.f_oproj)) return -1;
+                              &p->st.oproj, &p->st.f_oproj, p->cur_layer,
+                              "oproj_b")) return -1;
     ts = dsv4_now_s();
     for (int t = 0; t < n; t++)
         dsv4_hc_post(p->H + (size_t)t * (size_t)hc * d,
@@ -70,6 +74,7 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
                      p->post + (size_t)t * hc,
                      p->comb + (size_t)t * hc * hc, hc, d);
     p->st.hc_post += dsv4_now_s() - ts;
+    dsv4_pf_trace_stage(p->cur_layer, "hc_post_a", ts);
 
     return 0;
 }

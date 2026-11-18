@@ -21,7 +21,8 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
     const double tg = dsv4_now_s();
     if (dsv4_prefill_pm_stats(p, p->gate, p->x1, &w->moe.gate, n,
-                              &p->st.gate_mm, &p->st.f_gate)) return -1;
+                              &p->st.gate_mm, &p->st.f_gate, L, "gate"))
+        return -1;
     {
         const double tr = dsv4_now_s();
         for (int t = 0; t < n; t++) {
@@ -33,6 +34,7 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                        c->n_experts, topk, c->routed_scale);
         }
         p->st.route += dsv4_now_s() - tr;
+        dsv4_pf_trace_stage(L, "route", tr);
     }
     p->t_gate += dsv4_now_s() - tg;
 
@@ -53,7 +55,7 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
         };
         if (dsv4_prefill_pm_multi_stats(p, two, 2,
                                         &p->st.shared_mm,
-                                        &p->st.f_shared)) {
+                                        &p->st.f_shared, L, "shared_13")) {
             dsv4_prefill_moe_abort(p);
             return -1;
         }
@@ -66,9 +68,11 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                         p->sh_up + (size_t)t * inter, inter,
                         c->swiglu_limit);
         p->st.shared_swiglu += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "shared_swiglu", ts);
     }
     if (dsv4_prefill_pm_stats(p, p->sh_out, p->sh_mid, &w->moe.shared.w2, n,
-                              &p->st.shared_mm, &p->st.f_shared)) {
+                              &p->st.shared_mm, &p->st.f_shared, L,
+                              "shared_2")) {
         dsv4_prefill_moe_abort(p);
         return -1;
     }
@@ -93,6 +97,7 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                          p->post + (size_t)t * hc,
                          p->comb + (size_t)t * hc * hc, hc, d);
         p->st.hc_post_moe += dsv4_now_s() - ts;
+        dsv4_pf_trace_stage(L, "hc_post_f", ts);
     }
     return 0;
 }

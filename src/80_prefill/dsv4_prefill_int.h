@@ -7,8 +7,10 @@
 #include <stdio.h>
 
 #include "dsv4.h"
+#include "dsv4_prof.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_vk.h"
+#include "dsv4_trace.h"
 
 /* Instrumentation: bucket sizes are token requests per distinct expert. */
 #define DSV4_PF_HIST_BINS 8
@@ -215,12 +217,30 @@ static inline int dsv4_prefill_cancel_code(const DSV4Prefill *p)
     return p->state_dirty ? DSV4_PREFILL_ABORTED : DSV4_PREFILL_CANCELLED;
 }
 
-/* Batched-matmul seam and its timed wrappers. */
+/* Prefill trace helpers. A stage is a named span; the tag is copied into the
+ * trace event, so short names ("qkv", "indexer", "shared") keep the file
+ * readable. Both helpers are no-ops unless a prefill block is live. */
+static inline double dsv4_pf_trace_t0(void)
+{
+    return dsv4_trace_active() ? dsv4_now_s() : 0.0;
+}
+
+static inline void dsv4_pf_trace_stage(int layer, const char *tag, double t0)
+{
+    if (t0 <= 0.0 || !dsv4_trace_active()) return;
+    dsv4_trace_ev(&(DSV4TraceEv){
+        .kind = DSV4_TR_STAGE, .layer = layer, .k = -1,
+        .ms = (dsv4_now_s() - t0) * 1000.0, .at = t0, .tag = tag });
+}
+
+/* Batched-matmul seam and its timed wrappers. layer/tag are used only by the
+ * trace; they are passed in so a stage span covers exactly the GEMM call. */
 int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
                           const DSV4QMat *m, int n, double *timer,
-                          double *flops);
+                          double *flops, int layer, const char *tag);
 int dsv4_prefill_pm_multi_stats(DSV4Prefill *p, const DSV4PMJob *jobs, int nj,
-                                double *timer, double *flops);
+                                double *timer, double *flops, int layer,
+                                const char *tag);
 
 /* Sequential stages that still run per token. */
 int  dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
@@ -237,11 +257,13 @@ int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
 /* fill/fill_ctx are optional: when present and the bucket runs on the GPU,
  * they run CPU buckets between each submit and fence wait. */
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
-                                int count, const int *tok, const int *ks,
-                                DSV4PrefillVkFillFn fill, void *fill_ctx);
+                                int expert, int count, const int *tok,
+                                const int *ks, DSV4PrefillVkFillFn fill,
+                                void *fill_ctx);
 /* CPU-only bucket using the sm_* workspace. Never submits GPU work. */
 void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
-                                     int count, const int *tok, const int *ks);
+                                     int expert, int count, const int *tok,
+                                     const int *ks);
 /* Start a whole-layer expert batch early. Returns 0 when the batch is live or
  * when the layer is too large for one batch (the union then groups it); the
  * caller must still run dsv4_prefill_moe_union(), which ends it. */

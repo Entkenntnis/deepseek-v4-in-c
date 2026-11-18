@@ -125,7 +125,7 @@ static int union_fill_cpu(void *ctx)
     f->q[best] = -1;
     const int e = f->order[j];
     const double tb0 = dsv4_now_s();
-    dsv4_prefill_expert_bucket_fill(p, f->ex[j], p->ex_count[e],
+    dsv4_prefill_expert_bucket_fill(p, f->ex[j], e, p->ex_count[e],
                                     p->ex_tok + p->ex_off[e],
                                     p->ex_k + p->ex_off[e]);
     if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
@@ -187,7 +187,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
             q[pick] = -1;
             const int e = order[j];
             const double tb0 = dsv4_now_s();
-            dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
+            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
                                        p->ex_tok + p->ex_off[e],
                                        p->ex_k + p->ex_off[e],
                                        union_fill_cpu, &fill);
@@ -210,7 +210,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
             q[pick] = -1;
             const int e = order[j];
             const double tb0 = dsv4_now_s();
-            dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
+            dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
                                        p->ex_tok + p->ex_off[e],
                                        p->ex_k + p->ex_off[e], NULL, NULL);
             if (p->instr && li) li->compute_s += dsv4_now_s() - tb0;
@@ -243,6 +243,10 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
     double t0 = dsv4_now_s();
     p->src->end(p->src->ctx, ex);
     double td = dsv4_now_s() - t0;
+    if (dsv4_trace_active())
+        dsv4_trace_ev(&(DSV4TraceEv){
+            .kind = DSV4_TR_BARRIER, .layer = L, .k = -1,
+            .ms = td * 1000.0, .at = t0 });
     p->t_io += td;
     p->st.expert_io += td;
     if (p->instr) {
@@ -265,7 +269,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
             return -1;
         }
         const int e = order[j];
-        dsv4_prefill_expert_bucket(p, ex[j], p->ex_count[e],
+        dsv4_prefill_expert_bucket(p, ex[j], e, p->ex_count[e],
                                    p->ex_tok + p->ex_off[e],
                                    p->ex_k + p->ex_off[e], NULL, NULL);
         done[j] = 1;
@@ -419,6 +423,7 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         for (int i = 0; i < d; i++) o[i] += p->sh_out[(size_t)t * d + i];
     }
     p->st.expert_sum += dsv4_now_s() - tsum;
+    dsv4_pf_trace_stage(L, "expert_sum", tsum);
     p->t_moe += dsv4_now_s() - tsum;
     p->t_moe_wall += dsv4_now_s() - p->pf_compute_t0;
 

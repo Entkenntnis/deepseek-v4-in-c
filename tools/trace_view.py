@@ -21,6 +21,7 @@ KIND_LABEL = {
     "B": "begin", "H": "hit", "Q": "queue", "R": "read", "P": "publish",
     "W": "wait", "K": "wake", "Z": "wait-end", "C": "compute", "M": "mm",
     "G": "swiglu", "c": "done", "S": "shared", "F": "barrier", "E": "layer",
+    "D": "stage", "U": "bucket",
 }
 
 
@@ -33,16 +34,35 @@ def parse(path):
             if not s:
                 continue
             if s.startswith("#"):
-                parts = s[1:].split()
-                d = dict(zip(parts[0::2], parts[1::2]))
-                cur = {
-                    "token": int(d.get("token", -1)),
-                    "pos": int(d.get("pos", -1)),
-                    "phase": d.get("phase", "?"),
-                    "events": int(d.get("events", 0)),
-                    "dropped": int(d.get("dropped", 0)),
-                    "ev": [],
-                }
+                body = s[1:].strip()
+                if "=" in body:
+                    parts = body.split()
+                    d = dict(p.split("=", 1) for p in parts if "=" in p)
+                    kind = "prefill" if "call" in d else "token"
+                    index = d.get("call", d.get("token", "-1"))
+                    cur = {
+                        "kind": kind,
+                        "token": int(index),
+                        "pos": int(d.get("pos", -1)),
+                        "tokens": int(d.get("tokens", 0)),
+                        "phase": d.get("phase", "?"),
+                        "events": int(d.get("events", 0)),
+                        "dropped": int(d.get("dropped", 0)),
+                        "ev": [],
+                    }
+                else:
+                    parts = body.split()
+                    d = dict(zip(parts[0::2], parts[1::2]))
+                    cur = {
+                        "kind": "token",
+                        "token": int(d.get("token", -1)),
+                        "pos": int(d.get("pos", -1)),
+                        "tokens": 0,
+                        "phase": d.get("phase", "?"),
+                        "events": int(d.get("events", 0)),
+                        "dropped": int(d.get("dropped", 0)),
+                        "ev": [],
+                    }
                 tokens.append(cur)
                 continue
             f = s.split()
@@ -439,6 +459,10 @@ def main():
     tokens = parse(a.file)
     if not tokens:
         print("trace_view: no token blocks in file", file=sys.stderr)
+        return 1
+    if all(t.get("kind") == "prefill" for t in tokens):
+        print("trace_view: this is a prefill trace; use "
+              "tools/prefill_trace_view.py", file=sys.stderr)
         return 1
     if a.token is not None:
         sel = [t for t in tokens if t["token"] == a.token]

@@ -104,6 +104,7 @@ int main(int argc, char **argv)
     const char *pin = "p", *reader_pin = "e";
     int threads = 4, readers = 6;
     const char *trace_path = NULL;
+    const char *trace_phase = "decode";
     long trace_from = 0;
     int trace_tokens = 4, trace_lo = -1, trace_hi = -1;
 
@@ -130,6 +131,8 @@ int main(int argc, char **argv)
             dsv4_set_stream_miss(atoi(argv[++i]));
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)
             trace_path = argv[++i];
+        else if (!strcmp(argv[i], "--trace-phase") && i + 1 < argc)
+            trace_phase = argv[++i];
         else if (!strcmp(argv[i], "--trace-from") && i + 1 < argc)
             trace_from = atol(argv[++i]);
         else if (!strcmp(argv[i], "--trace-tokens") && i + 1 < argc)
@@ -168,12 +171,23 @@ int main(int argc, char **argv)
     dsv4_threads_apply(&topts);
 
     if (trace_path) {
+        int mask = DSV4_TRACE_PHASE_DECODE;
+        if (!strcmp(trace_phase, "prefill"))
+            mask = DSV4_TRACE_PHASE_PREFILL;
+        else if (!strcmp(trace_phase, "both"))
+            mask = DSV4_TRACE_PHASE_DECODE | DSV4_TRACE_PHASE_PREFILL;
+        else if (strcmp(trace_phase, "decode")) {
+            fprintf(stderr, "invalid --trace-phase (use decode|prefill|both)\n");
+            return 2;
+        }
         if (dsv4_trace_open(trace_path) != 0) return 2;
         dsv4_trace_window(trace_from, trace_tokens);
+        dsv4_trace_prefill_window(trace_from, trace_tokens);
+        dsv4_trace_phases(mask);
         dsv4_trace_layers(trace_lo, trace_hi);
-        fprintf(stderr, "trace: decode tokens from %ld, %d token(s), "
-                        "layers %d-%d\n", trace_from, trace_tokens,
-                trace_lo, trace_hi);
+        fprintf(stderr, "trace: %s blocks from %ld, %d block(s), "
+                        "layers %d-%d\n", trace_phase, trace_from,
+                trace_tokens, trace_lo, trace_hi);
     }
 
     /* Line buffering is not enough on a pipe: every event must be visible to

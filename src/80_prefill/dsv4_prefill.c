@@ -53,6 +53,7 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
         p->st.norm += dsv4_now_s() - ts;
     }
     p->t_hc += dsv4_now_s() - thc;
+    dsv4_pf_trace_stage(L, "hc_attn", thc);
 
     const int arc = dsv4_prefill_attention(p, L, w, n, pos0, cs, sn);
     if (arc) {
@@ -78,16 +79,17 @@ static int prefill_layer(DSV4Prefill *p, int L, const DSV4LayerW *w,
         p->st.norm += dsv4_now_s() - ts;
     }
     p->t_hc += dsv4_now_s() - thc2;
+    dsv4_pf_trace_stage(L, "hc_ffn", thc2);
 
     const int mrc = dsv4_prefill_moe(p, L, w, n, ids);
     if (mrc) return mrc;
     return 0;
 }
 
-int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
-                       const float *cs_d, const float *sn_d,
-                       const float *cs_c, const float *sn_c,
-                       float *h_out)
+static int prefill_range_impl(DSV4Prefill *p, const int32_t *ids, int n,
+                              int pos0, const float *cs_d,
+                              const float *sn_d, const float *cs_c,
+                              const float *sn_c, float *h_out)
 {
     if (!p || !ids || n <= 0 || !h_out || pos0 < 0) return -1;
     p->state_dirty = 0;
@@ -138,6 +140,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                    (size_t)d * sizeof(float));
     }
     p->st.embed += dsv4_now_s() - te;
+    dsv4_pf_trace_stage(-1, "embed", te);
 
     for (int L = 0; L < c->n_layers; L++) {
         if (dsv4_prefill_cancelled(p))
@@ -161,6 +164,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         p->t_bind += call > io ? call - io : 0.0;
         p->st.trunk_io += io;
         p->st.bind += call > io ? call - io : 0.0;
+        dsv4_pf_trace_stage(L, "trunk", tb);
+        dsv4_pf_trace_stage(L, "bind", tb + io);
 
         const int comp = dsv4_compress_ratio(c, L) != 0;
         const float *cs = comp ? cs_c : cs_d;
@@ -178,6 +183,10 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
             dsv4_prefill_moe_abort(p);
             return lrc;
         }
+        if (dsv4_trace_active())
+            dsv4_trace_ev(&(DSV4TraceEv){
+                .kind = DSV4_TR_LAYER_END, .layer = L, .k = -1,
+                .ms = (dsv4_now_s() - tl0) * 1000.0, .at = tl0 });
         if (p->instr >= 2) {
             DSV4PrefillLayerInstr *li = &p->linstr[L];
             li->total_s = dsv4_now_s() - tl0;
@@ -274,4 +283,19 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         dsv4_prefill_instr_summary(p, n, pos0);
     }
     return 0;
+}
+
+int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
+                       const float *cs_d, const float *sn_d,
+                       const float *cs_c, const float *sn_c,
+                       float *h_out)
+{
+    /* One prefill call is one trace block. begin()/end() are no-ops unless the
+     * prefill phase is selected, so the ordinary path is untouched. Wrapping
+     * the whole implementation also flushes a cancelled/aborted block. */
+    dsv4_trace_prefill_begin(pos0, n);
+    const int rc = prefill_range_impl(p, ids, n, pos0, cs_d, sn_d, cs_c, sn_c,
+                                      h_out);
+    dsv4_trace_prefill_end();
+    return rc;
 }

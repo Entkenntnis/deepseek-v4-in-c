@@ -87,8 +87,9 @@ void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
  * once, each matrix runs as one count-wide batch, and the result is scattered
  * back into the per-(token, k) accumulators the weighted sum expects. */
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
-                                int count, const int *tok, const int *ks,
-                                DSV4PrefillVkFillFn fill, void *fill_ctx)
+                                int expert, int count, const int *tok,
+                                const int *ks, DSV4PrefillVkFillFn fill,
+                                void *fill_ctx)
 {
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, rinter = c->moe_inter;
@@ -96,6 +97,7 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     DSV4PrefillLayerInstr *li =
         (p->instr && p->cur_layer >= 0 && p->cur_layer < p->c->n_layers)
             ? &p->linstr[p->cur_layer] : NULL;
+    const int tr = dsv4_trace_active();
 
     const int bin = pf_bucket_bin(count);
     if (p->instr) {
@@ -119,6 +121,12 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
             p->st.bucket_s[bin] += dsv4_now_s() - tm0;
             if (li) li->buckets_cpu++;
         }
+        if (tr)
+            dsv4_trace_ev(&(DSV4TraceEv){
+                .kind = DSV4_TR_BUCKET, .layer = p->cur_layer, .k = expert,
+                .expert = expert, .n = count,
+                .ms = (dsv4_now_s() - tm0) * 1000.0, .at = tm0,
+                .tag = "cpu" });
         p->t_moe += dsv4_now_s() - tm0;
         return;
     }
@@ -190,6 +198,12 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
         }
         p->st.bucket_s[bin] += (dsv4_now_s() - tm0) - fill_s;
     }
+    if (tr)
+        dsv4_trace_ev(&(DSV4TraceEv){
+            .kind = DSV4_TR_BUCKET, .layer = p->cur_layer, .k = expert,
+            .expert = expert, .n = count,
+            .ms = (dsv4_now_s() - tm0) * 1000.0, .at = tm0,
+            .tag = gpu ? "gpu" : "cpu" });
 
     p->st.f_expert += 6.0 * (double)rinter * (double)d *
                       (double)count * 1e-9;
@@ -199,7 +213,8 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
 /* CPU-only fill bucket. It must never touch ex_* or the Vulkan buffers: a GPU
  * bucket owns ex_* for the whole submit/wait sequence. */
 void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
-                                     int count, const int *tok, const int *ks)
+                                     int expert, int count, const int *tok,
+                                     const int *ks)
 {
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, rinter = c->moe_inter;
@@ -207,6 +222,7 @@ void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
     DSV4PrefillLayerInstr *li =
         (p->instr && p->cur_layer >= 0 && p->cur_layer < p->c->n_layers)
             ? &p->linstr[p->cur_layer] : NULL;
+    const int tr = dsv4_trace_active();
     const int bin = pf_bucket_bin(count);
 
     if (p->instr) {
@@ -283,5 +299,11 @@ void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
     if (count > 1)
         p->st.f_expert += 6.0 * (double)rinter * (double)d *
                           (double)count * 1e-9;
+    if (tr)
+        dsv4_trace_ev(&(DSV4TraceEv){
+            .kind = DSV4_TR_BUCKET, .layer = p->cur_layer, .k = expert,
+            .expert = expert, .n = count,
+            .ms = (dsv4_now_s() - tm0) * 1000.0, .at = tm0,
+            .tag = "fill" });
     p->t_moe += dsv4_now_s() - tm0;
 }
