@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .defaults import DEFAULT_KV
+from .dsml import py_prefix_text
 from .messages import Message
 
 
@@ -24,6 +26,9 @@ class CommandMixin:
 
         if not self.backend_alive:
             self.add_system("engine is not running; restart the TUI")
+            return
+        if self.kv_pending:
+            self.add_system("cached tools preamble is still loading; try again")
             return
         if self.status in ("starting", "waiting"):
             self.add_system("model is still loading; wait for the ready event")
@@ -73,7 +78,8 @@ class CommandMixin:
                 "  /help                 this list\n"
                 "  /reset                clear model context\n"
                 "  /gen N                max tokens per turn\n"
-                "  /py                   let the model call run_python (default off)\n"
+                "  /py                   allow run_python; loads the cached\n"
+                "                        tools preamble when the context is empty\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
             if self.tool_running:
@@ -87,6 +93,8 @@ class CommandMixin:
             self.chain_id += 1
             self.tool_cancelled = False
             self.system_armed = True
+            self.kv_loaded = False
+            self.kv_pending = False
             self.messages.clear()
             self.current_msg = None
             self.current_user_msg = None
@@ -100,13 +108,39 @@ class CommandMixin:
             if arg:
                 state = "on" if self.tool_enabled else "off"
                 self.add_system(f"python is {state}; usage: /py")
+            elif self.kv_pending:
+                self.add_system("cached tools preamble is still loading")
+            elif self.generating and not self.tool_running:
+                self.add_system(
+                    "finish the current turn before changing python")
+                return
+            elif self.tool_enabled and self.kv_loaded:
+                self.add_system("python is already on; cached preamble loaded")
+            elif self.context_used == 0 and \
+                    (not self.tool_enabled or not self.kv_loaded):
+                # Empty context and no restored preamble yet: try the cache.
+                # A miss is harmless, the first turn then falls back to the
+                # normal `system` command and a full prefill.
+                self.tool_enabled = True
+                if DEFAULT_KV.exists() and self.backend_alive and self.backend.send(
+                        {"cmd": "kv_load", "path": str(DEFAULT_KV),
+                         "text": py_prefix_text()}):
+                    self.kv_pending = True
+                    self.add_system(
+                        f"python on; loading cached tools preamble from "
+                        f"{DEFAULT_KV}…")
+                else:
+                    self.system_armed = True
+                    if DEFAULT_KV.exists():
+                        self.add_system(
+                            "python on; could not request the cached preamble")
+                    else:
+                        self.add_system(
+                            "python on; no cached preamble yet (run `make kv`); "
+                            "the model may call run_python")
             elif self.tool_enabled:
                 self.add_system("python is already on")
             else:
-                if self.generating and not self.tool_running:
-                    self.add_system(
-                        "finish the current turn before enabling python")
-                    return
                 self.tool_enabled = True
                 if self.context_used == 0:
                     self.system_armed = True

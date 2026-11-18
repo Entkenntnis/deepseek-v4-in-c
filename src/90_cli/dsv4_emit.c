@@ -152,3 +152,36 @@ void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p)
     fputs("}\n", stdout);
     fflush(stdout);
 }
+
+void dsv4_emit_kv_built(const char *path, int tokens, double seconds,
+                        long long bytes)
+{
+    fputs("{\"event\":\"kv_built\",\"tokens\":", stdout);
+    printf("%d,\"seconds\":%.4f,\"bytes\":%lld,\"path\":", tokens, seconds,
+           bytes);
+    dsv4_json_escape(path);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}
+
+void dsv4_emit_kv_loaded(const char *path, int tokens, int context_cap,
+                         double seconds)
+{
+    printf("{\"event\":\"kv_loaded\",\"tokens\":%d,\"used\":%d,"
+           "\"context_cap\":%d,\"seconds\":%.4f,\"path\":",
+           tokens, tokens, context_cap, seconds);
+    dsv4_json_escape(path);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}
+
+/* A cache miss is not an engine error: the caller can fall back to a normal
+ * prefill. Keeping it on its own event lets the TUI say so without painting the
+ * transcript red. */
+void dsv4_emit_kv_error(const char *message)
+{
+    fputs("{\"event\":\"kv_error\",\"message\":", stdout);
+    dsv4_json_escape(message);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}

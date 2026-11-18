@@ -41,6 +41,10 @@ typedef struct {
     int              n_ids, cap_ids;
     int32_t          eos_id;
     int              pending_forward;
+    /* A loaded prefix-cache context starts a fresh turn; it is not a previous
+     * assistant turn that needs an EOS appended. Cleared once the first token
+     * of that turn is emitted, or by reset. */
+    int              kv_prefix;
 
     /* Last turn's prompt timing, so the TUI can print an honest prefill line
      * without subtracting the output head from ttft. */
@@ -100,6 +104,11 @@ void dsv4_emit_done(const Engine *e, int prompt_tokens, int generated,
                     double seconds, double ttft, const char *stop);
 void dsv4_emit_reset(const Engine *e, const char *reason);
 void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p);
+void dsv4_emit_kv_built(const char *path, int tokens, double seconds,
+                        long long bytes);
+void dsv4_emit_kv_loaded(const char *path, int tokens, int context_cap,
+                         double seconds);
+void dsv4_emit_kv_error(const char *message);
 
 /* ---- engine ---- */
 int  dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
@@ -117,5 +126,7 @@ int  dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
 void dsv4_head_from_h(Engine *e, TopK *top);
 void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
                           int emit_layers);
+void dsv4_engine_kv_build(Engine *e, const char *text, const char *path);
+void dsv4_engine_kv_load(Engine *e, const char *text, const char *path);
 
 #endif /* DSV4_SERVE_INT_H */

@@ -82,6 +82,22 @@ static void handle_command(Engine *e, jval *v)
         fflush(stdout);
     } else if (!strcmp(cmd, "stats")) {
         dsv4_emit_ready(e, "stats");
+    } else if (!strcmp(cmd, "kv_build")) {
+        const char *path = jstr(v, "path");
+        const char *text = jstr(v, "text");
+        if (!path || !text) {
+            dsv4_emit_kv_error("kv_build needs both \"text\" and \"path\"");
+        } else {
+            dsv4_engine_kv_build(e, text, path);
+        }
+    } else if (!strcmp(cmd, "kv_load")) {
+        const char *path = jstr(v, "path");
+        const char *text = jstr(v, "text");
+        if (!path) {
+            dsv4_emit_kv_error("kv_load needs \"path\"");
+        } else {
+            dsv4_engine_kv_load(e, text, path);
+        }
     } else if (!strcmp(cmd, "ping")) {
         printf("{\"event\":\"pong\"}\n");
         fflush(stdout);

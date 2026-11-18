@@ -88,6 +88,11 @@ class AppBase:
         self.py = PySession(timeout=TOOL_TIMEOUT_S,
                             max_output=TOOL_MAX_OUTPUT)
         self.system_armed = True      # send the tools preamble when ctx is empty
+        # `/py` can restore a precomputed tools-preamble KV cache instead of
+        # pre-filling it. `kv_pending` keeps the input line from starting a turn
+        # before the kv_loaded/kv_error event arrives.
+        self.kv_loaded = False
+        self.kv_pending = False
         self.chain_id = 0             # one id per user turn, invalidates strays
         self.chain_round = 0
         self.tool_running = False

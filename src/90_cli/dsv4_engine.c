@@ -34,6 +34,7 @@ int dsv4_engine_reset_context(Engine *e)
     }
     e->n_ids = 0;
     e->pending_forward = 0;
+    e->kv_prefix = 0;
     memset(&e->prof_base, 0, sizeof e->prof_base);
     memset(&dsv4_prof, 0, sizeof dsv4_prof);
     return 0;

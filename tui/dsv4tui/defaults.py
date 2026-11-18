@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 HOME = Path.home()
@@ -17,6 +18,15 @@ DEFAULT_BINARY = REPO / "bin" / "dsv4-serve"
 DEFAULT_BUDGET = "auto"
 DEFAULT_CTX = 8192
 DEFAULT_GEN = 1024
+
+# The precomputed /py tools-preamble KV state. `make kv` writes this file and
+# the TUI loads it when /py is used with an empty context. The model directory
+# is part of the name because the cache is model-specific.
+_KV_DIR = Path(os.path.expanduser(
+    os.environ.get("DSV4_KV_DIR", str(HOME / ".cache" / "dsv4" / "kv"))))
+DEFAULT_KV = Path(os.path.expanduser(
+    os.environ.get("DSV4_KV",
+                   str(_KV_DIR / f"{DEFAULT_MODEL.name}-py-prefix.bin"))))
 
 # The Python tool: rounds per user turn, wall-clock limit per call, and how
 # much stdout/stderr is handed back to the model before truncation.

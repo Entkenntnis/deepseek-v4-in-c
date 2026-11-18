@@ -45,9 +45,14 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
         return;
     }
 
+    /* A restored prefix already contains BOS + system prompt, but it is not a
+     * finished assistant turn: do not append EOS in front of the first user
+     * message. */
+    const int prefix_start = e->kv_prefix;
+
     /* Close a truncated previous turn, then forward the token that the previous
      * turn deliberately left pending; its KV entry is not in the layer state yet. */
-    if (e->n_ids > 0 && e->ids[e->n_ids - 1] != e->eos_id) {
+    if (!prefix_start && e->n_ids > 0 && e->ids[e->n_ids - 1] != e->eos_id) {
         if (e->n_ids >= e->cap_ids) {
             dsv4_emit_error("context full (%d tokens); reset before continuing",
                             e->cap_ids);
@@ -209,6 +214,9 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
         if (generated == 0) ttft = el;
         dsv4_emit_token(e, id, generated, pos, el, ttft, &top);
         generated++;
+        /* The prefix-only context has now become a real completed-prefix turn;
+         * the next generate may need the normal EOS handling again. */
+        e->kv_prefix = 0;
 
         if (id == e->eos_id) {
             stop = "eos";
@@ -235,5 +243,10 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
     }
 
     const double dt = dsv4_now_s() - t0;
+    /* A zero-token turn that still committed its user message (ngen=0) has
+     * moved past the bare prefix, so the next turn must close it normally. */
+    if (generated == 0 && strcmp(stop, "cancel") != 0 &&
+        strcmp(stop, "error") != 0)
+        e->kv_prefix = 0;
     dsv4_emit_done(e, n_added, generated, dt, ttft, stop);
 }

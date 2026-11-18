@@ -33,7 +33,7 @@ BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
 # binary. It shares only the fixtures/timing helpers with bin/bench.
 EXPERT_BENCH_OBJ := $(OBJ)/bench/expert_bench.o $(OBJ)/bench/fixtures.o
 
-TESTS    := quant matmul ops hc rope attn compress indexer layer
+TESTS    := quant matmul ops hc rope attn compress indexer layer kv
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
 TEST_OBJ := $(addprefix $(OBJ)/tests/unit/test_,$(addsuffix .o,$(TESTS)))
 REF_OBJ  := $(OBJ)/tests/unit/ref_kernels.o
@@ -43,7 +43,7 @@ VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv \
             build/swiglu.spv
 VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
 
-.PHONY: test serve tui demo bench bench-expert e2e prefill clean
+.PHONY: test serve tui demo bench bench-expert e2e prefill kv clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -70,6 +70,11 @@ e2e: $(BIN)/dsv4-serve
 
 prefill: $(BIN)/dsv4-serve
 	python3 bench/prefill.py
+
+# Precompute the KV state for the /py tools preamble. Always rebuild: the
+# preamble or model may have changed, and a stale file is cheap to replace.
+kv: $(BIN)/dsv4-serve
+	python3 tools/build_kv_prefix.py
 
 $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)

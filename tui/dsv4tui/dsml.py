@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 
+from .defaults import BOS
+
 DSML = "｜DSML｜"
 TOOL_NAME = "run_python"
 
@@ -59,6 +61,16 @@ def system_prompt() -> str:
     schema = json.dumps(TOOL_SCHEMA, ensure_ascii=False,
                         separators=(",", ":"))
     return _TOOLS_TEMPLATE.format(dsml=DSML, schemas=schema)
+
+
+def py_prefix_text() -> str:
+    """Exactly the prefix the engine puts in front of the first user turn.
+
+    `dsv4_engine_generate()` builds BOS + system prompt + newline when the
+    context is empty. The precomputed cache must contain those same tokens and
+    nothing else; the first user turn is appended after it.
+    """
+    return BOS + system_prompt() + "\n"
 
 
 _BLOCK_RE = re.compile(

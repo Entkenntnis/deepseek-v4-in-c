@@ -58,6 +58,35 @@ class EventMixin:
                 self.status = "ready"
             self.dirty = True
 
+        elif name == "kv_loaded":
+            self.kv_pending = False
+            self.kv_loaded = True
+            # The prefix is already in the KV state; sending the system prompt
+            # again would make the first turn start with a duplicate preamble.
+            self.system_armed = False
+            used = int(ev.get("used") or ev.get("tokens") or 0)
+            if used:
+                self.context_used = used
+            self.context_cap = int(ev.get("context_cap") or self.context_cap)
+            secs = float(ev.get("seconds") or 0.0)
+            self.add_system(
+                f"python on; cached tools preamble restored "
+                f"({used} tokens, {secs:.3f}s)")
+            self.stats_force = True
+            self.dirty = True
+
+        elif name == "kv_error":
+            self.kv_pending = False
+            self.kv_loaded = False
+            # Fall back to the old path: the first turn sends the system prompt
+            # and pays the full prefill.
+            self.system_armed = True
+            msg = str(ev.get("message") or "cache rejected")
+            self.add_system(
+                f"cached tools preamble not used: {msg}; "
+                f"falling back to a normal prefill")
+            self.dirty = True
+
         elif name == "start":
             self.generating = True
             self.status = "generating"
@@ -187,6 +216,9 @@ class EventMixin:
             self.cancel_on_start = False
             self.status = "ready"
             self.context_used = 0
+            self.kv_loaded = False
+            self.kv_pending = False
+            self.system_armed = True
             self.current_msg = None
             self.current_user_msg = None
             # An engine-side reset invalidates any tool round in flight: the
