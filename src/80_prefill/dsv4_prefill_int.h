@@ -75,6 +75,16 @@ typedef struct {
     int cache_slots, cache_readers;
 } DSV4PrefillStats;
 
+/* Where a bucket writes its accounting. The normal paths point at the live
+ * prefill state. A background CPU worker points at a private copy and merges
+ * it after the join, so no two threads touch the same counters. */
+typedef struct {
+    DSV4PrefillStats      *st;
+    DSV4PrefillLayerInstr *li;
+    double                *t_moe;
+    int                    instr;
+} DSV4PFStatsSink;
+
 /* One matrix over `n` token rows: the batched-matmul seam. It uses the Vulkan
  * backend when available and falls back to the CPU kernels otherwise. */
 typedef struct {
@@ -251,7 +261,7 @@ int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
 
 void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
                          const DSV4ExpertW *e, int hidden, int inter,
-                         float limit);
+                         float limit, DSV4PFStatsSink *sink);
 /* Whether this bucket is meant for the Vulkan expert path. */
 int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
 /* fill/fill_ctx are optional: when present and the bucket runs on the GPU,
@@ -259,11 +269,13 @@ int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
 void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
                                 int expert, int count, const int *tok,
                                 const int *ks, DSV4PrefillVkFillFn fill,
-                                void *fill_ctx);
-/* CPU-only bucket using the sm_* workspace. Never submits GPU work. */
+                                void *fill_ctx, DSV4PFStatsSink *sink);
+/* CPU-only bucket using the sm_* workspace. Never submits GPU work. The sink
+ * receives the accounting, so a worker thread can keep a private one. */
 void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
                                      int expert, int count, const int *tok,
-                                     const int *ks);
+                                     const int *ks, DSV4PFStatsSink *sink,
+                                     const char *tag);
 /* Start a whole-layer expert batch early. Returns 0 when the batch is live or
  * when the layer is too large for one batch (the union then groups it); the
  * caller must still run dsv4_prefill_moe_union(), which ends it. */

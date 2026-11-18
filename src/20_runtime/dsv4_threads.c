@@ -145,6 +145,24 @@ void dsv4_threads_pin_current_reader(void)
         perror("dsv4_threads: reader sched_setaffinity");
 }
 
+void dsv4_threads_pin_current_worker(void)
+{
+    if (!g_have_orig) return;
+
+    cpu_set_t want;
+    CPU_ZERO(&want);
+    int n = 0;
+    for (int c = DSV4_P_LO; c <= DSV4_P_HI; c++) {
+        if (CPU_ISSET(c, &g_orig)) {
+            CPU_SET(c, &want);
+            n++;
+        }
+    }
+    if (n == 0) return;
+    if (sched_setaffinity(0, sizeof want, &want) != 0)
+        perror("dsv4_threads: worker sched_setaffinity");
+}
+
 const char *dsv4_threads_desc(void)
 {
     return g_desc;
