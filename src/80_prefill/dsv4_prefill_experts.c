@@ -15,10 +15,10 @@
  * `make bench-expert` sweeps n=1..10 with resident weights and reports the
  * isolated CPU/GPU crossover plus the production dispatch choice. The
  * scheduler overlaps CPU fill buckets with each GPU wait, so the isolated
- * crossover is only the first input: compare a threshold change with
- * `DSV4_PREFILL_CPU=1 make e2e` and `make e2e` before moving it. With the
- * fused kernel the old "three submissions" reason no longer applies, so this
- * is worth re-measuring if small-bucket work becomes the bottleneck. */
+ * crossover is only the first input: validate a threshold change with
+ * `make e2e` before moving it. With the fused kernel the old "three
+ * submissions" reason no longer applies, so this is worth re-measuring if
+ * small-bucket work becomes the bottleneck. */
 #define VK_EXPERT_MIN_COUNT 8
 
 static int pf_bucket_bin(int count)

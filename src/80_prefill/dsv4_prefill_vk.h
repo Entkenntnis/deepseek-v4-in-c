@@ -4,8 +4,8 @@
  * NUMERICS. The shaders accumulate in float and use a tile-dependent reduction
  * order, so their output is not bit-identical to the CPU kernels. The contract
  * is the same L2 relative-error rule as the rest of the matmul layer; `make
- * test` holds the CPU gates, and `make e2e` versus `DSV4_PREFILL_CPU=1 make
- * e2e` compares the backends end to end.
+ * test` holds the CPU gates, and `make e2e` exercises the Vulkan backend end
+ * to end when it initializes.
  */
 #ifndef DSV4_PREFILL_VK_H
 #define DSV4_PREFILL_VK_H

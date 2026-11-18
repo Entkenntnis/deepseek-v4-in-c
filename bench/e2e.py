@@ -12,9 +12,9 @@ The golden output is the generated token-id sequence. It is compared exactly as
 a functional regression: a fixed build is deterministic for a fixed prompt, so
 a different sequence is a real change, not noise. This is not the numerical
 contract -- kernel tolerances live in the L2 gates (`make test`). The Vulkan
-prefill uses a different reduction order from the CPU, so compare backends with
-`make e2e` and `DSV4_PREFILL_CPU=1 make e2e` rather than assuming identical
-bits. Use --update-golden only after an intentional model/kernel change.
+prefill uses a different reduction order from the CPU fallback, so a backend
+change can move the golden. Use --update-golden only after an intentional
+model/kernel change.
 
 Examples:
     make e2e                              # table + minimal progress

@@ -29,10 +29,11 @@
  *   resident for the whole prompt. The CPU matmul entry point splits the block
  *   into fixed kernel tiles internally; the Vulkan backend tiles it too, with
  *   its own tile size. Either way a very long block does not turn the dense
- *   GEMMs into a DRAM stream. Set DSV4_PREFILL_CPU=1 to force the CPU path;
- *   otherwise Vulkan is used when available and falls back per matrix when a
- *   geometry is unsupported. `make e2e` and `DSV4_PREFILL_CPU=1 make e2e`
- *   compare the two paths.
+ *   GEMMs into a DRAM stream. Prefill always initializes the Vulkan backend and
+ *   uses it when available; the CPU kernels remain the fallback when the
+ *   device is unavailable or a geometry is unsupported. `make bench-expert`
+ *   reports the routed-expert CPU/GPU crossover; `make e2e` exercises the
+ *   selected path end to end.
  */
 #ifndef DSV4_PREFILL_H
 #define DSV4_PREFILL_H

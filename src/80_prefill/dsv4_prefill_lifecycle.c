@@ -74,13 +74,8 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     fprintf(stderr, "prefill: whole-prompt block; kernels tile at <=%d rows\n",
             DSV4_MAX_BATCH);
 
-    const char *cpu_only = getenv("DSV4_PREFILL_CPU");
-    if (cpu_only && *cpu_only && strcmp(cpu_only, "0")) {
-        fprintf(stderr, "prefill: DSV4_PREFILL_CPU set; using CPU kernels\n");
-    } else if (dsv4_prefill_vk_init(&p->vk, c, tr, (DSV4Cache *)src->ctx)
-               != 0) {
+    if (dsv4_prefill_vk_init(&p->vk, c, tr, (DSV4Cache *)src->ctx) != 0)
         p->vk = NULL;   /* dsv4_prefill_vk_init already logged */
-    }
 
     *out = p;
     return 0;

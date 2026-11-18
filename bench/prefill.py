@@ -25,9 +25,8 @@ are visible.
 
 The golden output is the first token id. A fixed build is deterministic for a
 fixed prompt, so a different id is a real change -- or a different prefill
-backend. Vulkan and CPU use different reduction orders; compare them with
-`make prefill` and `DSV4_PREFILL_CPU=1 python3 bench/prefill.py` rather than
-expecting one golden to match both. Use --update-golden only intentionally.
+backend. Vulkan and the CPU fallback use different reduction orders, so a
+backend change can move the golden. Use --update-golden only intentionally.
 
 Examples:
     make prefill
@@ -36,7 +35,7 @@ Examples:
     python3 bench/prefill.py --instrument --instrument-file /tmp/prefill.txt
     python3 bench/prefill.py --trace /tmp/prefill.trace --trace-view
     python3 bench/prefill.py --update-golden
-    DSV4_PREFILL_CPU=1 python3 bench/prefill.py --no-golden
+    python3 bench/prefill.py --no-golden
 """
 import argparse
 import codecs
