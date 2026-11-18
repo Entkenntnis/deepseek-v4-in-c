@@ -26,36 +26,6 @@
 
 static const char *g_filter;
 
-double bench_measure(RunFn fn, void *ctx, int target_ms, int *out_reps)
-{
-    fn(ctx);
-    const double t0 = bench_now_s();
-    int reps = 0;
-    double elapsed;
-    do {
-        fn(ctx);
-        reps++;
-        elapsed = bench_now_s() - t0;
-    } while ((elapsed * 1000.0 < (double)target_ms || reps < 3)
-             && reps < 200000);
-    *out_reps = reps;
-    return elapsed;
-}
-
-void bench_report(const char *name, const char *shape, const char *fmt,
-                  double sec, int reps, int calls, double flops, double bytes)
-{
-    const double per_ms = sec / ((double)reps * (double)calls) * 1e3;
-    const double gfs = flops > 0.0 ? flops * (double)reps / sec / 1e9 : 0.0;
-    const double gbs = bytes > 0.0 ? bytes * (double)reps / sec / 1e9 : 0.0;
-
-    printf("%-30s %-20s %-5s %10.4f", name, shape, fmt, per_ms);
-    if (flops > 0.0) printf(" %9.1f", gfs); else printf(" %9s", "-");
-    if (bytes > 0.0) printf(" %9.2f", gbs); else printf(" %9s", "-");
-    printf("\n");
-    fflush(stdout);
-}
-
 int bench_skip(const char *name)
 {
     return g_filter && !strstr(name, g_filter);

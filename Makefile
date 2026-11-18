@@ -27,8 +27,11 @@ SERVE_OBJ   := $(patsubst src/%.c,$(OBJ)/src/%.o,$(CLI_SRC))
 
 COMPUTE_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(COMPUTE_SRC))
 RUNTIME_OBJ := $(patsubst src/%.c,$(OBJ)/src/%.o,$(RUNTIME_SRC))
-BENCH_SRC   := $(wildcard bench/*.c)
+BENCH_SRC   := $(filter-out bench/expert_bench.c,$(wildcard bench/*.c))
 BENCH_OBJ   := $(patsubst bench/%.c,$(OBJ)/bench/%.o,$(BENCH_SRC))
+# The expert benchmark needs the prefill/Vulkan path, so it is a separate
+# binary. It shares only the fixtures/timing helpers with bin/bench.
+EXPERT_BENCH_OBJ := $(OBJ)/bench/expert_bench.o $(OBJ)/bench/fixtures.o
 
 TESTS    := quant matmul ops hc rope attn compress indexer layer
 TEST_BIN := $(addprefix $(BIN)/test_,$(TESTS))
@@ -40,7 +43,7 @@ VK_SPV   := build/gemm_fp8.spv build/gemm_bf16.spv build/gemm_fp4.spv \
             build/swiglu.spv
 VK_SPV_H := $(patsubst build/%.spv,build/%_spv.h,$(VK_SPV))
 
-.PHONY: test serve tui demo bench e2e prefill clean
+.PHONY: test serve tui demo bench bench-expert e2e prefill clean
 .SECONDARY: $(TEST_OBJ) $(REF_OBJ)
 
 test: $(TEST_BIN)
@@ -57,6 +60,11 @@ demo:
 bench: $(BIN)/bench
 	./$(BIN)/bench
 
+# Routed-expert bucket sweep, CPU versus Vulkan. Run with --breakdown for the
+# per-stage split; production weights are resident here, so this excludes I/O.
+bench-expert: $(BIN)/bench_expert
+	./$(BIN)/bench_expert
+
 e2e: $(BIN)/dsv4-serve
 	python3 bench/e2e.py
 
@@ -70,6 +78,10 @@ $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 $(BIN)/bench: $(BENCH_OBJ) $(COMPUTE_OBJ) $(RUNTIME_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS)
+
+$(BIN)/bench_expert: $(EXPERT_BENCH_OBJ) $(ENGINE_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
 # Prefill shaders: compile once, embed the words so the binary needs no .spv.
 $(VK_SPV): build/%.spv: src/10_compute/shaders/%.comp
@@ -101,4 +113,4 @@ clean:
 	rm -rf $(BIN) build
 
 -include $(ENGINE_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(REF_OBJ:.o=.d) \
-         $(SERVE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)
+         $(SERVE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(EXPERT_BENCH_OBJ:.o=.d)

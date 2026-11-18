@@ -12,9 +12,13 @@
 
 /* Below this bucket size the fused GPU pipeline (w1/w3/SwiGLU/w2) and its
  * copies still cost more than the CPU FP4 GEMM. The threshold is empirical;
- * compare the paths with `DSV4_PREFILL_CPU=1 make e2e` and `make e2e`. With
- * the fused kernel the old "three submissions" reason no longer applies, so
- * this is worth re-measuring if small-bucket work becomes the bottleneck. */
+ * `make bench-expert` sweeps n=1..10 with resident weights and reports the
+ * isolated CPU/GPU crossover plus the production dispatch choice. The
+ * scheduler overlaps CPU fill buckets with each GPU wait, so the isolated
+ * crossover is only the first input: compare a threshold change with
+ * `DSV4_PREFILL_CPU=1 make e2e` and `make e2e` before moving it. With the
+ * fused kernel the old "three submissions" reason no longer applies, so this
+ * is worth re-measuring if small-bucket work becomes the bottleneck. */
 #define VK_EXPERT_MIN_COUNT 8
 
 static int pf_bucket_bin(int count)

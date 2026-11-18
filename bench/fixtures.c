@@ -46,6 +46,52 @@ void *bench_xalloc(size_t n)
     return p;
 }
 
+static void *xalloc_align(size_t n, size_t align)
+{
+    void *p = NULL;
+    if (align < sizeof(void *)) align = sizeof(void *);
+    if (n == 0) n = 64;
+    if (posix_memalign(&p, align, n) != 0 || !p) bench_die("allocation failed");
+    return p;
+}
+
+static size_t round_up(size_t n, size_t align)
+{
+    return (n + align - 1) & ~(align - 1);
+}
+
+/* ------------------------------------------------------------- timing ------ */
+
+double bench_measure(RunFn fn, void *ctx, int target_ms, int *out_reps)
+{
+    fn(ctx);
+    const double t0 = bench_now_s();
+    int reps = 0;
+    double elapsed;
+    do {
+        fn(ctx);
+        reps++;
+        elapsed = bench_now_s() - t0;
+    } while ((elapsed * 1000.0 < (double)target_ms || reps < 3)
+             && reps < 200000);
+    *out_reps = reps;
+    return elapsed;
+}
+
+void bench_report(const char *name, const char *shape, const char *fmt,
+                  double sec, int reps, int calls, double flops, double bytes)
+{
+    const double per_ms = sec / ((double)reps * (double)calls) * 1e3;
+    const double gfs = flops > 0.0 ? flops * (double)reps / sec / 1e9 : 0.0;
+    const double gbs = bytes > 0.0 ? bytes * (double)reps / sec / 1e9 : 0.0;
+
+    printf("%-30s %-20s %-5s %10.4f", name, shape, fmt, per_ms);
+    if (flops > 0.0) printf(" %9.1f", gfs); else printf(" %9s", "-");
+    if (bytes > 0.0) printf(" %9.2f", gbs); else printf(" %9s", "-");
+    printf("\n");
+    fflush(stdout);
+}
+
 void bench_fill_f32(float *p, size_t n, float amp)
 {
     for (size_t i = 0; i < n; i++)
@@ -120,43 +166,54 @@ static void fill_scales(uint8_t *p, size_t n, int fp4)
         p[i] = (uint8_t)(lo + (bench_rnd32() % 7u));
 }
 
-void qfix_init(QFix *q, int wdt, int rows, int cols)
+void qfix_init_aligned(QFix *q, int wdt, int rows, int cols, size_t align)
 {
     memset(q, 0, sizeof *q);
+    if (align < 64) align = 64;
     q->m.wdt  = wdt;
     q->m.rows = rows;
     q->m.cols = cols;
 
     if (wdt == DSV4_WBF16) {
         q->wb = (size_t)rows * (size_t)cols * 2u;
-        q->w  = bench_xalloc(q->wb);
+        q->walloc = round_up(q->wb, align);
+        q->w  = xalloc_align(q->walloc, align);
         fill_bytes(q->w, q->wb, wdt);
         q->m.blk_r = q->m.blk_c = 0;
     } else if (wdt == DSV4_WFP8) {
         q->wb = (size_t)rows * (size_t)cols;
-        q->w  = bench_xalloc(q->wb);
+        q->walloc = round_up(q->wb, align);
+        q->w  = xalloc_align(q->walloc, align);
         fill_bytes(q->w, q->wb, wdt);
         const int sr = (rows + 127) / 128;
         const int sc = (cols + 127) / 128;
         q->sb = (size_t)sr * (size_t)sc;
-        q->s  = bench_xalloc(q->sb);
+        q->salloc = round_up(q->sb, align);
+        q->s  = xalloc_align(q->salloc, align);
         fill_scales((uint8_t *)q->s, q->sb, 0);
         q->m.blk_r = 128;
         q->m.blk_c = 128;
     } else {
         q->wb = (size_t)rows * ((size_t)cols / 2u);
-        q->w  = bench_xalloc(q->wb);
+        q->walloc = round_up(q->wb, align);
+        q->w  = xalloc_align(q->walloc, align);
         fill_bytes(q->w, q->wb, wdt);
         const int sr = rows;
         const int sc = (cols + 31) / 32;
         q->sb = (size_t)sr * (size_t)sc;
-        q->s  = bench_xalloc(q->sb);
+        q->salloc = round_up(q->sb, align);
+        q->s  = xalloc_align(q->salloc, align);
         fill_scales((uint8_t *)q->s, q->sb, 1);
         q->m.blk_r = 1;
         q->m.blk_c = 32;
     }
     q->m.w = q->w;
     q->m.s = q->s;
+}
+
+void qfix_init(QFix *q, int wdt, int rows, int cols)
+{
+    qfix_init_aligned(q, wdt, rows, cols, 64);
 }
 
 void qfix_free(QFix *q)

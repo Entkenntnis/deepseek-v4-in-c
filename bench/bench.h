@@ -29,10 +29,16 @@ typedef struct {
     DSV4QMat m;
     void    *w;
     void    *s;
-    size_t   wb, sb;
+    size_t   wb, sb;         /* logical payload bytes                        */
+    size_t   walloc, salloc; /* allocation bytes, rounded up for alignment   */
 } QFix;
 
 void        qfix_init(QFix *q, int wdt, int rows, int cols);
+/* Same fixture, but the weight/scale allocations are aligned to `align` and
+ * rounded up to a multiple of it. The Vulkan backend imports host pointers and
+ * requires the driver's minImportedHostPointerAlignment. */
+void        qfix_init_aligned(QFix *q, int wdt, int rows, int cols,
+                              size_t align);
 void        qfix_free(QFix *q);
 double      qfix_bytes(const QFix *q, int nt);
 const char *bench_fmt_name(int wdt);
