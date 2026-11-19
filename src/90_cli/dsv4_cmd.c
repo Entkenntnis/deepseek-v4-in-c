@@ -59,10 +59,30 @@ static int parse_ids(Engine *e, const char *s, int *n_out)
     return 0;
 }
 
+static int hex_decode(const char *s, char *out, int cap)
+{
+    int n = 0;
+    for (; s[0] && s[1]; s += 2) {
+        int hi = -1, lo = -1;
+        const char a = s[0], b = s[1];
+        if (a >= '0' && a <= '9') hi = a - '0';
+        else if (a >= 'a' && a <= 'f') hi = a - 'a' + 10;
+        else if (a >= 'A' && a <= 'F') hi = a - 'A' + 10;
+        if (b >= '0' && b <= '9') lo = b - '0';
+        else if (b >= 'a' && b <= 'f') lo = b - 'a' + 10;
+        else if (b >= 'A' && b <= 'F') lo = b - 'A' + 10;
+        if (hi < 0 || lo < 0 || n + 1 >= cap) return -1;
+        out[n++] = (char)((hi << 4) | lo);
+    }
+    if (s[0]) return -1;                 /* odd number of hex digits */
+    out[n] = 0;
+    return n;
+}
+
 static int decode_path(const char *v, char *out, size_t cap)
 {
     if (!v || strncmp(v, "hex:", 4) != 0) return -1;
-    if (dsv4_hex_decode(v + 4, out, (int)cap) < 0) return -1;
+    if (hex_decode(v + 4, out, (int)cap) < 0) return -1;
     return 0;
 }
 

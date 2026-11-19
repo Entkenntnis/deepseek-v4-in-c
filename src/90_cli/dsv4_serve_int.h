@@ -66,14 +66,11 @@ extern volatile sig_atomic_t dsv4_cancel;
 /* ---- util ---- */
 double dsv4_proc_rss_mb(void);
 double dsv4_proc_read_gb(void);
-void   dsv4_emit_hex_field(const char *key, const char *s);
-int    dsv4_hex_decode(const char *s, char *out, int cap);
-void   dsv4_usage(const char *me);
-/* One error event for every failure. KV-cache messages start with "KV: " so
- * the client can treat them as recoverable without a separate event type. */
-void   dsv4_emit_error(const char *fmt, ...);
 
 /* ---- events ---- */
+/* One error event for every failure. KV-cache messages start with "KV: " so
+ * the client can treat them as recoverable without a separate event type. */
+void dsv4_emit_error(const char *fmt, ...);
 void dsv4_emit_ready(Engine *e, const char *event);
 void dsv4_emit_start(Engine *e, int start_pos, int prompt_tokens,
                      int gen_max, int prefill_tokens);

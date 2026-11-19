@@ -10,6 +10,18 @@
 #include "dsv4_serve_int.h"
 #include "dsv4_threads.h"
 
+static void usage(const char *me)
+{
+    fprintf(stderr,
+            "usage: %s --model <dir> --trunk <dir> "
+            "[--budget GB|auto] [--ctx N] [--gen N]\n"
+            "\n"
+            "Speaks a line protocol on stdin/stdout: one command or event per\n"
+            "line, whitespace-separated key=value fields, strings as hex:... .\n"
+            "Start it from the TUI:\n"
+            "  python3 tui/dsv4_tui.py\n", me);
+}
+
 static void handle_cancel(int sig)
 {
     (void)sig;
@@ -35,15 +47,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc)
             ngen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help")) {
-            dsv4_usage(argv[0]);
+            usage(argv[0]);
             return 0;
         } else {
-            dsv4_usage(argv[0]);
+            usage(argv[0]);
             return 2;
         }
     }
     if (!model || !trunkdir) {
-        dsv4_usage(argv[0]);
+        usage(argv[0]);
         return 2;
     }
 

@@ -2,9 +2,10 @@
 /* dsv4_emit.c - the line-delimited events.
  *
  * Shape: `<event> key=value key=value ...`. Only fields consumed by a default
- * TUI/e2e/prefill view are emitted. Strings are hex through
- * dsv4_emit_hex_field(); names and numbers are bare ASCII.
+ * TUI/e2e/prefill view are emitted. Strings are hex through emit_hex_field();
+ * names and numbers are bare ASCII.
  */
+#include <stdarg.h>
 #include <stdio.h>
 
 #include "dsv4_serve_int.h"
@@ -13,6 +14,32 @@
 /* Static fields never change after init, so they are sent only on ready.
  * Dynamic fields are sampled at the TUI's cadence instead of on every event. */
 #define DSV4_STATS_INTERVAL_S 0.5
+
+/* String fields travel as hex. That keeps the line protocol ASCII-only and
+ * means a path or an error message needs no quoting, escaping, or Unicode
+ * handling on this side. */
+static void emit_hex_field(const char *key, const char *s)
+{
+    static const char hx[] = "0123456789abcdef";
+    printf("%s=hex:", key);
+    for (const unsigned char *p = (const unsigned char *)s; p && *p; p++) {
+        putchar(hx[*p >> 4]);
+        putchar(hx[*p & 15]);
+    }
+}
+
+void dsv4_emit_error(const char *fmt, ...)
+{
+    char msg[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    fputs("error ", stdout);
+    emit_hex_field("message", msg);
+    putchar('\n');
+    fflush(stdout);
+}
 
 static void write_static(const Engine *e)
 {
