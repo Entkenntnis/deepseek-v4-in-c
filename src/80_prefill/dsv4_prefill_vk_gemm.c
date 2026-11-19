@@ -61,8 +61,7 @@ static int wait_tile(DSV4PrefillVk *v)
 }
 
 static int gemm_impl(DSV4PrefillVk *v, float *y, const float *x,
-                     const DSV4QMat *m, int n,
-                     DSV4PrefillVkFillFn fill, void *fill_ctx)
+                     const DSV4QMat *m, int n)
 {
     if (!v || v->dead || !m || !x || !y || n <= 0) return -1;
     if (m->rows <= 0 || m->cols <= 0) return -1;
@@ -123,17 +122,6 @@ static int gemm_impl(DSV4PrefillVk *v, float *y, const float *x,
             v->dead = 1;
             return -1;
         }
-        if (fill) {
-            /* Keep the CPU busy for as long as this tile is still on the
-             * device. One CPU bucket per call keeps the granularity small
-             * enough that the loop notices the fence promptly; a long bucket
-             * can overshoot by at most that bucket. */
-            for (;;) {
-                const VkResult fs = vkGetFenceStatus(v->dev, v->fence);
-                if (fs != VK_NOT_READY) break;
-                if (!fill(fill_ctx)) break;
-            }
-        }
         if (wait_tile(v) != 0) {
             v->dead = 1;
             return -1;
@@ -146,12 +134,5 @@ static int gemm_impl(DSV4PrefillVk *v, float *y, const float *x,
 int dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
                          const DSV4QMat *m, int n)
 {
-    return gemm_impl(v, y, x, m, n, NULL, NULL);
-}
-
-int dsv4_prefill_vk_gemm_overlap(DSV4PrefillVk *v, float *y, const float *x,
-                                 const DSV4QMat *m, int n,
-                                 DSV4PrefillVkFillFn fill, void *fill_ctx)
-{
-    return gemm_impl(v, y, x, m, n, fill, fill_ctx);
+    return gemm_impl(v, y, x, m, n);
 }

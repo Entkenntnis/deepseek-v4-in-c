@@ -14,29 +14,6 @@ int dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count)
     return p && p->vk && count >= DSV4_PF_GPU_ALWAYS_MIN;
 }
 
-/* Routed-expert matmul. gate/up/mid are supplied by the caller: the normal
- * path uses ex_*, the overlap fill uses sm_*, so a GPU bucket and a CPU fill
- * bucket can be live at the same time. */
-static void expert_ws(DSV4Prefill *p, float *out, const float *x,
-                      const DSV4ExpertW *e, float *gate, float *up,
-                      float *mid, int hidden, int inter, float limit)
-{
-    (void)p;
-    dsv4_mmq(gate, x, &e->w1);
-    dsv4_mmq(up,   x, &e->w3);
-    dsv4_swiglu(mid, gate, up, inter, limit);
-    dsv4_mmq(out, mid, &e->w2);
-    (void)hidden;
-}
-
-void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
-                         const DSV4ExpertW *e, int hidden, int inter,
-                         float limit)
-{
-    expert_ws(p, out, x, e, p->ex_gate, p->ex_up, p->ex_mid,
-              hidden, inter, limit);
-}
-
 /* One expert applied to every token that routed to it: the expert-major seam.
  * count == 1 stays on the CPU GEMV unless the scheduler explicitly forces the
  * GPU. For count > 1 the activation rows are gathered once, each matrix runs
@@ -60,8 +37,9 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
     if (count == 1 && !gpu_wanted) {
         const int t = tok[0], k = ks[0];
         DSV4PrefillTok *s = &p->scratch[t];
-        dsv4_prefill_expert(p, s->expert_acc + (size_t)k * s->expert_acc_stride,
-                            p->x1 + (size_t)t * d, ew, d, rinter,
+        dsv4_expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
+                            p->x1 + (size_t)t * d, ew,
+                            p->ex_gate, p->ex_up, p->ex_mid, rinter,
                             c->swiglu_limit);
         return;
     }
@@ -111,9 +89,10 @@ void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
     if (count == 1) {
         const int t = tok[0], k = ks[0];
         DSV4PrefillTok *s = &p->scratch[t];
-        expert_ws(p, s->expert_acc + (size_t)k * s->expert_acc_stride,
-                  p->x1 + (size_t)t * d, ew, p->sm_gate, p->sm_up,
-                  p->sm_mid, d, rinter, c->swiglu_limit);
+        dsv4_expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
+                            p->x1 + (size_t)t * d, ew,
+                            p->sm_gate, p->sm_up, p->sm_mid, rinter,
+                            c->swiglu_limit);
     } else {
         for (int j = 0; j < count; j++) {
             const int t = tok[j];

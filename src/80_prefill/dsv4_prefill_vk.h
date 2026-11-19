@@ -34,13 +34,6 @@ void dsv4_prefill_vk_free(DSV4PrefillVk *v);
 int  dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
                           const DSV4QMat *m, int n);
 
-/* Same GEMM, but calls fill(fill_ctx) once after each tile submit and before
- * waiting for that tile. fill may be NULL (then this is exactly the synchronous
- * path). */
-int  dsv4_prefill_vk_gemm_overlap(DSV4PrefillVk *v, float *y, const float *x,
-                                  const DSV4QMat *m, int n,
-                                  DSV4PrefillVkFillFn fill, void *fill_ctx);
-
 /* One routed expert: w1/w3, SwiGLU and w2 in one command buffer. `inter` is
  * the routed-expert intermediate width; `limit` is the SwiGLU clamp. */
 int  dsv4_prefill_vk_expert_fused(DSV4PrefillVk *v, float *y, const float *x,

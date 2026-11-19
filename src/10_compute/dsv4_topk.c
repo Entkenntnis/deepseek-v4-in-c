@@ -4,9 +4,15 @@
  * Kept apart from the score pass so the heap can be tested and replaced
  * without touching the dot-product loop.
  */
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "dsv4_kernels.h"
+
+/* The indexer never selects more than index_topk rows (512 on Flash, 1024 on
+ * Pro). A fixed bound lets the heap live on the stack and removes the
+ * allocation-failure branch entirely. */
+#define DSV4_TOPK_MAX 1024
 
 /* Top-k by score, descending, ties broken toward the LOWER index.
  *
@@ -67,32 +73,17 @@ static void topk_sift_up(DSV4TopkEntry *h, int i)
     }
 }
 
-/* The reference scan, kept only as the allocation-failure fallback. It is the
- * definition the heap is checked against, and it must never be reached on a
- * working machine. */
-static int topk_scan(int *idxs, const float *scores, int n, int k)
-{
-    for (int i = 0; i < k; i++) {
-        int best = -1;
-        for (int c = 0; c < n; c++) {
-            int taken = 0;
-            for (int j = 0; j < i; j++) if (idxs[j] == c) { taken = 1; break; }
-            if (taken) continue;
-            if (best < 0 || scores[c] > scores[best]) best = c;
-        }
-        idxs[i] = best;
-    }
-    return k;
-}
-
 int dsv4_topk(int *idxs, const float *scores, int n, int k)
 {
     if (k > n) k = n;
     if (k <= 0 || n <= 0) return k;
+    if (k > DSV4_TOPK_MAX) {
+        fprintf(stderr, "dsv4_topk: k=%d exceeds the %d-row bound\n",
+                k, DSV4_TOPK_MAX);
+        abort();
+    }
 
-    DSV4TopkEntry *h = (DSV4TopkEntry *)malloc((size_t)k * sizeof *h);
-    if (!h) return topk_scan(idxs, scores, n, k);
-
+    DSV4TopkEntry h[DSV4_TOPK_MAX];
     int cnt = 0;
     for (int i = 0; i < n; i++) {
         const DSV4TopkEntry e = { scores[i], i };
@@ -118,7 +109,6 @@ int dsv4_topk(int *idxs, const float *scores, int n, int k)
         h[j] = t;
     }
     for (int i = 0; i < cnt; i++) idxs[i] = h[i].i;
-    free(h);
     return k;
 }
 

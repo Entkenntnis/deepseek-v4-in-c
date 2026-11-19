@@ -79,23 +79,19 @@ int dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n)
 
     p->pf_layer = L;
     p->pf_active = 0;
-    p->pf_prepared = 0;
 
     const int nord = union_prepare(p, L, n);
     p->pf_n = nord;
 
-    /* The cache batch is fixed-size. One Flash layer has at most 256 distinct
-     * experts, so this normally fires for the whole layer; a larger model falls
-     * back to the grouped path in union(). */
-    p->pf_prepared = 1;
-    if (nord > DSV4_MAX_PREFETCH) return 0;
+    /* The cache batch is fixed-size. Flash has n_experts == 256, exactly the
+     * batch bound, so the whole layer is always one batch. */
+    if (nord > DSV4_MAX_PREFETCH) return -1;
 
     for (int j = 0; j < nord; j++) p->pf_ex[j] = NULL;
 
     const int rc = dsv4_cache_begin(p->cache, L, p->ex_order, nord, p->pf_ex);
     if (rc != 0) {
         dsv4_cache_end(p->cache, p->pf_ex);
-        p->pf_prepared = 0;
         return -1;
     }
     p->pf_active = 1;
@@ -107,5 +103,4 @@ void dsv4_prefill_moe_abort(DSV4Prefill *p)
     if (!p || !p->pf_active) return;
     dsv4_cache_end(p->cache, p->pf_ex);
     p->pf_active = 0;
-    p->pf_prepared = 0;
 }

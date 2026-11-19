@@ -60,32 +60,17 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
         return;
     }
 
-    int ok = 0;
-    if (e->pf && n > 1 && dsv4_prefill_reserve(e->pf, n) == 0) {
-        const int rc = dsv4_prefill_range(e->pf, e->ids, n, 0,
-                                          e->cs_d, e->sn_d, e->cs_c, e->sn_c,
-                                          e->h);
-        dsv4_prefill_release(e->pf);
-        ok = rc == 0;
-        if (!ok)
-            dsv4_emit_kv_error(rc == DSV4_PREFILL_CANCELLED ||
-                               rc == DSV4_PREFILL_ABORTED
-                               ? "prefix prefill cancelled"
-                               : "prefix prefill failed");
-    } else {
-        /* No block prefill: the per-token path produces the same KV state. */
-        ok = 1;
-        for (int i = 0; i < n; i++) {
-            if (dsv4_forward(e, e->ids[i], i, 0, 0, "prefix",
-                             dsv4_now_s() - t0, NULL) != 0) {
-                ok = 0;
-                dsv4_emit_kv_error("prefix prefill failed");
-                break;
-            }
-        }
+    int batched = 0;
+    dsv4_prefill_prepare(e, n, &batched);
+    const int rc = dsv4_prefill_run(e, e->ids, n, 0, batched, 0, "prefix", t0);
+    if (rc != 0) {
+        dsv4_emit_kv_error(rc == DSV4_PREFILL_CANCELLED ||
+                           rc == DSV4_PREFILL_ABORTED
+                           ? "prefix prefill cancelled"
+                           : "prefix prefill failed");
     }
 
-    if (!ok) {
+    if (rc != 0) {
         dsv4_engine_reset_context(e);
         dsv4_cancel = 0;
         return;

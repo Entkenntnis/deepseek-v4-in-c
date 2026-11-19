@@ -10,41 +10,9 @@
 
 #include "dsv4_kvfile.h"
 
-#define KV_MAGIC "DSV4KVC2"
-#define KV_VERSION 2u
-#define KV_TAG 64
-
 static int write_all(FILE *f, const void *p, size_t n)
 {
     return n == 0 || fwrite(p, 1, n, f) == n ? 0 : -1;
-}
-
-static int layer_ratio(const DSV4Cfg *c, int L)
-{
-    const int r = dsv4_compress_ratio(c, L);
-    return r < 0 ? 0 : r;
-}
-
-static size_t layer_cn(const DSV4Cfg *c, int L)
-{
-    const int r = layer_ratio(c, L);
-    if (!r) return 0;
-    const int coff = r == 4 ? 2 : 1;
-    return (size_t)coff * (size_t)r * (size_t)coff * (size_t)c->head_dim;
-}
-
-static int64_t payload_floats(const DSV4Cfg *c, const int *ncomp, int n_ids)
-{
-    const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
-    int64_t n = 0;
-    for (int L = 0; L < c->n_layers; L++) {
-        const int r = layer_ratio(c, L);
-        const int want = r ? n_ids / r : 0;
-        if (ncomp[L] != want) return -1;
-        n += (int64_t)wn + (int64_t)ncomp[L] * c->head_dim
-           + 2 * (int64_t)layer_cn(c, L);
-    }
-    return n;
 }
 
 static void mkdir_parents(const char *path)
@@ -115,7 +83,7 @@ int dsv4_kv_save(const char *path, const char *model_tag,
 
     int ncomp[DSV4_MAX_LAYERS];
     for (int L = 0; L < c->n_layers; L++) ncomp[L] = lst[L].n_compressed;
-    const int64_t floats = payload_floats(c, ncomp, n_ids);
+    const int64_t floats = dsv4_kv_payload_floats(c, ncomp, n_ids);
     if (floats < 0) return -1;
 
     mkdir_parents(path);
@@ -125,30 +93,30 @@ int dsv4_kv_save(const char *path, const char *model_tag,
     FILE *f = fopen(tmp, "wb");
     if (!f) return -1;
 
-    char tag[KV_TAG] = { 0 };
+    char tag[DSV4_KV_TAG] = { 0 };
     if (model_tag) snprintf(tag, sizeof tag, "%s", model_tag);
-    const uint32_t version = KV_VERSION, reserved = 0;
+    const uint32_t version = DSV4_KV_VERSION, reserved = 0;
     const uint64_t hash = dsv4_cfg_hash(c), fl = (uint64_t)floats;
     const int32_t nids = n_ids, nl = c->n_layers, mp = c->max_pos;
     const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
 
     int ok = 0;
-    if (write_all(f, KV_MAGIC, 8) ||
+    if (write_all(f, DSV4_KV_MAGIC, 8) ||
         write_all(f, &version, 4) || write_all(f, &reserved, 4) ||
         write_all(f, &hash, 8) || write_all(f, &fl, 8) ||
         write_all(f, &nids, 4) || write_all(f, &nl, 4) ||
-        write_all(f, &mp, 4) || write_all(f, tag, KV_TAG) ||
+        write_all(f, &mp, 4) || write_all(f, tag, DSV4_KV_TAG) ||
         write_all(f, ids, (size_t)n_ids * sizeof *ids) ||
         write_all(f, ncomp, (size_t)c->n_layers * sizeof *ncomp))
         goto done;
 
     for (int L = 0; L < c->n_layers; L++) {
         const DSV4LayerState *st = &lst[L];
-        const int r = layer_ratio(c, L);
+        const int r = dsv4_kv_layer_ratio(c, L);
         if (!st->kv_cache) goto done;
         if (write_all(f, st->kv_cache, wn * sizeof(float))) goto done;
         if (r) {
-            const size_t cn = layer_cn(c, L);
+            const size_t cn = dsv4_kv_layer_cn(c, L);
             const size_t rows = (size_t)st->n_compressed * c->head_dim;
             if (!st->comp_kv || !st->comp_score) goto done;
             if (write_all(f, st->kv_cache + wn, rows * sizeof(float)) ||

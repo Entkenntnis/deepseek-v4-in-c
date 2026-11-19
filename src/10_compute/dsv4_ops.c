@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "dsv4.h"
+#include "dsv4_matmul.h"
 
 /* ---------------------------------------------------------------- RMSNorm ---
  * model.py RMSNorm.forward:
@@ -75,6 +76,20 @@ void dsv4_swiglu(float *y, const float *gate, const float *up, int n, float limi
             y[i] = (g / (1.0f + expf(-g))) * up[i];
         }
     }
+}
+
+/* ---------------------------------------------------------------- expert ---
+ * SwiGLU expert: w2( silu(clamp(w1 x)) * clamp(w3 x) ). The workspace rows are
+ * passed in because the prefill GPU path keeps a second set live for its CPU
+ * fill window. */
+void dsv4_expert_forward(float *out, const float *x, const DSV4ExpertW *e,
+                         float *gate, float *up, float *mid, int inter,
+                         float limit)
+{
+    dsv4_mmq(gate, x, &e->w1);
+    dsv4_mmq(up,   x, &e->w3);
+    dsv4_swiglu(mid, gate, up, inter, limit);
+    dsv4_mmq(out, mid, &e->w2);
 }
 
 /* ----------------------------------------------------------------- router ---

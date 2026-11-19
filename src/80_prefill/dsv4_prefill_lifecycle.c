@@ -20,7 +20,6 @@ static void tok_free(DSV4PrefillTok *s)
 {
     if (!s) return;
     free(s->arena);
-    free(s->idxs);
     memset(s, 0, sizeof *s);
 }
 
@@ -41,6 +40,11 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     p->attn_scratch = xcalloc(
         (size_t)c->n_heads *
         ((size_t)c->sliding_window + (size_t)c->index_topk) * sizeof(float));
+    p->attn_kv = xcalloc((size_t)c->head_dim * sizeof(float));
+    p->attn_idx_cap = opt->max_pos / 4 + 1;
+    p->attn_idx_scores = xcalloc((size_t)p->attn_idx_cap * sizeof(float));
+    p->attn_idxs = (int *)xcalloc(
+        ((size_t)c->sliding_window + (size_t)c->index_topk) * sizeof(int));
     p->ex_count = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_order = (int *)xcalloc((size_t)c->n_experts * sizeof(int));
     p->ex_off = (int *)xcalloc(((size_t)c->n_experts + 1) * sizeof(int));
@@ -59,7 +63,8 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
                                  sizeof(float));
     p->sm_out = (float *)xcalloc(fill_rows * (size_t)c->hidden *
                                  sizeof(float));
-    if (!p->xh || !p->attn_scratch || !p->ex_count || !p->ex_order ||
+    if (!p->xh || !p->attn_scratch || !p->attn_kv || !p->attn_idx_scores ||
+        !p->attn_idxs || !p->ex_count || !p->ex_order ||
         !p->ex_off || !p->ex_fill || !p->ex_seen ||
         !p->sm_x || !p->sm_gate || !p->sm_up || !p->sm_mid || !p->sm_out) {
         dsv4_prefill_free(p);
@@ -123,6 +128,9 @@ void dsv4_prefill_free(DSV4Prefill *p)
     dsv4_prefill_release(p);
     free(p->xh);
     free(p->attn_scratch);
+    free(p->attn_kv);
+    free(p->attn_idx_scores);
+    free(p->attn_idxs);
     free(p->ex_count); free(p->ex_order); free(p->ex_off);
     free(p->ex_fill); free(p->ex_seen);
     free(p->sm_x); free(p->sm_gate); free(p->sm_up);

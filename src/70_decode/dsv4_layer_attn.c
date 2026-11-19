@@ -99,23 +99,8 @@ void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
 
     const int gw = H * hd / c->o_groups;       /* channels per group */
     const int gr = c->o_lora;                  /* rank per group     */
-    /* Stored bytes per element: 2 for BF16, 1 for FP8/packed FP4. Advancing by
-     * the logical width instead read halfway into the wrong rows. */
-    const size_t esz = (w->attn.wo_a.wdt == DSV4_WBF16) ? 2u : 1u;
-    const size_t row_bytes = (w->attn.wo_a.wdt == DSV4_WFP4)
-                           ? (size_t)gw / 2u : (size_t)gw * esz;
     for (int g = 0; g < c->o_groups; g++) {
-        DSV4QMat slice = w->attn.wo_a;
-        slice.rows = gr;
-        slice.cols = gw;
-        slice.w = (const unsigned char *)w->attn.wo_a.w
-                + (size_t)g * gr * row_bytes;
-        if (slice.s) {
-            const size_t sc_row = (size_t)((gw + slice.blk_c - 1) / slice.blk_c);
-            slice.s = (const unsigned char *)w->attn.wo_a.s
-                    + (size_t)g * (size_t)(gr / (slice.blk_r ? slice.blk_r : 1))
-                    * sc_row;
-        }
+        DSV4QMat slice = dsv4_wo_a_group(&w->attn, g, c->o_groups, gr, H * hd);
         dsv4_mmq(s->ogrp + (size_t)g * gr, s->o + (size_t)g * gw, &slice);
     }
     dsv4_mmq(out, s->ogrp, &w->attn.wo_b);

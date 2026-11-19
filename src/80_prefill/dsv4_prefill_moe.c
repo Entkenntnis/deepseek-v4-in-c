@@ -86,9 +86,6 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
     /* Grouped low-rank output projection, one GEMM per group. */
     const int gw = H * hd / c->o_groups;
     const int gr = c->o_lora;
-    const size_t esz = (w->attn.wo_a.wdt == DSV4_WBF16) ? 2u : 1u;
-    const size_t row_bytes = (w->attn.wo_a.wdt == DSV4_WFP4)
-                           ? (size_t)gw / 2u : (size_t)gw * esz;
     if (c->o_groups > 16) return -1;
     DSV4QMat slices[16];
     DSV4PMJob jobs[16];
@@ -97,18 +94,7 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
             memcpy(p->xg + ((size_t)g * p->cap + t) * gw,
                    p->o + (size_t)t * (size_t)H * hd + (size_t)g * gw,
                    (size_t)gw * sizeof(float));
-        DSV4QMat slice = w->attn.wo_a;
-        slice.rows = gr;
-        slice.cols = gw;
-        slice.w = (const unsigned char *)w->attn.wo_a.w +
-                  (size_t)g * gr * row_bytes;
-        if (slice.s) {
-            const size_t sc_row = (size_t)((gw + slice.blk_c - 1) / slice.blk_c);
-            slice.s = (const unsigned char *)w->attn.wo_a.s +
-                      (size_t)g * (size_t)(gr / (slice.blk_r ? slice.blk_r : 1))
-                      * sc_row;
-        }
-        slices[g] = slice;
+        slices[g] = dsv4_wo_a_group(&w->attn, g, c->o_groups, gr, H * hd);
         jobs[g].m = &slices[g];
         jobs[g].x = p->xg + (size_t)g * p->cap * gw;
         jobs[g].y = p->yg + (size_t)g * p->cap * gr;

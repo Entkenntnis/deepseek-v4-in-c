@@ -41,16 +41,6 @@ void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
     dsv4_hc_post(h, s->qr, s->resid, s->post, s->comb, hc, d);
 }
 
-/* SwiGLU expert: w2( silu(clamp(w1 x)) * clamp(w3 x) ). */
-static void expert_forward(float *out, const float *x, const DSV4ExpertW *e,
-                           DSV4Scratch *s, int hidden, int inter, float limit)
-{
-    dsv4_mmq(s->expert_gate, x, &e->w1);
-    dsv4_mmq(s->expert_up,   x, &e->w3);
-    dsv4_swiglu(s->expert_out, s->expert_gate, s->expert_up, inter, limit);
-    dsv4_mmq(out, s->expert_out, &e->w2);
-}
-
 void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
                     const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
                     int layer, int token_id)
@@ -71,16 +61,17 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
     /* The residents, while the misses are still on the wire. */
     for (int k = 0; k < c->topk; k++) {
         if (!ex[k]) continue;
-        expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
-                       x, ex[k], s, c->hidden, c->moe_inter,
-                       c->swiglu_limit);
+        dsv4_expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
+                            x, ex[k], s->expert_gate, s->expert_up,
+                            s->expert_out, c->moe_inter, c->swiglu_limit);
         done[k] = 1;
     }
 
     /* The shared expert does not depend on routing, so it fills the window
      * while the misses are read. */
-    expert_forward(s->shared_acc, x, &w->moe.shared, s, c->hidden,
-                   c->moe_inter * c->n_shared, c->swiglu_limit);
+    dsv4_expert_forward(s->shared_acc, x, &w->moe.shared, s->expert_gate,
+                        s->expert_up, s->expert_out,
+                        c->moe_inter * c->n_shared, c->swiglu_limit);
 
     /* A miss whose read has landed can be computed NOW. The per-k accumulator
      * and the k-order sum below keep the result identical. */
@@ -88,9 +79,9 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
         int k = -1;
         if (!dsv4_cache_wait(cache, &k)) break;
         if (k < 0 || k >= c->topk || !ex[k]) continue;
-        expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
-                       x, ex[k], s, c->hidden, c->moe_inter,
-                       c->swiglu_limit);
+        dsv4_expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
+                            x, ex[k], s->expert_gate, s->expert_up,
+                            s->expert_out, c->moe_inter, c->swiglu_limit);
         done[k] = 1;
     }
 
@@ -105,9 +96,10 @@ void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
             abort();
         }
         if (!done[k])
-            expert_forward(s->expert_acc + (size_t)k * s->expert_acc_stride,
-                           x, ex[k], s, c->hidden, c->moe_inter,
-                           c->swiglu_limit);
+            dsv4_expert_forward(
+                s->expert_acc + (size_t)k * s->expert_acc_stride,
+                x, ex[k], s->expert_gate, s->expert_up, s->expert_out,
+                c->moe_inter, c->swiglu_limit);
     }
     /* IN k ORDER, ALWAYS. */
     for (int k = 0; k < c->topk; k++) {

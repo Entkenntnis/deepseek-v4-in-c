@@ -71,11 +71,11 @@ int64_t dsv4_st_read_f32(const DSV4St *s, int shard, int64_t off,
     if (dtype == DSV4_DT_BF16) {
         uint16_t *tmp = (uint16_t *)malloc((size_t)nbytes);
         if (!tmp) return 0;
-        if (dsv4_st_read(s, shard, off, nbytes, tmp) != nbytes) {
+        if (dsv4_st_read(s, shard, off, nbytes, tmp) != nbytes ||
+            dsv4_widen_f32(out, tmp, nbytes, dtype) != 0) {
             free(tmp);
             return 0;
         }
-        for (int64_t i = 0; i < n; i++) out[i] = dsv4_bf16_to_f32(tmp[i]);
         free(tmp);
         return n;
     }

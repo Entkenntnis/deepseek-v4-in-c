@@ -16,6 +16,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Storage dtypes, as numbered in the packer. I8 is PACKED FP4: two values per
  * byte, exactly as the checkpoint spells it. F8_E8M0 is an exponent-only scale
@@ -109,6 +110,27 @@ static inline float dsv4_bf16_to_f32(uint16_t h)
     union { uint32_t u; float f; } v;
     v.u = (uint32_t)h << 16;
     return v.f;
+}
+
+/* Widen one tensor to f32. Only the two formats the checkpoint actually uses
+ * for widened vectors are accepted; packed formats need their scale partner. */
+static inline int dsv4_widen_f32(float *dst, const void *src, int64_t nbytes,
+                                 int dtype)
+{
+    const int esz = dsv4_st_elemsize((DSV4Dtype)dtype);
+    if (esz <= 0 || nbytes % esz) return -1;
+    const int64_t n = nbytes / esz;
+
+    if (dtype == DSV4_DT_F32) {
+        memcpy(dst, src, (size_t)nbytes);
+        return 0;
+    }
+    if (dtype == DSV4_DT_BF16) {
+        const uint16_t *p = (const uint16_t *)src;
+        for (int64_t i = 0; i < n; i++) dst[i] = dsv4_bf16_to_f32(p[i]);
+        return 0;
+    }
+    return -1;
 }
 
 #endif /* DSV4_ST_H */

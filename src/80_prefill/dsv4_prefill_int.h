@@ -32,17 +32,13 @@ typedef struct {
  * Deliberately NOT a DSV4Scratch: that type carries the whole decode working
  * set (mHC, q/kv/o, router, shared expert, ...), none of which the block path
  * uses. Only expert_acc has to be per token -- it stays live from routing until
- * the weighted sum after the expert-union pass. Everything else here is consumed
- * inside the per-token attention loop, and the count==1 expert path borrows the
- * block-wide ex_* rows instead of owning more buffers. */
+ * the weighted sum after the expert-union pass. The attention working rows are
+ * consumed inside one iteration of the serial token loop, so they are
+ * block-wide (see DSV4Prefill.attn_*). */
 typedef struct {
-    float *kv;              /* [head_dim] compressor output                  */
-    float *idx_scores;      /* [max_pos/4 + 1] compressed-row scores         */
-    int    idx_cap;
-    int   *idxs;            /* [sliding_window + index_topk]                  */
     float *expert_acc;      /* [topk][hidden]                                 */
     int    expert_acc_stride;
-    void  *arena;           /* one allocation backing the float buffers       */
+    void  *arena;           /* one allocation backing expert_acc              */
 } DSV4PrefillTok;
 
 struct DSV4Prefill {
@@ -83,8 +79,14 @@ struct DSV4Prefill {
     DSV4PrefillTok *scratch; /* [B] per-token state for the sequential parts */
     /* dsv4_sparse_attn() is parallel over heads and needs one score row per
      * head: [n_heads][sliding_window + index_topk]. The token loop is serial,
-     * so one block-wide buffer serves every token instead of one per token. */
+     * so one block-wide buffer serves every token instead of one per token.
+     * The compressor output, indexer scores and selected-index list are
+     * likewise consumed within one token iteration and are block-wide. */
     float *attn_scratch;
+    float *attn_kv;          /* [head_dim] compressor output                 */
+    float *attn_idx_scores;  /* [max_pos/4 + 1] compressed-row scores        */
+    int    attn_idx_cap;
+    int   *attn_idxs;        /* [sliding_window + index_topk]                */
 
     /* Expert-union scheduling: one bucket per expert for the whole layer. */
     int   *ex_tok, *ex_k;    /* [B*topk] request -> token and k              */
@@ -112,7 +114,6 @@ struct DSV4Prefill {
     int      pf_n;           /* distinct experts prepared for this layer      */
     int      pf_layer;       /* layer the prepared batch belongs to           */
     int      pf_active;      /* begin() succeeded and end() is still owed     */
-    int      pf_prepared;    /* counts/order are valid for pf_layer           */
 
     /* Per-token projections that carry no position dependency are GEMMs too.
      * The compressor and indexer weights are read once per block instead of
@@ -145,9 +146,6 @@ int  dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n);
 int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                       int n, const int32_t *ids);
 
-void dsv4_prefill_expert(DSV4Prefill *p, float *out, const float *x,
-                         const DSV4ExpertW *e, int hidden, int inter,
-                         float limit);
 /* Whether this bucket is in the always-GPU class. */
 int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
 /* Explicit routing for the scheduler-visible bands. AUTO keeps the old
@@ -168,9 +166,9 @@ void dsv4_prefill_expert_bucket(DSV4Prefill *p, const DSV4ExpertW *ew,
 void dsv4_prefill_expert_bucket_fill(DSV4Prefill *p, const DSV4ExpertW *ew,
                                      int expert, int count, const int *tok,
                                      const int *ks);
-/* Start a whole-layer expert batch early. Returns 0 when the batch is live or
- * when the layer is too large for one batch (the union then groups it); the
- * caller must still run dsv4_prefill_moe_union(), which ends it. */
+/* Start a whole-layer expert batch early. Returns 0 when the batch is live;
+ * the caller must still run dsv4_prefill_moe_union(), which ends it. Returns
+ * -1 if the layer has more distinct experts than one cache batch can hold. */
 int  dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n);
 int  dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n);
 /* Drain any live prefetch batch on an error/cancel path. Safe when idle. */

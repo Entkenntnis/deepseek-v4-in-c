@@ -27,7 +27,6 @@
 #define DSV4_E_HI 7
 
 static DSV4ThreadOpts g_opt;
-static char g_desc[192] = "threads: inherited";
 
 static cpu_set_t g_orig;
 static int       g_have_orig;
@@ -108,15 +107,13 @@ int dsv4_threads_apply(const DSV4ThreadOpts *o)
     int nth = o->threads;
     if (nth <= 0) nth = omp_get_max_threads();
 
-    snprintf(g_desc, sizeof g_desc,
-             "threads: compute %d on CPUs %s%s, readers %d%s",
-             nth, cpus, pinned ? "" : " (no affinity)",
-             o->readers > 0 ? o->readers : 6,
-             o->reader_pin == DSV4_PIN_OFF ? ""
-                 : (o->reader_pin == DSV4_PIN_E ? " on E-cores"
-                                                : " on their own group"));
-
-    fprintf(stderr, "%s\n", g_desc);
+    fprintf(stderr,
+            "threads: compute %d on CPUs %s%s, readers %d%s\n",
+            nth, cpus, pinned ? "" : " (no affinity)",
+            o->readers > 0 ? o->readers : 6,
+            o->reader_pin == DSV4_PIN_OFF ? ""
+                : (o->reader_pin == DSV4_PIN_E ? " on E-cores"
+                                               : " on their own group"));
     return 0;
 }
 
@@ -134,11 +131,6 @@ void dsv4_threads_pin_current_reader(void)
     if (CPU_COUNT(&want) == 0) return;
     if (sched_setaffinity(0, sizeof want, &want) != 0)
         perror("dsv4_threads: reader sched_setaffinity");
-}
-
-const char *dsv4_threads_desc(void)
-{
-    return g_desc;
 }
 
 int dsv4_threads_readers(void)

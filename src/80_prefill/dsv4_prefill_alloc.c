@@ -37,36 +37,18 @@ static int grow_i(int **pp, int cap, size_t per)
     return 0;
 }
 
-/* Per-token prefill state. Sized from what the block path actually reads:
- * attention's compressor/indexer working rows plus the one accumulator that
- * must survive the whole layer. Sizing this like the decode DSV4Scratch wasted
- * several times the memory and made a long prompt look far more expensive than
- * it is. */
-static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c, int max_pos)
+/* Per-token prefill state. Only the accumulator that must survive the whole
+ * layer is per token; the attention working rows live once in DSV4Prefill. */
+static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c)
 {
     memset(s, 0, sizeof *s);
-    const size_t hd    = (size_t)c->head_dim;
-    const size_t nidx  = (size_t)c->sliding_window + (size_t)c->index_topk;
-    /* Only a ratio-4 layer runs the indexer, so n_compressed <= max_pos/4. */
-    const size_t ncomp = (size_t)max_pos / 4 + 1;
-    /* attn_scratch is block-wide (see DSV4Prefill): it is consumed inside the
-     * serial per-token loop, so it must not be charged to every token. */
-    const size_t nf    = hd + ncomp
-                       + (size_t)c->topk * (size_t)c->hidden;
+    const size_t nf = (size_t)c->topk * (size_t)c->hidden;
 
     float *a = (float *)calloc(nf, sizeof(float));
     if (!a) return -1;
     s->arena = a;
-
-    float *p = a;
-    s->kv = p;           p += hd;
-    s->idx_scores = p;   p += ncomp;
-    s->expert_acc = p;   p += (size_t)c->topk * (size_t)c->hidden;
-    s->idx_cap = (int)ncomp;
+    s->expert_acc = a;
     s->expert_acc_stride = c->hidden;
-
-    s->idxs = (int *)calloc(nidx, sizeof(int));
-    if (!s->idxs) { free(a); memset(s, 0, sizeof *s); return -1; }
     return 0;
 }
 
@@ -132,10 +114,9 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
         if (!ns) return -1;
         p->scratch = ns;
         for (int t = p->scratch_cap; t < cap; t++) {
-            if (tok_init(&p->scratch[t], c, p->opt.max_pos) != 0) {
+            if (tok_init(&p->scratch[t], c) != 0) {
                 for (int j = p->scratch_cap; j < t; j++) {
                     free(p->scratch[j].arena);
-                    free(p->scratch[j].idxs);
                     memset(&p->scratch[j], 0, sizeof p->scratch[j]);
                 }
                 return -1;
@@ -152,11 +133,8 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
         4 * (size_t)c->head_dim +
         (size_t)c->index_n_heads * (size_t)c->index_head_dim +
         (size_t)c->index_n_heads;
-    const size_t nidx = (size_t)c->sliding_window + (size_t)c->index_topk;
-    const size_t tok_f = (size_t)c->head_dim + (size_t)p->opt.max_pos / 4 + 1
-                       + nidx + (size_t)c->topk * (size_t)d;
-    const size_t tok_bytes = sizeof(DSV4PrefillTok) + tok_f * sizeof(float)
-                           + nidx * sizeof(int);
+    const size_t tok_f = (size_t)c->topk * (size_t)d;
+    const size_t tok_bytes = sizeof(DSV4PrefillTok) + tok_f * sizeof(float);
     fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block + "
                     "%.1f MB token state (%.1f KB/token); matmul tile <=%d rows\n",
             cap, (double)cap * (double)per_tok * sizeof(float) / 1048576.0,

@@ -7,41 +7,9 @@
 
 #include "dsv4_kvfile.h"
 
-#define KV_MAGIC "DSV4KVC2"
-#define KV_VERSION 2u
-#define KV_TAG 64
-
 static int read_all(FILE *f, void *p, size_t n)
 {
     return n == 0 || fread(p, 1, n, f) == n ? 0 : -1;
-}
-
-static int layer_ratio(const DSV4Cfg *c, int L)
-{
-    const int r = dsv4_compress_ratio(c, L);
-    return r < 0 ? 0 : r;
-}
-
-static size_t layer_cn(const DSV4Cfg *c, int L)
-{
-    const int r = layer_ratio(c, L);
-    if (!r) return 0;
-    const int coff = r == 4 ? 2 : 1;
-    return (size_t)coff * (size_t)r * (size_t)coff * (size_t)c->head_dim;
-}
-
-static int64_t payload_floats(const DSV4Cfg *c, const int *ncomp, int n_ids)
-{
-    const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
-    int64_t n = 0;
-    for (int L = 0; L < c->n_layers; L++) {
-        const int r = layer_ratio(c, L);
-        const int want = r ? n_ids / r : 0;
-        if (ncomp[L] != want) return -1;
-        n += (int64_t)wn + (int64_t)ncomp[L] * c->head_dim
-           + 2 * (int64_t)layer_cn(c, L);
-    }
-    return n;
 }
 
 int dsv4_kv_load(const char *path, const char *model_tag,
@@ -56,7 +24,7 @@ int dsv4_kv_load(const char *path, const char *model_tag,
         return -1;
     }
 
-    char magic[8], tag[KV_TAG];
+    char magic[8], tag[DSV4_KV_TAG];
     uint32_t version = 0, reserved = 0;
     uint64_t hash = 0, fl = 0;
     int32_t n_ids = 0, nl = 0, saved_mp = 0;
@@ -65,17 +33,17 @@ int dsv4_kv_load(const char *path, const char *model_tag,
     int32_t *file_ids = NULL;
     int ok = 0;
 
-    if (read_all(f, magic, 8) || memcmp(magic, KV_MAGIC, 8) != 0 ||
-        read_all(f, &version, 4) || version != KV_VERSION ||
+    if (read_all(f, magic, 8) || memcmp(magic, DSV4_KV_MAGIC, 8) != 0 ||
+        read_all(f, &version, 4) || version != DSV4_KV_VERSION ||
         read_all(f, &reserved, 4) || read_all(f, &hash, 8) ||
         read_all(f, &fl, 8) || read_all(f, &n_ids, 4) ||
         read_all(f, &nl, 4) || read_all(f, &saved_mp, 4) ||
-        read_all(f, tag, KV_TAG)) {
+        read_all(f, tag, DSV4_KV_TAG)) {
         fprintf(stderr, "dsv4_kv: %s is not a version-2 cache\n", path);
         goto done;
     }
     (void)reserved;
-    tag[KV_TAG - 1] = 0;
+    tag[DSV4_KV_TAG - 1] = 0;
     if (nl != c->n_layers || hash != dsv4_cfg_hash(c) ||
         saved_mp <= 0 || n_ids <= 0 ||
         n_ids > max_pos || n_ids > ids_cap) {
@@ -110,14 +78,14 @@ int dsv4_kv_load(const char *path, const char *model_tag,
     for (int i = 0; i < n_ids; i++)
         if (file_ids[i] < 0 || file_ids[i] >= c->vocab) goto done;
 
-    const int64_t floats = payload_floats(c, ncomp, n_ids);
+    const int64_t floats = dsv4_kv_payload_floats(c, ncomp, n_ids);
     if (floats < 0 || (uint64_t)floats != fl) goto done;
 
     /* Validate every destination before touching any of them. */
     const size_t wn = (size_t)c->sliding_window * (size_t)c->head_dim;
     for (int L = 0; L < nl; L++) {
         if (!lst[L].kv_cache) goto done;
-        if (layer_ratio(c, L) &&
+        if (dsv4_kv_layer_ratio(c, L) &&
             (!lst[L].comp_kv || !lst[L].comp_score)) goto done;
     }
 
@@ -130,11 +98,11 @@ int dsv4_kv_load(const char *path, const char *model_tag,
     int64_t at = 0;
     for (int L = 0; L < nl; L++) {
         DSV4LayerState *st = &lst[L];
-        const int r = layer_ratio(c, L);
+        const int r = dsv4_kv_layer_ratio(c, L);
         memcpy(st->kv_cache, buf + at, wn * sizeof(float));
         at += (int64_t)wn;
         if (r) {
-            const size_t cn = layer_cn(c, L);
+            const size_t cn = dsv4_kv_layer_cn(c, L);
             const size_t rows = (size_t)ncomp[L] * c->head_dim;
             memcpy(st->kv_cache + wn, buf + at, rows * sizeof(float));
             at += (int64_t)rows;

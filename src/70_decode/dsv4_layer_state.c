@@ -15,12 +15,11 @@ int dsv4_state_init(DSV4LayerState *st, const DSV4Cfg *c, int layer, int max_pos
      * negative row count. Clamp so "no compressor" has one spelling. */
     int ratio = dsv4_compress_ratio(c, layer);
     if (ratio < 0) ratio = 0;
-    const int coff = (ratio == 4) ? 2 : 1;
-    const int hd   = c->head_dim;
+    const int hd = c->head_dim;
 
-    const size_t ncomp = ratio ? (size_t)(max_pos / ratio + 1) : 0;
+    const size_t ncomp = dsv4_comp_rows(c, layer, max_pos);
     const size_t kvn   = ((size_t)c->sliding_window + ncomp) * (size_t)hd;
-    const size_t cn    = ratio ? (size_t)coff * ratio * coff * hd : 0;
+    const size_t cn    = dsv4_comp_state_floats(c, layer);
 
     float *a = (float *)calloc(kvn + 2 * cn, sizeof(float));
     if (!a) return -1;
@@ -54,16 +53,6 @@ struct DSV4StateSnapshot {
 /* Size of the compressor's persistent working set for one layer. Mirrors
  * dsv4_state_init(): [coff*ratio][coff*head_dim], and a layer without a
  * compressor has none. */
-static size_t comp_state_floats(const DSV4Cfg *c, int layer)
-{
-    int ratio = dsv4_compress_ratio(c, layer);
-    if (ratio < 0) ratio = 0;
-    if (ratio == 0) return 0;
-    const int coff = (ratio == 4) ? 2 : 1;
-    return (size_t)coff * (size_t)coff * (size_t)ratio *
-           (size_t)c->head_dim;
-}
-
 DSV4StateSnapshot *dsv4_state_snapshot_new(const DSV4Cfg *c,
                                            DSV4LayerState *lst)
 {
@@ -78,7 +67,7 @@ DSV4StateSnapshot *dsv4_state_snapshot_new(const DSV4Cfg *c,
     s->floats = (size_t)c->n_layers * (size_t)c->sliding_window *
                 (size_t)c->head_dim;
     for (int L = 0; L < c->n_layers; L++)
-        s->floats += 2 * comp_state_floats(c, L);
+        s->floats += 2 * dsv4_comp_state_floats(c, L);
 
     s->buf = (float *)malloc(s->floats * sizeof(float));
     s->ncomp = (int *)malloc((size_t)c->n_layers * sizeof(int));
@@ -110,7 +99,7 @@ int dsv4_state_snapshot_save(DSV4StateSnapshot *s)
         memcpy(q, st->kv_cache, wn * sizeof(float));
         q += wn;
 
-        const size_t cn = comp_state_floats(c, L);
+        const size_t cn = dsv4_comp_state_floats(c, L);
         if (cn) {
             if (!st->comp_kv || !st->comp_score) return -1;
             memcpy(q, st->comp_kv, cn * sizeof(float));
@@ -135,7 +124,7 @@ void dsv4_state_snapshot_restore(DSV4StateSnapshot *s)
         memcpy(st->kv_cache, q, wn * sizeof(float));
         q += wn;
 
-        const size_t cn = comp_state_floats(c, L);
+        const size_t cn = dsv4_comp_state_floats(c, L);
         if (cn) {
             memcpy(st->comp_kv, q, cn * sizeof(float));
             q += cn;

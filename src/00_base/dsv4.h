@@ -155,23 +155,34 @@ static inline int dsv4_compress_ratio(const DSV4Cfg *c, int layer)
     if (layer < 0 || layer >= c->n_compress) return -1;
     return c->compress_ratios[layer];
 }
-/* Uncompressed sliding-window attention, no indexer. See invariant 1. */
-static inline int dsv4_is_dense_attn(const DSV4Cfg *c, int layer)
-{
-    return dsv4_compress_ratio(c, layer) == 0;
-}
 /* The indexer runs here and ONLY here. See invariant 2. */
 static inline int dsv4_has_indexer(const DSV4Cfg *c, int layer)
 {
     return dsv4_compress_ratio(c, layer) == 4;
 }
 
-/* Routing mode. See invariant 4 and model.py:556. A hash-routed layer carries
- * ffn.gate.tid2eid and NO ffn.gate.bias; a scored layer is the reverse. Both
- * carry ffn.gate.weight, because scores are computed either way. */
-static inline int dsv4_is_hash_routed(const DSV4Cfg *c, int layer)
+/* HCA geometry. A ratio-4 compressor is overlapped and therefore stores two
+ * interleaved copies of its channels; the row capacity is the number of
+ * compressed rows a layer can hold for a given context bound. */
+static inline int dsv4_comp_coff(int ratio)
 {
-    return layer >= 0 && layer < c->n_layers && layer < c->num_hash_layers;
+    return ratio == 4 ? 2 : 1;
+}
+
+static inline size_t dsv4_comp_rows(const DSV4Cfg *c, int layer, int max_pos)
+{
+    const int ratio = dsv4_compress_ratio(c, layer);
+    if (ratio <= 0) return 0;
+    return (size_t)max_pos / (size_t)ratio + 1;
+}
+
+static inline size_t dsv4_comp_state_floats(const DSV4Cfg *c, int layer)
+{
+    const int ratio = dsv4_compress_ratio(c, layer);
+    if (ratio <= 0) return 0;
+    const int coff = dsv4_comp_coff(ratio);
+    return (size_t)coff * (size_t)coff * (size_t)ratio *
+           (size_t)c->head_dim;
 }
 
 /* Fill `c` with the compiled-in Flash geometry. */

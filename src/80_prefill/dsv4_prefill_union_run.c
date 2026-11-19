@@ -93,43 +93,15 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, topk = c->topk;
 
-    /* Direct callers (and the rare layer too large for one batch) may not have
-     * prefetched yet; do the decide pass now. */
-    if (!p->pf_prepared || p->pf_layer != L) {
+    /* Direct callers may not have prefetched yet; do the decide pass now. */
+    if (!p->pf_active || p->pf_layer != L) {
         const int prc = dsv4_prefill_moe_prefetch(p, L, n);
         if (prc) return prc;
     }
+    if (!p->pf_active) return -1;
 
-    int rc = 0;
-    if (p->pf_active) {
-        rc = union_run_group(p, L, p->pf_ex, p->ex_order, p->pf_n);
-        p->pf_active = 0;
-    } else {
-        /* Fallback: more distinct experts than one cache batch can hold. */
-        const int nord = p->pf_n;
-        for (int base = 0; base < nord; base += DSV4_MAX_PREFETCH) {
-            if (dsv4_prefill_cancelled(p)) {
-                rc = dsv4_prefill_cancel_code(p);
-                break;
-            }
-            int ng = nord - base;
-            if (ng > DSV4_MAX_PREFETCH) ng = DSV4_MAX_PREFETCH;
-
-            const DSV4ExpertW *ex[DSV4_MAX_PREFETCH];
-            for (int j = 0; j < ng; j++) ex[j] = NULL;
-
-            const int brc = dsv4_cache_begin(p->cache, L,
-                                          p->ex_order + base, ng, ex);
-            if (brc != 0) {
-                dsv4_cache_end(p->cache, ex);
-                rc = -1;
-                break;
-            }
-            rc = union_run_group(p, L, ex, p->ex_order + base, ng);
-            if (rc) break;
-        }
-    }
-    p->pf_prepared = 0;
+    const int rc = union_run_group(p, L, p->pf_ex, p->ex_order, p->pf_n);
+    p->pf_active = 0;
     if (rc) return rc;
 
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);

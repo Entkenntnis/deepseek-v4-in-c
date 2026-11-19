@@ -24,6 +24,13 @@ void dsv4_route(int *idx, float *wts, float *scores, float *orig,
                 const float *bias, const int64_t *tid2eid, int token_id,
                 int n_experts, int topk, float route_scale);
 
+/* One routed expert: w2( swiglu(w1 x, w3 x) ). `gate`, `up` and `mid` are
+ * caller-owned rows of `inter` floats, so decode and both prefill schedules
+ * can share the body without sharing workspace. */
+void dsv4_expert_forward(float *out, const float *x, const DSV4ExpertW *e,
+                         float *gate, float *up, float *mid, int inter,
+                         float limit);
+
 /* RoPE */
 void dsv4_rope_table(float *cs, float *sn, int dim, int seqlen,
                      int orig_seq_len, double base, double factor,

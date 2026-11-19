@@ -19,9 +19,6 @@
  *     hc_dim = hc_mult * hidden             Flash: 4*4096  = 16384
  * so hc_attn_fn / hc_ffn_fn are [24, 16384] and the head's is [hc_mult, hc_dim].
  */
-static inline int dsv4_mix_hc(const DSV4Cfg *c) { return (2 + c->hc_mult) * c->hc_mult; }
-static inline int dsv4_hc_dim(const DSV4Cfg *c) { return c->hc_mult * c->hidden; }
-
 /* A matrix that carries its own block scales.
  *
  * THE TWO BLOCK GEOMETRIES ARE NOT INTERCHANGEABLE and this struct exists to
@@ -72,6 +69,33 @@ typedef struct {
     DSV4CompressorW comp;   /* valid when has_comp                            */
     DSV4IndexerW    idx;    /* valid when has_idx                             */
 } DSV4AttnW;
+
+/* The wo_a matrix is stored as o_groups stacked slices. Decode runs one GEMV
+ * per slice and prefill runs one GEMM per slice, so the offset arithmetic is
+ * shared here rather than repeated at both call sites. */
+static inline DSV4QMat dsv4_wo_a_group(const DSV4AttnW *a, int group,
+                                       int o_groups, int o_lora,
+                                       int heads_dim)
+{
+    const int gw = heads_dim / o_groups;
+    const int gr = o_lora;
+    DSV4QMat s = a->wo_a;
+    s.rows = gr;
+    s.cols = gw;
+
+    const size_t esz = (s.wdt == DSV4_WBF16) ? 2u : 1u;
+    const size_t row_bytes = (s.wdt == DSV4_WFP4) ? (size_t)gw / 2u
+                                                  : (size_t)gw * esz;
+    s.w = (const unsigned char *)a->wo_a.w + (size_t)group * (size_t)gr
+        * row_bytes;
+    if (s.s) {
+        const size_t sc_row = (size_t)((gw + s.blk_c - 1) / s.blk_c);
+        s.s = (const unsigned char *)a->wo_a.s
+            + (size_t)group * (size_t)(gr / (s.blk_r ? s.blk_r : 1))
+            * sc_row;
+    }
+    return s;
+}
 
 /* One routed expert, as it sits in the cache: still packed FP4, never widened.
  * Measured: 13,369,344 B on disk per expert for Flash. Widening to f32 would be

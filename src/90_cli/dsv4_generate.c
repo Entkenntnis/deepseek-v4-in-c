@@ -5,6 +5,44 @@
 #include "dsv4_serve_int.h"
 #include "dsv4_util.h"
 
+int dsv4_prefill_prepare(Engine *e, int n, int *batched)
+{
+    *batched = 0;
+    if (!e->pf || n <= 1) return 0;
+    if (dsv4_prefill_reserve(e->pf, n) != 0) {
+        fprintf(stderr, "serve: cannot allocate a %d-token prefill block; "
+                        "falling back to the per-token path\n", n);
+        dsv4_prefill_release(e->pf);
+        return 0;
+    }
+    *batched = 1;
+    return 0;
+}
+
+int dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
+                     int batched, int emit_layers, const char *phase,
+                     double t0)
+{
+    if (batched) {
+        const int rc = dsv4_prefill_range(e->pf, ids, n, pos0,
+                                          e->cs_d, e->sn_d, e->cs_c, e->sn_c,
+                                          e->h);
+        /* This turn is the only user of the block buffers. Drop them now
+         * instead of turning the longest prompt ever seen into a permanent
+         * high-water mark for the resident engine. */
+        dsv4_prefill_release(e->pf);
+        return rc;
+    }
+
+    for (int i = 0; i < n; i++) {
+        if (dsv4_cancel) return DSV4_PREFILL_CANCELLED;
+        if (dsv4_forward(e, ids[i], pos0 + i, 0, emit_layers, phase,
+                         dsv4_now_s() - t0, NULL) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                           int ngen, int eos, int emit_layers)
 {
@@ -58,14 +96,8 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
 
     /* The whole new turn is one prefill block. Reserve its buffers before any
      * state moves; a failure here can still take the per-token fallback. */
-    int use_batched = (e->pf && n_added > 1);
-    if (use_batched && dsv4_prefill_reserve(e->pf, n_added) != 0) {
-        fprintf(stderr, "serve: cannot allocate a %d-token prefill block; "
-                        "falling back to the per-token path for this turn\n",
-                n_added);
-        dsv4_prefill_release(e->pf);
-        use_batched = 0;
-    }
+    int use_batched = 0;
+    dsv4_prefill_prepare(e, n_added, &use_batched);
     dsv4_emit_start(e, start_pos, n_added, ngen,
                     use_batched ? n_added : 0);
 
@@ -80,32 +112,17 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     e->prefill_s = 0.0;
     e->prefill_tokens = 0;
     const double tp0 = dsv4_now_s();
-    if (use_batched) {
-        const int rc = dsv4_prefill_range(e->pf, e->ids + start_pos, n_added,
-                                          start_pos, e->cs_d, e->sn_d,
-                                          e->cs_c, e->sn_c, e->h);
-        /* This turn is the only user of the block buffers. Drop them now
-         * instead of turning the longest prompt ever seen into a permanent
-         * high-water mark for the resident engine. */
-        dsv4_prefill_release(e->pf);
-        if (rc == DSV4_PREFILL_CANCELLED || rc == DSV4_PREFILL_ABORTED) {
-            dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
-            return;
-        }
-        if (rc != 0) {
+    const int prc = dsv4_prefill_run(e, e->ids + start_pos, n_added, start_pos,
+                                     use_batched, emit_layers, "prompt", t0);
+    if (prc == DSV4_PREFILL_CANCELLED || prc == DSV4_PREFILL_ABORTED) {
+        dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+        return;
+    }
+    if (prc != 0) {
+        if (use_batched)
             dsv4_emit_error("block prefill failed at position %d; reset the "
                             "context before continuing", start_pos);
-            return;
-        }
-    } else {
-        for (int i = start_pos; i < e->n_ids; i++) {
-            if (dsv4_cancel) {
-                dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
-                return;
-            }
-            if (dsv4_forward(e, e->ids[i], i, 0, emit_layers, "prompt",
-                             dsv4_now_s() - t0, NULL) != 0) return;
-        }
+        return;
     }
     e->prefill_s = dsv4_now_s() - tp0;
     e->prefill_tokens = n_added;

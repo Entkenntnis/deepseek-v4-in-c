@@ -71,27 +71,27 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
             const int ratio = w->compress_ratio;
             const float *ckv = p->comp_kv_b + (size_t)t * 2 * hd;
             const float *csc = p->comp_sc_b + (size_t)t * 2 * hd;
-            if (dsv4_compress_step(p->scratch[t].kv,
+            if (dsv4_compress_step(p->attn_kv,
                                    ckv, csc,
                                    w->attn.comp.ape, st->comp_kv,
                                    st->comp_score, pos, ratio, hd)) {
-                dsv4_rmsnorm(p->scratch[t].kv, p->scratch[t].kv,
+                dsv4_rmsnorm(p->attn_kv, p->attn_kv,
                              w->attn.comp.norm, hd, c->rms_eps);
-                dsv4_rope_apply(p->scratch[t].kv, hd, rd, cs, sn,
+                dsv4_rope_apply(p->attn_kv, hd, rd, cs, sn,
                                 dsv4_compress_rope_pos(pos, ratio), rd / 2, 0);
                 memcpy(kvc + (size_t)(c->sliding_window + st->n_compressed) * hd,
-                       p->scratch[t].kv, (size_t)hd * sizeof(float));
+                       p->attn_kv, (size_t)hd * sizeof(float));
                 st->n_compressed++;
             }
         }
 
-        int n_idx = dsv4_window_idxs(p->scratch[t].idxs, pos,
+        int n_idx = dsv4_window_idxs(p->attn_idxs, pos,
                                      c->sliding_window);
         const int avail = st->n_compressed;
         if (avail > 0) {
-            if (avail > p->scratch[t].idx_cap) {
+            if (avail > p->attn_idx_cap) {
                 fprintf(stderr, "prefill: %d compressed rows but idx_scores "
-                                "holds %d\n", avail, p->scratch[t].idx_cap);
+                                "holds %d\n", avail, p->attn_idx_cap);
                 return -1;
             }
             int take = avail;
@@ -117,25 +117,25 @@ int dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
                     dsv4_rope_apply(iq + (size_t)h * c->index_head_dim,
                                     c->index_head_dim, rd, cs, sn, pos,
                                     rd / 2, 0);
-                dsv4_indexer_score(p->scratch[t].idx_scores,
+                dsv4_indexer_score(p->attn_idx_scores,
                                    iq,
                                    kvc + (size_t)c->sliding_window * hd,
                                    iw, c->index_n_heads,
                                    c->index_head_dim, avail);
                 take = avail < c->index_topk ? avail : c->index_topk;
-                dsv4_topk(p->scratch[t].idxs + n_idx,
-                          p->scratch[t].idx_scores, avail, take);
+                dsv4_topk(p->attn_idxs + n_idx,
+                          p->attn_idx_scores, avail, take);
             } else {
                 for (int i = 0; i < take; i++)
-                    p->scratch[t].idxs[n_idx + i] = i;
+                    p->attn_idxs[n_idx + i] = i;
             }
-            dsv4_indexer_offset(p->scratch[t].idxs + n_idx, take,
+            dsv4_indexer_offset(p->attn_idxs + n_idx, take,
                                 c->sliding_window);
             n_idx += take;
         }
 
         float *ot = p->o + (size_t)t * (size_t)H * hd;
-        dsv4_sparse_attn(ot, qt, kvc, w->attn.sink, p->scratch[t].idxs,
+        dsv4_sparse_attn(ot, qt, kvc, w->attn.sink, p->attn_idxs,
                          H, hd, n_idx, 1.0f / sqrtf((float)hd),
                          p->attn_scratch);
 

@@ -87,15 +87,7 @@ static int widen_vector(const uint8_t *src, int64_t nbytes, int dtype,
     const int64_t n = nbytes / esz;
     const size_t need = (size_t)n * sizeof(float);
     if (*woff + need > cap) return -1;
-
-    if (dtype == DSV4_DT_F32) {
-        memcpy(dst, src, (size_t)nbytes);
-    } else if (dtype == DSV4_DT_BF16) {
-        const uint16_t *p = (const uint16_t *)src;
-        for (int64_t i = 0; i < n; i++) dst[i] = dsv4_bf16_to_f32(p[i]);
-    } else {
-        return -1;
-    }
+    if (dsv4_widen_f32(dst, src, nbytes, dtype) != 0) return -1;
     *woff = (*woff + need + 7) & ~(size_t)7;
     return 0;
 }

@@ -46,8 +46,4 @@ void dsv4_threads_pin_current_reader(void);
 /* Fixed reader-pool width (6). The cache uses this directly. */
 int  dsv4_threads_readers(void);
 
-/* One-line human-readable description of what apply() did, for --help output,
- * logs and the TUI's ready event. Never NULL. */
-const char *dsv4_threads_desc(void);
-
 #endif /* DSV4_THREADS_H */

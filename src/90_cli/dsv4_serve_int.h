@@ -109,6 +109,15 @@ void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
                       double tp0, int32_t best);
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                           int ngen, int eos, int emit_layers);
+
+/* Reserve the block path if it is available. Always returns 0; *batched says
+ * whether the following dsv4_prefill_run() will use it. */
+int  dsv4_prefill_prepare(Engine *e, int n, int *batched);
+/* Run the new tokens through either the block path (when batched) or the
+ * per-token path. Returns 0, DSV4_PREFILL_CANCELLED/ABORTED, or -1. */
+int  dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
+                      int batched, int emit_layers, const char *phase,
+                      double t0);
 void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
                           const char *path);
 void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
