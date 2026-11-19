@@ -56,7 +56,7 @@ static const uint32_t dsv4_e4m3_bits[256] = {
  * Skymont's vpgatherdd is microcoded and made it slower than four scalar
  * loads. The engine now runs its compute team on the P-cores (Lion Cove),
  * where it wins the interleaved benchmark. Reproduce the per-core comparison
- * with `./bin/bench --pin p` versus `./bin/bench --pin e`, and the whole-model
+ * by pinning P-cores versus E-cores in the old microbenchmarks, and the whole-model
  * effect with `make e2e`.
  *
  * The table entries are exact f32 bit patterns generated from

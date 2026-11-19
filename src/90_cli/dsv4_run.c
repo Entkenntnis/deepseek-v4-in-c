@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_run.c - the output head and one token through every layer. */
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_serve_int.h"
+#include "dsv4_time.h"
 
 /* The head's own hc reduction. Small model math, kept here because this is the
  * only caller; if a second one appears, it moves into the decode layer. */
@@ -35,44 +35,18 @@ static void hc_head(float *y, const float *x, const DSV4HcW *w,
     }
 }
 
-/* Greedy sample, plus the five most likely alternatives and their
- * probabilities. The probability sum is over the full vocab so the numbers are
- * real, not a normalisation over the top five. */
-static int sample_top(Engine *e, TopK *top)
+/* Greedy sample: only the argmax is needed by any default view. */
+static int argmax(const float *lg, int n)
 {
-    const int V = e->c.vocab;
-    const float *lg = e->logits;
     int best = 0;
-    for (int v = 1; v < V; v++) if (lg[v] > lg[best]) best = v;
-
-    const double mx = (double)lg[best];
-    double sum = 0.0;
-    for (int v = 0; v < V; v++) sum += exp((double)lg[v] - mx);
-    if (!(sum > 0.0)) sum = 1.0;
-
-    top->n = 0;
-    for (int k = 0; k < 5; k++) top->logit[k] = -INFINITY;
-    for (int v = 0; v < V; v++) {
-        if ((double)lg[v] <= (double)top->logit[4]) continue;
-        top->logit[4] = lg[v];
-        top->id[4] = v;
-        for (int k = 4; k > 0 && top->logit[k] > top->logit[k - 1]; k--) {
-            float tf = top->logit[k]; top->logit[k] = top->logit[k - 1];
-            top->logit[k - 1] = tf;
-            int ti = top->id[k]; top->id[k] = top->id[k - 1];
-            top->id[k - 1] = ti;
-        }
-        if (top->n < 5) top->n++;
-    }
-    for (int k = 0; k < top->n; k++)
-        top->prob[k] = exp((double)top->logit[k] - mx) / sum;
+    for (int v = 1; v < n; v++) if (lg[v] > lg[best]) best = v;
     return best;
 }
 
 /* Run the output head on whatever residual stream is in e->h. Shared by the
  * per-token path and the batched prefill: the inputs are identical, and two
  * copies would be one more place for them to drift. */
-void dsv4_head_from_h(Engine *e, TopK *top)
+void dsv4_head_from_h(Engine *e, int32_t *best)
 {
     const int hc = e->c.hc_mult, d = e->c.hidden;
     const double th = dsv4_now_s();
@@ -80,12 +54,13 @@ void dsv4_head_from_h(Engine *e, TopK *top)
     dsv4_rmsnorm(e->xh, e->xh, e->mb.w.norm, d, e->c.rms_eps);
     DSV4QMat head = { e->mb.w.head, NULL, DSV4_WBF16, e->c.vocab, d, 0, 0 };
     dsv4_mmq(e->logits, e->xh, &head);
-    dsv4_prof.head += dsv4_now_s() - th;
-    sample_top(e, top);
+    e->head_s += dsv4_now_s() - th;
+    if (best) *best = argmax(e->logits, e->c.vocab);
 }
 
 int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
-                 int emit_layers, const char *phase, double t_turn, TopK *top)
+                 int emit_layers, const char *phase, double t_turn,
+                 int32_t *best)
 {
     const int hc = e->c.hc_mult, d = e->c.hidden;
 
@@ -98,25 +73,18 @@ int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
 
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerW lw;
-        const double tb = dsv4_now_s();
-        const double io0 = e->tr.load_seconds;
         if (dsv4_trunk_bind(&e->tr, &e->c, L, &lw) != 0) {
             dsv4_emit_error("trunk bind failed on layer %d at position %d",
                             L, pos);
             return -1;
         }
-        /* read_run() reports its own wall time; the rest is actual binding. */
-        const double io = e->tr.load_seconds - io0;
-        const double call = dsv4_now_s() - tb;
-        dsv4_prof.trunk_io += io;
-        dsv4_prof.bind += call > io ? call - io : 0.0;
         const int comp = dsv4_compress_ratio(&e->c, L) != 0;
         dsv4_layer_forward(e->h, &lw, &e->c, &e->scratch, &e->src,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,
                            comp ? e->sn_c : e->sn_d, pos, tid);
-        if (emit_layers) dsv4_emit_layer(e, pos, phase, L, t_turn);
+        if (emit_layers) dsv4_emit_layer(e, phase, L);
     }
 
-    if (want_logits) dsv4_head_from_h(e, top);
+    if (want_logits) dsv4_head_from_h(e, best);
     return 0;
 }

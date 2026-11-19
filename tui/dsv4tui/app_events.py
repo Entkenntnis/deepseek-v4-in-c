@@ -190,7 +190,6 @@ class EventMixin:
             self.last_done = ev
             self.context_used = int(ev.get("context_used") or self.context_used)
             if self.current_msg is not None:
-                # The engine's done.tps covers the whole turn, prefill included.
                 # The transcript wants decode only, so use the same inter-token
                 # samples as the sidebar. A turn with no tokens has no decode.
                 self.current_msg.meta = {

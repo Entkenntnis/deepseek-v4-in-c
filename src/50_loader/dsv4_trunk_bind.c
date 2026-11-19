@@ -6,7 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "dsv4_prof.h"
 #include "dsv4_bind.h"
 #include "dsv4_trunk.h"
 #include "dsv4_trunk_int.h"
@@ -23,7 +22,6 @@ int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
         want = (want + DSV4_TRUNK_ALIGN - 1) / DSV4_TRUNK_ALIGN
              * DSV4_TRUNK_ALIGN;
 
-    const double t0 = dsv4_now_s();
     int64_t got = 0;
     while (got < want) {
         const ssize_t r = pread(tr->fd, dst + got, (size_t)(want - got),
@@ -39,8 +37,6 @@ int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
         }
         got += r;
     }
-    tr->load_seconds += dsv4_now_s() - t0;
-    tr->bytes_read += (uint64_t)got;
     return 0;
 }
 
@@ -89,14 +85,10 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w)
                                + 2 * DSV4_TRUNK_ALIGN) != 0)
                 return -1;
             if (dsv4_trunk_read_run(tr, L, tr->pin[L]) != 0) return -1;
-            tr->misses++;
-        } else {
-            tr->hits++;
         }
         run = tr->pin[L];
     } else if (tr->slot_of[L] >= 0) {
         run = tr->ring + (size_t)tr->slot_of[L] * (size_t)tr->slot_bytes;
-        tr->hits++;
     } else {
         /* Round-robin, not LRU: a cyclic scan defeats LRU entirely, and
          * round-robin over the unpinned tail makes the hit rate exactly
@@ -113,12 +105,11 @@ int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w)
         if (dsv4_trunk_read_run(tr, L, run) != 0) return -1;
         tr->layer_of[slot] = L;
         tr->slot_of[L] = slot;
-        tr->misses++;
     }
 
     DSV4TrunkLayer *lay = &tr->lay[L];
     /* A pinned run is immutable, so its binding is too. Re-planning and
-     * re-widening it every token dominated the bind/widen profile row. */
+     * re-widening it every token costs more than it saves. */
     if (L < tr->npin && lay->bind_ready) {
         *w = lay->bind_cached;
         return 0;

@@ -3,7 +3,6 @@
 #include <string.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_kernels.h"
 #include "dsv4_layer.h"
 #include "dsv4_layer_int.h"
@@ -18,18 +17,13 @@ void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
     const size_t wide = (size_t)hc * d;
 
     /* ---- attention half ---- */
-    double t0 = dsv4_now_s();
     memcpy(s->resid, h, wide * sizeof(float));
     dsv4_hc_pre(s->x1, s->post, s->comb, s->mixes, h, &w->hc_attn,
                 hc, d, c->hc_sinkhorn_iters, c->rms_eps, c->hc_eps);
     dsv4_rmsnorm(s->x1, s->x1, w->attn_norm, d, c->rms_eps);
-    double t1 = dsv4_now_s();
-    dsv4_prof.hc += t1 - t0;
 
     const int n_idx = dsv4_window_idxs(s->idxs, pos, c->sliding_window);
     dsv4_layer_attention(s->qr, s->x1, w, c, s, st, cs, sn, pos, n_idx);
-    t0 = dsv4_now_s();
-    dsv4_prof.attn += t0 - t1;
 
     dsv4_hc_post(h, s->qr, s->resid, s->post, s->comb, hc, d);
 
@@ -38,11 +32,8 @@ void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
     dsv4_hc_pre(s->x1, s->post, s->comb, s->mixes, h, &w->hc_ffn,
                 hc, d, c->hc_sinkhorn_iters, c->rms_eps, c->hc_eps);
     dsv4_rmsnorm(s->x1, s->x1, w->ffn_norm, d, c->rms_eps);
-    dsv4_prof.hc += dsv4_now_s() - t0;
 
     dsv4_layer_moe(s->qr, s->x1, w, c, s, src, w->layer, token_id);
 
-    t0 = dsv4_now_s();
     dsv4_hc_post(h, s->qr, s->resid, s->post, s->comb, hc, d);
-    dsv4_prof.hc += dsv4_now_s() - t0;
 }

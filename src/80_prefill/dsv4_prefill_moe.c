@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_prefill.h"
@@ -19,24 +18,15 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const int topk = c->topk;
 
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
-    const double tg = dsv4_now_s();
-    if (dsv4_prefill_pm_stats(p, p->gate, p->x1, &w->moe.gate, n,
-                              &p->st.gate_mm, &p->st.f_gate, L, "gate"))
-        return -1;
-    {
-        const double tr = dsv4_now_s();
-        for (int t = 0; t < n; t++) {
-            dsv4_route(p->topk_idx + (size_t)t * topk,
-                       p->topk_w + (size_t)t * topk,
-                       p->gate + (size_t)t * c->n_experts,
-                       p->gate_orig + (size_t)t * c->n_experts,
-                       w->moe.bias, w->moe.tid2eid, ids[t],
-                       c->n_experts, topk, c->routed_scale);
-        }
-        p->st.route += dsv4_now_s() - tr;
-        dsv4_pf_trace_stage(L, "route", tr);
+    if (dsv4_prefill_pm(p, p->gate, p->x1, &w->moe.gate, n)) return -1;
+    for (int t = 0; t < n; t++) {
+        dsv4_route(p->topk_idx + (size_t)t * topk,
+                   p->topk_w + (size_t)t * topk,
+                   p->gate + (size_t)t * c->n_experts,
+                   p->gate_orig + (size_t)t * c->n_experts,
+                   w->moe.bias, w->moe.tid2eid, ids[t],
+                   c->n_experts, topk, c->routed_scale);
     }
-    p->t_gate += dsv4_now_s() - tg;
 
     /* Routing is known now. Start the whole layer's expert reads before the
      * shared expert so the reader pool fills slots while the GPU runs w1/w3,
@@ -47,36 +37,25 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
         if (prc) return prc;
     }
 
-    const double tsh = dsv4_now_s();
     {
         DSV4PMJob two[2] = {
             { &w->moe.shared.w1, p->x1, p->sh_gate, n },
             { &w->moe.shared.w3, p->x1, p->sh_up, n },
         };
-        if (dsv4_prefill_pm_multi_stats(p, two, 2,
-                                        &p->st.shared_mm,
-                                        &p->st.f_shared, L, "shared_13")) {
+        if (dsv4_prefill_pm_multi(p, two, 2)) {
             dsv4_prefill_moe_abort(p);
             return -1;
         }
     }
-    {
-        const double ts = dsv4_now_s();
-        for (int t = 0; t < n; t++)
-            dsv4_swiglu(p->sh_mid + (size_t)t * inter,
-                        p->sh_gate + (size_t)t * inter,
-                        p->sh_up + (size_t)t * inter, inter,
-                        c->swiglu_limit);
-        p->st.shared_swiglu += dsv4_now_s() - ts;
-        dsv4_pf_trace_stage(L, "shared_swiglu", ts);
-    }
-    if (dsv4_prefill_pm_stats(p, p->sh_out, p->sh_mid, &w->moe.shared.w2, n,
-                              &p->st.shared_mm, &p->st.f_shared, L,
-                              "shared_2")) {
+    for (int t = 0; t < n; t++)
+        dsv4_swiglu(p->sh_mid + (size_t)t * inter,
+                    p->sh_gate + (size_t)t * inter,
+                    p->sh_up + (size_t)t * inter, inter,
+                    c->swiglu_limit);
+    if (dsv4_prefill_pm(p, p->sh_out, p->sh_mid, &w->moe.shared.w2, n)) {
         dsv4_prefill_moe_abort(p);
         return -1;
     }
-    p->t_shared += dsv4_now_s() - tsh;
 
     if (dsv4_prefill_cancelled(p)) {
         dsv4_prefill_moe_abort(p);
@@ -88,16 +67,11 @@ int dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
     const int urc = dsv4_prefill_moe_union(p, L, n);
     if (urc) return urc;
 
-    {
-        const double ts = dsv4_now_s();
-        for (int t = 0; t < n; t++)
-            dsv4_hc_post(p->H + (size_t)t * (size_t)hc * d,
-                         p->out + (size_t)t * d,
-                         p->resid + (size_t)t * (size_t)hc * d,
-                         p->post + (size_t)t * hc,
-                         p->comb + (size_t)t * hc * hc, hc, d);
-        p->st.hc_post_moe += dsv4_now_s() - ts;
-        dsv4_pf_trace_stage(L, "hc_post_f", ts);
-    }
+    for (int t = 0; t < n; t++)
+        dsv4_hc_post(p->H + (size_t)t * (size_t)hc * d,
+                     p->out + (size_t)t * d,
+                     p->resid + (size_t)t * (size_t)hc * d,
+                     p->post + (size_t)t * hc,
+                     p->comb + (size_t)t * hc * hc, hc, d);
     return 0;
 }

@@ -35,25 +35,6 @@ static void run_sort_experts(void *ctx, int layer, int *experts, int n)
     dsv4_cache_sort_experts((const DSV4Cache *)ctx, layer, experts, n);
 }
 
-static int run_expert_stats(void *ctx, DSV4ExpertStats *out)
-{
-    const DSV4Cache *c = (const DSV4Cache *)ctx;
-    out->hits = c->hits;
-    out->misses = c->misses;
-    out->bytes_read = c->bytes_read;
-    out->read_n = c->read_n;
-    out->read_s = c->read_s;
-    out->read_max_s = c->read_max_s;
-    for (int i = 0; i < 8; i++) {
-        out->lat_n[i] = c->lat_n[i];
-        out->lat_s[i] = c->lat_s[i];
-    }
-    out->slots = c->nslot;
-    out->readers = c->nrth;
-    out->evictions = c->evictions;
-    return 0;
-}
-
 /* 0 = old end() barrier; >0 = miss reads in flight per layer. */
 static int g_stream_miss = 6;
 
@@ -73,7 +54,7 @@ int dsv4_make_expert_src(DSV4ExpertSrc *src, DSV4Cache *cache)
     *src = (DSV4ExpertSrc){
         .begin = run_begin_experts, .end = run_end_experts,
         .wait_any = run_wait_any, .try_any = run_try_any,
-        .stats = run_expert_stats, .sort = run_sort_experts, .ctx = cache,
+        .sort = run_sort_experts, .ctx = cache,
     };
     return 0;
 }

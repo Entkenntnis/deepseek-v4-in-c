@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from .backend import EventSink
-from .defaults import DEFAULT_CTX, DEFAULT_GEN
+from .defaults import DEFAULT_CTX
 from .demo_gen import DemoGenerateMixin
 
 
@@ -31,9 +31,6 @@ class DemoBackend(DemoGenerateMixin):
         self.rng = random.Random(4)
         self.cache_hits = 0
         self.cache_miss = 0
-        self.cache_evict = 0
-        self.trunk_hit = 0
-        self.trunk_miss = 0
         self.read_gb = 0.0
         self.t0 = time.monotonic()
 
@@ -53,13 +50,9 @@ class DemoBackend(DemoGenerateMixin):
         self.commands.put({"cmd": "quit"})
 
     def _sys(self, rss_mb: float) -> dict:
-        now = time.monotonic()
         return {
             "rss_mb": rss_mb,
-            "peak_mb": rss_mb + 512.0,
             "io_read_gb": self.read_gb,
-            "cpu_s": (now - self.t0) * 0.82,
-            "wall_s": now - self.t0,
         }
 
     def _cache(self) -> dict:
@@ -68,7 +61,6 @@ class DemoBackend(DemoGenerateMixin):
             "slots": 292,
             "hit": self.cache_hits,
             "miss": self.cache_miss,
-            "evict": self.cache_evict,
             "hit_rate": (self.cache_hits / n) if n else 0.0,
             "read_gb": self.read_gb * 0.78,
             "resident_gb": 3.55,
@@ -76,40 +68,18 @@ class DemoBackend(DemoGenerateMixin):
         }
 
     def _trunk(self) -> dict:
-        n = self.trunk_hit + self.trunk_miss
         return {
             "layers": 43,
             "pinned": 43,
-            "slots": 1,
-            "slot_mb": 165.48,
-            "hit": self.trunk_hit,
-            "miss": self.trunk_miss,
-            "hit_rate": (self.trunk_hit / n) if n else 0.0,
-            "read_gb": 6.27,
-            "load_s": 0.0,
             "resident_gb": 6.43,
         }
 
-    def _prof(self, elapsed: float) -> dict:
-        # Proportions roughly matching the decode profile: disk is the biggest
-        # single component, then attention, then expert matmul.
-        p = {
-            "hc": elapsed * 0.04,
-            "attn": elapsed * 0.21,
-            "gate": elapsed * 0.01,
-            "expert_io": elapsed * 0.38,
-            "expert_mm": elapsed * 0.20,
-            "shared": elapsed * 0.05,
-        }
-        p["accounted"] = sum(p.values())
-        return p
-
     def _base(self, elapsed: float = 0.0, rss: float = 2060.0) -> dict:
+        del elapsed
         return {
             "sys": self._sys(rss),
             "cache": self._cache(),
             "trunk": self._trunk(),
-            "prof": self._prof(elapsed),
         }
 
     def _event(self, name: str, elapsed: float = 0.0, **fields: Any) -> None:
@@ -122,16 +92,10 @@ class DemoBackend(DemoGenerateMixin):
         time.sleep(0.35)
         self.sink.event({
             "event": "ready",
-            "model": "demo-model/deepseek-v4-flash",
             "config": {
-                "hidden": 4096, "layers": 43, "vocab": 129280,
-                "heads": 64, "head_dim": 512, "experts": 256, "topk": 6,
-                "moe_inter": 2048, "sliding_window": 128, "index_topk": 512,
-                "hc_mult": 4, "max_pos": 1048576,
-                "compress_ratios": [0, 0, 4, 128] * 10 + [0, 0, 0],
+                "hidden": 4096, "layers": 43, "experts": 256, "topk": 6,
             },
             "context": {"used": 0, "cap": DEFAULT_CTX},
-            "gen_default": DEFAULT_GEN,
             **self._base(),
         })
 

@@ -29,19 +29,6 @@ typedef struct {
     void  *arena;
 } DSV4Scratch;
 
-/* Optional accounting for the expert source, used by prefill instrumentation.
- * read_s is the sum of reader wall time (not wall time of the prefill), so a
- * six-reader pool can show six times the useful read overlap. */
-typedef struct {
-    uint64_t hits, misses, bytes_read;
-    uint64_t read_n;
-    double   read_s, read_max_s;
-    uint64_t lat_n[8];
-    double   lat_s[8];
-    int      slots, readers;
-    uint64_t evictions;
-} DSV4ExpertStats;
-
 /* A source of routed experts.
  *
  * Routed experts are streamed, not resident (13.4 MB each, 137 GB for Flash).
@@ -62,7 +49,6 @@ typedef struct {
     int (*end)(void *ctx, const DSV4ExpertW **out);
     int (*wait_any)(void *ctx, int *k);
     int (*try_any)(void *ctx, int *k);   /* same, non-blocking, optional */
-    int (*stats)(void *ctx, DSV4ExpertStats *out);
     /* Optional: reorder a layer's distinct experts into checkpoint order. */
     void (*sort)(void *ctx, int layer, int *experts, int n);
     void *ctx;

@@ -47,7 +47,7 @@ int dsv4_cache_resolve(DSV4Cache *c, int layer, int expert,
 /* Read six already-resolved tensors into a slot, coalescing adjacent ones. The
  * six arrive as two contiguous runs and the slot is laid out to match, so each
  * run is one pread straight into place: coalescing into two runs is much faster
- * than six separate reads. The cache stats from `make e2e --detailed` show the
+ * than six separate reads. The cache stats from `make e2e` show the
  * effect. A short read leaves the slot
  * unusable, so the caller must clear the key. */
 int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],

@@ -1,10 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_prof.c - see dsv4_prof.h. */
+/* dsv4_time.c - see dsv4_time.h. */
 #include <time.h>
 
-#include "dsv4_prof.h"
-
-DSV4Prof dsv4_prof;
+#include "dsv4_time.h"
 
 double dsv4_now_s(void)
 {

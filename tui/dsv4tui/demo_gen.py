@@ -55,8 +55,7 @@ class DemoGenerateMixin:
                 "Hello. This is the demo backend, so no NVMe was harmed. The "
                 "numbers in the right-hand panel are synthetic but have the same "
                 "shape as the real engine's events: per-layer progress, expert "
-                "cache accounting, trunk reads, RSS, disk bytes and a profile "
-                "split into I/O and matmul.\n"
+                "cache accounting, trunk reads, RSS and disk bytes.\n"
             )
         return (
             f'You said: "{prompt.strip()}"\n\n'
@@ -76,7 +75,7 @@ class DemoGenerateMixin:
 
         self.sink.event({
             "event": "start", "pos": 0, "prompt_tokens": prompt_tokens,
-            "gen_max": ngen, "mode": "chat", "prefill_tokens": 0,
+            "gen_max": ngen, "prefill_tokens": 0,
             "context_cap": DEFAULT_CTX, **self._base(),
         })
 
@@ -88,7 +87,7 @@ class DemoGenerateMixin:
         produced = 0
         context = prompt_tokens
 
-        def forward(pos: int, phase: str, t_start: float) -> None:
+        def forward(phase: str) -> None:
             """Simulate one forward pass, including its per-layer events."""
             time.sleep(0.012)
             for L in range(43):
@@ -98,21 +97,14 @@ class DemoGenerateMixin:
                     self.cache_hits += 1
                 else:
                     self.cache_miss += 1
-                    if self.rng.random() < 0.8:
-                        self.cache_evict += 1
-                self.trunk_hit += 1
                 self.read_gb += 0.00018
-                # The engine stamps every layer of a forward with the time the
-                # forward *started*, so the TUI can difference prompt positions
-                # into a prefill timeline.
-                self._event("layer", t_start, pos=pos, phase=phase,
-                            layer=L, layers=43, t=t_start)
+                self._event("layer", phase=phase, layer=L)
 
         # Prefill: one forward per prompt token, then the first token event.
-        for p in range(prompt_tokens):
+        for _ in range(prompt_tokens):
             if self.stop.is_set():
                 return
-            forward(p, "prompt", time.monotonic() - t0)
+            forward("prompt")
         ttft = time.monotonic() - t0
 
         for i, chunk in enumerate(chunks[:ngen]):
@@ -120,26 +112,19 @@ class DemoGenerateMixin:
                 return
             # Small per-layer sleeps keep the synthetic stream watchable.
             if i > 0:
-                forward(context - 1, "gen", time.monotonic() - t0)
+                forward("gen")
             if self.cancel_requested:
                 stop = "cancel"
                 break
 
             elapsed = time.monotonic() - t0
             self.read_gb += 0.00055
-            p = max(0.02, 0.97 - i * 0.004)
-            top = [
-                [101 + i, p, 31.0 - i * 0.05],
-                [102 + i, (1 - p) * 0.5, 29.0],
-                [103 + i, (1 - p) * 0.3, 28.0],
-                [104 + i, (1 - p) * 0.2, 27.0],
-            ]
             self.sink.event({
                 "event": "token", "id": 1000 + i,
                 "hex": chunk.encode("utf-8").hex(), "index": i,
-                "pos": context, "t": elapsed, "ttft": ttft,
+                "t": elapsed, "ttft": ttft,
                 "prefill_s": ttft, "prefill_tokens": prompt_tokens,
-                "top": top, **self._base(elapsed),
+                **self._base(elapsed),
             })
             context += 1
             produced += 1
@@ -148,8 +133,7 @@ class DemoGenerateMixin:
         self.sink.event({
             "event": "done", "prompt_tokens": prompt_tokens,
             "generated": produced, "seconds": elapsed,
-            "tps": produced / elapsed if elapsed else 0.0,
             "s_per_token": elapsed / produced if produced else 0.0,
             "ttft": ttft, "stop": stop, "context_used": context,
-            **self._base(elapsed),
+            "head_s": 0.0, **self._base(elapsed),
         })

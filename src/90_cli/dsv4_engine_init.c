@@ -29,9 +29,6 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     e->gen_default = gen_default;
     e->think_default = think_default;
     e->emit_layers_default = layers_default;
-    e->t_start = dsv4_now_s();
-    memset(&dsv4_prof, 0, sizeof dsv4_prof);
-    e->prof_base = dsv4_prof;
 
     if (ctx < 512) ctx = 512;
     e->maxpos = ctx;

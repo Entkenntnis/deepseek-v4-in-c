@@ -59,14 +59,11 @@ typedef struct {
     void           *rargs;           /* per-reader {cache, bounce index} */
     int             rshutdown;
 
-    /* stats */
-    uint64_t hits, misses, evictions;
+    /* Counters that feed the default TUI/e2e/prefill hit-rate and read-GB
+     * readouts. Everything else about a read is deliberately not tracked. */
+    uint64_t hits, misses;
     uint64_t bytes_read;
-    uint64_t read_n;        /* loads completed by the reader pool / sync path */
-    double   read_s;        /* sum of per-load wall time                     */
-    double   read_max_s;    /* slowest single load                           */
-    uint64_t lat_n[8];      /* read-latency bins: <.005,.01,.02,.04,.08,.16,.32,>= */
-    double   lat_s[8];
+    uint64_t pf_bytes;      /* prefetch bytes are part of displayed read GB */
 
     /* Publish each miss as its read lands and queue at most this many reads at
      * once. 0 keeps the historical end() barrier. This changes WHEN a finished
@@ -76,10 +73,6 @@ typedef struct {
     /* HASH-LAYER PREFETCH: uses the same slots and reader pool. */
     int             pf_enabled;
     struct DSV4CacheBatch *pf_batch;
-    uint64_t pf_requests, pf_hits, pf_loads, pf_fail, pf_bytes;
-    /* Always 0 now: a pending prefetch slot is streamed by wait_any(), never
-     * waited for inside begin(). Kept because the stats report prints it. */
-    double   pf_wait_s;
 } DSV4Cache;
 
 /* What one slot costs: payload plus alignment slack. This, not expert_bytes, is

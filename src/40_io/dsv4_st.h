@@ -121,8 +121,7 @@ int64_t dsv4_st_read(const DSV4St *s, const DSV4Tensor *t, void *buf);
  *   nbytes + 2*DSV4_ST_ALIGN and be page aligned (posix_memalign).
  *
  *   Worth it because a streamed expert is read once and evicted: the page cache can only
- *   copy it twice and push out something useful. The cache/I/O stats printed by
- *   `make e2e --detailed` show the effect on real reads.
+ *   copy it twice and push out something useful. `make e2e` exercises the effect on real reads.
  *
  * Returns payload bytes available, and sets *payload_off. Falls back to a buffered read
  * at offset 0 (setting *payload_off = 0) when O_DIRECT is not available. */

@@ -14,7 +14,7 @@
  * these loops also ran on the E-cores, where the P/E cost ratio left the fast
  * cores waiting at the barrier. That reason is gone: dynamic chunk 4 now only
  * adds a dispatch fetch per four rows. A/B runs are neutral inside the noise
- * (see `make bench`); static is kept because it is simpler, not because it is
+ * (see the old microbenchmarks); static is kept because it is simpler, not because it is
  * faster.
  *
  * This cannot change a result: a row's dot product depends only on its own

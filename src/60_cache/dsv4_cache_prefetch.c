@@ -55,15 +55,11 @@ static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
         if (resident >= 0) {
             if (c->slot[resident].pending) continue; /* already in flight */
             c->slot[resident].stamp = ++c->clock;
-            c->pf_hits++;
             continue;
         }
 
         const DSV4Tensor *t[6];
-        if (dsv4_cache_resolve(c, layer, expert, t) != 0) {
-            c->pf_fail++;
-            continue;
-        }
+        if (dsv4_cache_resolve(c, layer, expert, t) != 0) continue;
         const int slot = dsv4_cache_claim_slot(c, layer, expert, NULL, 0);
         if (slot < 0) break;              /* cannot happen with pf_has_room */
         DSV4CacheBatch *b = c->pf_batch;
@@ -79,12 +75,11 @@ static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
             c->slot[slot].layer = -1;
             c->slot[slot].pending = 0;
             b->ntodo--;
-            c->pf_fail++;
             break;
         }
         queued++;
     }
-    c->pf_requests += (uint64_t)queued;
+
     if (queued > 0) pthread_cond_broadcast(&c->rwork);
     pthread_mutex_unlock(&c->rmx);
     return 0;

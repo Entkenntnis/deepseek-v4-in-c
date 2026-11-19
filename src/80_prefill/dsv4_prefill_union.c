@@ -21,17 +21,8 @@
 #include <string.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
-
-static DSV4PrefillLayerInstr *union_instr(DSV4Prefill *p, int L)
-{
-    return (p->instr && L >= 0 && L < p->c->n_layers)
-         ? &p->linstr[L] : NULL;
-}
-
-
 
 /* Build the distinct-expert set in first-use order, then hand it to the
  * source's optional checkpoint-order sort. ex_tok/ex_k are indexed by expert
@@ -88,7 +79,6 @@ typedef struct {
     int *remaining;
     int *q, *qh, *qt;
     int io_done;
-    DSV4PrefillLayerInstr *li;
 } DSV4PFillCtx;
 
 static int union_bucket_count(const DSV4PFillCtx *f, int j)
@@ -177,11 +167,9 @@ static int union_fill_cpu(void *ctx)
     const int j = f->q[best];
     f->q[best] = -1;
     const int e = f->order[j];
-    const double tb0 = dsv4_now_s();
     dsv4_prefill_expert_bucket_fill(p, f->ex[j], e, p->ex_count[e],
                                     p->ex_tok + p->ex_off[e],
                                     p->ex_k + p->ex_off[e]);
-    if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
     f->done[j] = 1;
     (*f->remaining)--;
     return 1;
@@ -195,13 +183,11 @@ static int union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
         const int j = f->q[pick];
         f->q[pick] = -1;
         const int e = f->order[j];
-        const double tb0 = dsv4_now_s();
         dsv4_prefill_expert_bucket(p, f->ex[j], e, p->ex_count[e],
                                    p->ex_tok + p->ex_off[e],
                                    p->ex_k + p->ex_off[e],
                                    DSV4_EXPERT_ROUTE_GPU,
                                    union_fill_cpu, f);
-        if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
         f->done[j] = 1;
         (*f->remaining)--;
         return 1;
@@ -212,12 +198,10 @@ static int union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
         const int j = f->q[pick];
         f->q[pick] = -1;
         const int e = f->order[j];
-        const double tb0 = dsv4_now_s();
         dsv4_prefill_expert_bucket(p, f->ex[j], e, p->ex_count[e],
                                    p->ex_tok + p->ex_off[e],
                                    p->ex_k + p->ex_off[e],
                                    DSV4_EXPERT_ROUTE_CPU, NULL, NULL);
-        if (p->instr && f->li) f->li->compute_s += dsv4_now_s() - tb0;
         f->done[j] = 1;
         (*f->remaining)--;
         return 1;
@@ -236,7 +220,7 @@ static int union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
  * The batch's slot claims are released by end(); on a cancel we still drain it
  * before returning so the reset that follows cannot race a reader. */
 static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
-                           const int *order, int ng, DSV4PrefillLayerInstr *li)
+                           const int *order, int ng)
 {
     int done[DSV4_MAX_PREFETCH];
     int q[DSV4_MAX_PREFETCH];
@@ -247,7 +231,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
     DSV4PFillCtx fill = {
         .p = p, .ex = ex, .order = order, .ng = ng, .done = done,
         .remaining = &remaining, .q = q, .qh = &qh, .qt = &qt,
-        .io_done = 0, .li = li,
+        .io_done = 0,
     };
 
     /* Prime the ready queue with everything the readers have already
@@ -274,15 +258,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         /* 2. Nothing ready: take the next published bucket from the source. */
         if (!p->src->wait_any) break;
         int k = -1;
-        double t0 = dsv4_now_s();
         const int got = p->src->wait_any(p->src->ctx, &k);
-        const double td = dsv4_now_s() - t0;
-        p->t_io += td;
-        p->st.expert_io += td;
-        if (p->instr) {
-            p->st.io_wait_s += td;
-            if (li) li->wait_s += td;
-        }
         if (!got) break;
         if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
         if (p->src->try_any) {
@@ -292,19 +268,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         }
     }
 
-    double t0 = dsv4_now_s();
     p->src->end(p->src->ctx, ex);
-    double td = dsv4_now_s() - t0;
-    if (dsv4_trace_active())
-        dsv4_trace_ev(&(DSV4TraceEv){
-            .kind = DSV4_TR_BARRIER, .layer = L, .k = -1,
-            .ms = td * 1000.0, .at = t0 });
-    p->t_io += td;
-    p->st.expert_io += td;
-    if (p->instr) {
-        p->st.io_end_s += td;
-        if (li) li->end_s += td;
-    }
 
     if (cancelled) return dsv4_prefill_cancel_code(p);
 
@@ -313,7 +277,6 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
      * bypass the split. End the I/O phase first so the fill callback stops
      * polling try_any(). */
     fill.io_done = 1;
-    const double tt0 = dsv4_now_s();
     qh = qt = 0;
     for (int j = 0; j < ng; j++) {
         if (done[j]) continue;
@@ -338,45 +301,22 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
                                    DSV4_EXPERT_ROUTE_CPU, NULL, NULL);
         done[j] = 1;
     }
-    if (p->instr && li) li->compute_s += dsv4_now_s() - tt0;
     return 0;
 }
 
 int dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n)
 {
-    const DSV4Cfg *c = p->c;
-    const int topk = c->topk;
-
     if (p->pf_active) {
         if (p->pf_layer == L) return 0;      /* already started for this layer */
         dsv4_prefill_moe_abort(p);
     }
 
-    DSV4PrefillLayerInstr *li = union_instr(p, L);
-    p->cur_layer = L;
-    p->pf_t0 = dsv4_now_s();
-    p->pf_compute_t0 = p->pf_t0;
     p->pf_layer = L;
     p->pf_active = 0;
     p->pf_prepared = 0;
-    p->pf_estats = 0;
-    p->pf_bytes0 = 0;
-    if (li) {
-        memset(li, 0, sizeof *li);
-        li->requests = n * topk;
-    }
 
     const int nord = union_prepare(p, L, n);
     p->pf_n = nord;
-    if (li) li->experts = nord;
-
-    if (p->instr && p->src->stats) {
-        DSV4ExpertStats es0;
-        if (p->src->stats(p->src->ctx, &es0) == 0) {
-            p->pf_estats = 1;
-            p->pf_bytes0 = es0.bytes_read;
-        }
-    }
 
     /* The cache batch is fixed-size. One Flash layer has at most 256 distinct
      * experts, so this normally fires for the whole layer; a larger model falls
@@ -386,16 +326,7 @@ int dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n)
 
     for (int j = 0; j < nord; j++) p->pf_ex[j] = NULL;
 
-    const double t0 = dsv4_now_s();
     const int rc = p->src->begin(p->src->ctx, L, p->ex_order, nord, p->pf_ex);
-    const double td = dsv4_now_s() - t0;
-    p->t_io += td;
-    p->st.expert_io += td;
-    if (p->instr) {
-        p->st.io_begin_s += td;
-        p->st.io_groups++;
-        if (li) li->begin_s += td;
-    }
     if (rc != 0) {
         p->src->end(p->src->ctx, p->pf_ex);
         p->pf_prepared = 0;
@@ -417,7 +348,6 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
 {
     const DSV4Cfg *c = p->c;
     const int d = c->hidden, topk = c->topk;
-    DSV4PrefillLayerInstr *li = union_instr(p, L);
 
     /* Direct callers (and the rare layer too large for one batch) may not have
      * prefetched yet; do the decide pass now. */
@@ -426,12 +356,9 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
         if (prc) return prc;
     }
 
-    p->pf_compute_t0 = dsv4_now_s();
-    if (li) li->lead_s = p->pf_compute_t0 - p->pf_t0;
-
     int rc = 0;
     if (p->pf_active) {
-        rc = union_run_group(p, L, p->pf_ex, p->ex_order, p->pf_n, li);
+        rc = union_run_group(p, L, p->pf_ex, p->ex_order, p->pf_n);
         p->pf_active = 0;
     } else {
         /* Fallback: more distinct experts than one cache batch can hold. */
@@ -447,23 +374,14 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
             const DSV4ExpertW *ex[DSV4_MAX_PREFETCH];
             for (int j = 0; j < ng; j++) ex[j] = NULL;
 
-            const double t0 = dsv4_now_s();
             const int brc = p->src->begin(p->src->ctx, L,
                                           p->ex_order + base, ng, ex);
-            const double td = dsv4_now_s() - t0;
-            p->t_io += td;
-            p->st.expert_io += td;
-            if (p->instr) {
-                p->st.io_begin_s += td;
-                p->st.io_groups++;
-                if (li) li->begin_s += td;
-            }
             if (brc != 0) {
                 p->src->end(p->src->ctx, ex);
                 rc = -1;
                 break;
             }
-            rc = union_run_group(p, L, ex, p->ex_order + base, ng, li);
+            rc = union_run_group(p, L, ex, p->ex_order + base, ng);
             if (rc) break;
         }
     }
@@ -472,7 +390,6 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
 
     if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
 
-    const double tsum = dsv4_now_s();
     for (int t = 0; t < n; t++) {
         if (dsv4_prefill_cancelled(p)) return dsv4_prefill_cancel_code(p);
         float *o = p->out + (size_t)t * d;
@@ -485,21 +402,6 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
             for (int i = 0; i < d; i++) o[i] += wk * acc[i];
         }
         for (int i = 0; i < d; i++) o[i] += p->sh_out[(size_t)t * d + i];
-    }
-    p->st.expert_sum += dsv4_now_s() - tsum;
-    dsv4_pf_trace_stage(L, "expert_sum", tsum);
-    p->t_moe += dsv4_now_s() - tsum;
-    p->t_moe_wall += dsv4_now_s() - p->pf_compute_t0;
-
-    if (p->instr) {
-        if (li) {
-            li->union_s = dsv4_now_s() - p->pf_t0;
-            if (p->pf_estats) {
-                DSV4ExpertStats es1;
-                if (p->src->stats(p->src->ctx, &es1) == 0)
-                    li->bytes = es1.bytes_read - p->pf_bytes0;
-            }
-        }
     }
     return 0;
 }

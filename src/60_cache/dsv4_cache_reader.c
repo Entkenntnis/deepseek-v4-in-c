@@ -5,9 +5,7 @@
 
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
-#include "dsv4_prof.h"
 #include "dsv4_threads.h"
-#include "dsv4_trace.h"
 
 /* Caller holds rmx. */
 int dsv4_cache_rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j)
@@ -17,24 +15,7 @@ int dsv4_cache_rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j)
     c->rq[c->rq_tail].j = j;
     c->rq_tail = (c->rq_tail + 1) % c->rq_cap;
     c->rq_n++;
-    if (dsv4_trace_active())
-        dsv4_trace_ev(&(DSV4TraceEv){
-            .kind = DSV4_TR_QUEUED, .layer = b->layer_of[j], .k = b->k_of[j],
-            .expert = b->expert_of[j], .slot = b->slot_of[j],
-            .tag = b->is_prefetch ? "pf" : "" });
     return 0;
-}
-
-static int read_lat_bin(double s)
-{
-    if (s < 0.005) return 0;
-    if (s < 0.010) return 1;
-    if (s < 0.020) return 2;
-    if (s < 0.040) return 3;
-    if (s < 0.080) return 4;
-    if (s < 0.160) return 5;
-    if (s < 0.320) return 6;
-    return 7;
 }
 
 static void *reader_main(void *arg)
@@ -61,26 +42,12 @@ static void *reader_main(void *arg)
         DSV4CacheBatch *b = job.b;
         const int j = job.j;
         uint64_t got = 0;
-        if (dsv4_trace_active())
-            dsv4_trace_ev(&(DSV4TraceEv){
-                .kind = DSV4_TR_READ_START, .layer = b->layer_of[j],
-                .k = b->k_of[j], .expert = b->expert_of[j],
-                .slot = b->slot_of[j], .reader = ra->bi });
-        const double t_load = dsv4_now_s();
         const int bad = dsv4_cache_load(c, &c->slot[b->slot_of[j]], b->t_of[j],
                                         c->bounce[ra->bi], &got) != 0;
-        const double load_ms = (dsv4_now_s() - t_load) * 1000.0;
 
         pthread_mutex_lock(&c->rmx);
         b->failed[j] = bad;
         b->got[j]    = got;
-        c->read_n++;
-        const double load_s = load_ms * 1e-3;
-        c->read_s += load_s;
-        if (load_s > c->read_max_s) c->read_max_s = load_s;
-        const int lb = read_lat_bin(load_s);
-        c->lat_n[lb]++;
-        c->lat_s[lb] += load_s;
         if (b->is_prefetch) {
             /* Publish immediately: a layer's begin() may be waiting on this
              * exact slot, and there is no end() call for a prefetch batch. */
@@ -89,21 +56,11 @@ static void *reader_main(void *arg)
             s->origin = 1;
             if (bad) {
                 s->layer = s->expert = -1;
-                c->pf_fail++;
             } else {
                 s->layer  = b->layer_of[j];
                 s->expert = b->expert_of[j];
-                c->pf_loads++;
-                c->pf_hits++;
                 c->pf_bytes += got;
             }
-            if (dsv4_trace_active())
-                dsv4_trace_ev(&(DSV4TraceEv){
-                    .kind = DSV4_TR_PUBLISHED, .layer = b->layer_of[j],
-                    .k = b->k_of[j], .expert = b->expert_of[j],
-                    .slot = b->slot_of[j], .reader = ra->bi,
-                    .bytes = (long long)got, .ms = load_ms,
-                    .tag = bad ? "fail" : "prefetch" });
         } else if (b->streaming) {
             /* Publish this miss immediately, so the caller can run its matmul
              * while the rest of the batch is still on the wire. All eviction
@@ -123,13 +80,6 @@ static void *reader_main(void *arg)
                 b->out[b->k_of[j]] = &s->w;
             }
             b->published[j] = 1;
-            if (dsv4_trace_active())
-                dsv4_trace_ev(&(DSV4TraceEv){
-                    .kind = DSV4_TR_PUBLISHED, .layer = b->layer_of[j],
-                    .k = b->k_of[j], .expert = b->expert_of[j],
-                    .slot = b->slot_of[j], .reader = ra->bi,
-                    .bytes = (long long)got, .ms = load_ms,
-                    .tag = bad ? "fail" : "read" });
 
             /* Keep the read pipeline full: queue the next job as this one
              * retires. With cap >= ntodo this queues everything at once. */

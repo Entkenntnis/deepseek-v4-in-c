@@ -23,7 +23,7 @@
  *
  * The gain is deliberately small: FP4 was never dequant-bound. This form is
  * kept because it is not slower and it removes the table from the hot loop;
- * the larger win came from the batch kernels. Compare with `make bench`.
+ * the larger win came from the batch kernels. Compare with `make e2e`.
  *
  * THE TWO MASKS THAT WERE NOT NEEDED. The shift result used to be masked with
  * 0x0F and then masked again with 7 for the magnitude permute. Neither mask

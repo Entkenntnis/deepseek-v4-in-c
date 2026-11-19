@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_prefill.h"
@@ -26,7 +25,6 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
     if (c->o_groups > 16) return -1;
     DSV4QMat slices[16];
     DSV4PMJob jobs[16];
-    double ts = dsv4_now_s();
     for (int g = 0; g < c->o_groups; g++) {
         for (int t = 0; t < n; t++)
             memcpy(p->xg + ((size_t)g * p->cap + t) * gw,
@@ -49,32 +47,19 @@ int dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n)
         jobs[g].y = p->yg + (size_t)g * p->cap * gr;
         jobs[g].n = n;
     }
-    p->st.oproj_pack += dsv4_now_s() - ts;
-    dsv4_pf_trace_stage(p->cur_layer, "oproj_pack", ts);
-    if (dsv4_prefill_pm_multi_stats(p, jobs, c->o_groups,
-                                    &p->st.oproj, &p->st.f_oproj,
-                                    p->cur_layer, "oproj_a")) return -1;
-    ts = dsv4_now_s();
+    if (dsv4_prefill_pm_multi(p, jobs, c->o_groups)) return -1;
     for (int g = 0; g < c->o_groups; g++)
         for (int t = 0; t < n; t++)
             memcpy(p->ogrp + (size_t)t * (size_t)c->o_groups * c->o_lora +
                        (size_t)g * gr,
                    p->yg + (size_t)g * p->cap * gr + (size_t)t * gr,
                    (size_t)gr * sizeof(float));
-    p->st.oproj_unpack += dsv4_now_s() - ts;
-    dsv4_pf_trace_stage(p->cur_layer, "oproj_unpack", ts);
-    if (dsv4_prefill_pm_stats(p, p->out, p->ogrp, &w->attn.wo_b, n,
-                              &p->st.oproj, &p->st.f_oproj, p->cur_layer,
-                              "oproj_b")) return -1;
-    ts = dsv4_now_s();
+    if (dsv4_prefill_pm(p, p->out, p->ogrp, &w->attn.wo_b, n)) return -1;
     for (int t = 0; t < n; t++)
         dsv4_hc_post(p->H + (size_t)t * (size_t)hc * d,
                      p->out + (size_t)t * d,
                      p->resid + (size_t)t * (size_t)hc * d,
                      p->post + (size_t)t * hc,
                      p->comb + (size_t)t * hc * hc, hc, d);
-    p->st.hc_post += dsv4_now_s() - ts;
-    dsv4_pf_trace_stage(p->cur_layer, "hc_post_a", ts);
-
     return 0;
 }

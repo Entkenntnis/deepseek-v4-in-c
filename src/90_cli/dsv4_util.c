@@ -5,39 +5,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <time.h>
 
 #include "dsv4_serve_int.h"
 
 volatile sig_atomic_t dsv4_cancel;
 
-double dsv4_proc_cpu_s(void)
+double dsv4_proc_rss_mb(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
-    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
-}
-
-void dsv4_proc_mem_mb(double *rss_mb, double *peak_mb)
-{
-    *rss_mb = 0.0;
-    *peak_mb = 0.0;
+    double rss_mb = 0.0;
     FILE *f = fopen("/proc/self/status", "r");
     if (f) {
         char line[256];
         while (fgets(line, sizeof line, f)) {
             double kb;
-            if (sscanf(line, "VmRSS: %lf kB", &kb) == 1) *rss_mb = kb / 1024.0;
-            else if (sscanf(line, "VmHWM: %lf kB", &kb) == 1) *peak_mb = kb / 1024.0;
+            if (sscanf(line, "VmRSS: %lf kB", &kb) == 1) {
+                rss_mb = kb / 1024.0;
+                break;
+            }
         }
         fclose(f);
     }
-    if (*peak_mb <= 0.0) {
-        struct rusage ru;
-        if (getrusage(RUSAGE_SELF, &ru) == 0)
-            *peak_mb = (double)ru.ru_maxrss / 1024.0;   /* Linux: KiB */
-    }
+    return rss_mb;
 }
 
 double dsv4_proc_read_gb(void)
@@ -106,13 +94,6 @@ void dsv4_usage(const char *me)
             "[--budget GB|auto] [--ctx N] [--gen N] [--think] [--no-layers]\n"
             "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
             "       [--reader-pin off|all|p|e] [--stream-miss N (default 6)]\n"
-            "\n"
-            "  Trace routed-expert scheduling and, for prefill, the named\n"
-            "  stages of one prompt block:\n"
-            "       [--trace FILE] [--trace-phase decode|prefill|both]\n"
-            "       [--trace-from INDEX (default 0)]\n"
-            "       [--trace-tokens N (default 4, 0 = all)]\n"
-            "       [--trace-layers A-B]\n"
             "\n"
             "Speaks a line protocol on stdin/stdout: one command or event per\n"
             "line, whitespace-separated key=value fields, strings as hex:... .\n"

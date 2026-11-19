@@ -57,8 +57,6 @@ struct DSV4PrefillVk {
     void          *gmap, *umap, *mmap;
     size_t         expert_mid_bytes;
 
-    DSV4PrefillVkStats st[DSV4_VK_KIND_COUNT];
-
     DSV4VkRegion *regions;
     int           nreg, regcap;
 

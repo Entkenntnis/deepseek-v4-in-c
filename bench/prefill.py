@@ -30,10 +30,7 @@ backend change can move the golden. Use --update-golden only intentionally.
 
 Examples:
     make prefill
-    python3 bench/prefill.py --detailed
-    python3 bench/prefill.py --runs 5 --json
-    python3 bench/prefill.py --instrument --instrument-file /tmp/prefill.txt
-    python3 bench/prefill.py --trace /tmp/prefill.trace --trace-view
+    python3 bench/prefill.py --runs 5
     python3 bench/prefill.py --update-golden
     python3 bench/prefill.py --no-golden
 """
@@ -97,35 +94,7 @@ def parse_args():
     p.add_argument("--update-golden", action="store_true")
     p.add_argument("--no-golden", action="store_true",
                    help="measure without comparing the first token id")
-    p.add_argument("--json", action="store_true", dest="as_json",
-                   help="print a JSON summary instead of the table")
-    p.add_argument("--detailed", action="store_true",
-                   help="show serve stderr and per-run counters")
-    p.add_argument("--instrument", action="store_true",
-                   help="enable deep prefill instrumentation in serve "
-                        "(summary + per-layer lines)")
-    p.add_argument("--instrument-file", default=None, metavar="FILE",
-                   help="write instrumentation lines to FILE instead of stderr")
-    p.add_argument("--trace", default=None, metavar="FILE",
-                   help="write a per-layer prefill activity trace to FILE")
-    p.add_argument("--trace-run", type=int, default=2,
-                   help="1-based run to trace (default 2, the first measured)")
-    p.add_argument("--trace-layers", default=None, metavar="A-B",
-                   help="only record these layers")
-    p.add_argument("--trace-view", action="store_true",
-                   help="run tools/prefill_trace_view.py --summary after the "
-                        "turn")
     return p.parse_args()
-
-
-def build_env(a):
-    env = os.environ.copy()
-    if a.instrument or a.instrument_file:
-        env["DSV4_PREFILL_INSTRUMENT"] = "2"
-    if a.instrument_file:
-        env["DSV4_PREFILL_INSTRUMENT_FILE"] = str(
-            Path(os.path.expanduser(a.instrument_file)))
-    return env
 
 
 def build_command(a):
@@ -141,14 +110,6 @@ def build_command(a):
         "--reader-pin", a.reader_pin,
         "--stream-miss", str(a.stream_miss),
     ]
-    if a.trace:
-        # One prefill call per run; select the requested 1-based run.
-        cmd += ["--trace", str(a.trace),
-                "--trace-phase", "prefill",
-                "--trace-from", str(a.trace_run - 1),
-                "--trace-tokens", "1"]
-        if a.trace_layers:
-            cmd += ["--trace-layers", a.trace_layers]
     return cmd
 
 
@@ -292,9 +253,7 @@ def metrics(tok, start, tokens, done):
     prefill_tokens = int(start.get("prefill_tokens") or 0)
     prefill_s = float(tokens[0].get("prefill_s", 0.0))
     ttft_s = float(tokens[0].get("ttft", tokens[0].get("t", 0.0)))
-    prof = done.get("prof", {}) or {}
-    head_s = float(prof.get("head", 0.0))
-    setup_s = max(ttft_s - prefill_s - head_s, 0.0)
+    head_s = float(done.get("head_s", 0.0))
     prefill_tps = prompt_tokens / prefill_s if prefill_s > 0 else 0.0
     prefill_ms_tok = 1000.0 * prefill_s / prompt_tokens if prompt_tokens else 0.0
 
@@ -305,10 +264,6 @@ def metrics(tok, start, tokens, done):
     read_gb = float(c1.get("read_gb", 0.0)) - float(c0.get("read_gb", 0.0))
     hit_rate = hits / (hits + misses) if hits + misses else 0.0
 
-    t0 = start.get("trunk", {}) or {}
-    t1 = done.get("trunk", {}) or {}
-    trunk_read_gb = float(t1.get("read_gb", 0.0)) - float(t0.get("read_gb", 0.0))
-
     return {
         "prompt_tokens": prompt_tokens,
         "prefill_tokens": prefill_tokens,
@@ -317,17 +272,13 @@ def metrics(tok, start, tokens, done):
         "prefill_tps": prefill_tps,
         "ttft_s": ttft_s,
         "head_s": head_s,
-        "setup_s": setup_s,
         "cache_hit_rate": hit_rate,
         "cache_read_gb": read_gb,
-        "trunk_read_gb": trunk_read_gb,
         "generated": int(done.get("generated", 0)),
         "stop": done.get("stop", "?"),
         "token_ids": [int(t["id"]) for t in tokens],
         "token_id": int(tokens[0]["id"]),
         "text": decode_text(tok, tokens),
-        "sys": done.get("sys", {}) or {},
-        "prof": prof,
     }
 
 
@@ -353,24 +304,10 @@ def main():
         print("prefill: --no-golden and --update-golden are mutually exclusive",
               file=sys.stderr)
         return 2
-    if a.trace and not 1 <= a.trace_run <= a.runs:
-        print("prefill: --trace-run must be within 1..--runs", file=sys.stderr)
-        return 2
     if not Path(a.binary).is_file():
         print(f"prefill: {a.binary} not found; run `make serve` first",
               file=sys.stderr)
         return 2
-
-    if a.instrument_file:
-        a.instrument_file = str(Path(os.path.expanduser(a.instrument_file)))
-        Path(a.instrument_file).parent.mkdir(parents=True, exist_ok=True)
-        try:
-            Path(a.instrument_file).unlink()
-        except FileNotFoundError:
-            pass
-    elif a.instrument:
-        print("prefill: instrumentation goes to serve stderr; use "
-              "--instrument-file or --detailed to keep it", file=sys.stderr)
 
     try:
         preamble = load_preamble(a.preamble_file)
@@ -384,27 +321,13 @@ def main():
         return 2
     preamble_sha = sha256_text(preamble)
 
-    progress = Progress(enabled=not a.detailed and not a.as_json)
-    errfile = None
-    if not a.detailed or a.as_json:
-        errfile = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-
-    if a.detailed and not a.as_json:
-        print(f"prefill: model   {a.model}", file=sys.stderr)
-        print(f"prefill: trunk   {a.trunk}", file=sys.stderr)
-        print(f"prefill: binary  {a.binary}", file=sys.stderr)
-        print(f"prefill: budget={a.budget:g} GB ctx={a.ctx} runs={a.runs} "
-              f"(run 1 warm-up)", file=sys.stderr)
-        print(f"prefill: preamble {len(preamble)} chars, "
-              f"user prompt {len(a.prompt)} chars", file=sys.stderr)
-        if a.instrument_file:
-            print(f"prefill: instrument {a.instrument_file}", file=sys.stderr)
+    progress = Progress(enabled=True)
+    errfile = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
 
     progress.update("loading model", force=True)
     proc = subprocess.Popen(build_command(a), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=errfile,
-                            text=True, encoding="utf-8", bufsize=1,
-                            env=build_env(a))
+                            text=True, encoding="utf-8", bufsize=1)
     try:
         ready = wait_for(proc, "ready")
         if ready is None:
@@ -534,67 +457,14 @@ def main():
         "prefill_tps": statistics.median(r["prefill_tps"] for r in measured),
         "ttft_s": statistics.median(r["ttft_s"] for r in measured),
         "head_s": statistics.median(r["head_s"] for r in measured),
-        "setup_s": statistics.median(r["setup_s"] for r in measured),
         "cache_hit_rate": statistics.median(r["cache_hit_rate"] for r in measured),
         "cache_read_gb": statistics.median(r["cache_read_gb"] for r in measured),
-        "trunk_read_gb": statistics.median(r["trunk_read_gb"] for r in measured),
         "token_id": measured[0]["token_id"],
     }
     rows.append(("median", median))
 
-    if a.as_json:
-        print(json.dumps({
-            "args": {
-                "budget_gb": a.budget, "ctx": a.ctx, "runs": a.runs,
-                "prompt": a.prompt, "target_tokens": TARGET_TOKENS,
-                "preamble_sha256": preamble_sha,
-            },
-            "runs": [{k: v for k, v in r.items() if k != "text"}
-                     for r in results],
-            "median": median,
-            "golden": str(golden_path),
-            "sha256": digest,
-            "status": status,
-        }, ensure_ascii=False, indent=2))
-    else:
-        print_table(rows)
-        if a.detailed:
-            print("\ndetails:")
-            for idx, m in enumerate(results):
-                label = "warmup" if idx == 0 else f"run {idx}"
-                print(f"  {label}: prefill {m['prompt_tokens']} tok in "
-                      f"{m['prefill_s']:.3f} s ({m['prefill_tps']:.2f} tok/s, "
-                      f"{m['prefill_ms_tok']:.2f} ms/tok), "
-                      f"ttft {m['ttft_s']:.3f} s, head {m['head_s']:.3f} s, "
-                      f"setup {m['setup_s']:.3f} s, "
-                      f"token {m['token_id']} ({m['stop']})")
-                p = m.get("prof", {})
-                if p:
-                    keys = ("hc", "attn", "idxer", "gate", "expert_io",
-                            "expert_mm", "shared", "head", "bind", "trunk_io")
-                    print("    prof: " + " ".join(
-                        f"{k}={p.get(k, 0.0):.3f}s" for k in keys))
-                print(f"    cache: {100.0 * m['cache_hit_rate']:.1f}% hit, "
-                      f"{m['cache_read_gb']:.2f} GB read; "
-                      f"trunk {m['trunk_read_gb']:.2f} GB")
-                s = m.get("sys", {})
-                if s:
-                    print(f"    rss={s.get('rss_mb', 0.0) / 1024.0:.2f} GB "
-                          f"peak={s.get('peak_mb', 0.0) / 1024.0:.2f} GB "
-                          f"read={s.get('io_read_gb', 0.0):.2f} GB "
-                          f"cpu={s.get('cpu_s', 0.0):.1f}s")
-            print(f"\ngolden: {golden_path}")
-            print(f"sha256: {digest}")
-            print(status)
-        else:
-            print(f"golden: {status}", file=sys.stderr)
-
-    if a.trace:
-        print(f"trace: {a.trace} (run {a.trace_run})", file=sys.stderr)
-        if a.trace_view:
-            view = REPO / "tools" / "prefill_trace_view.py"
-            subprocess.run([sys.executable, str(view), str(a.trace),
-                            "--summary"], check=False)
+    print_table(rows)
+    print(f"golden: {status}", file=sys.stderr)
 
     if len(measured) >= 2:
         for key in ("prefill_tps", "ttft_s"):

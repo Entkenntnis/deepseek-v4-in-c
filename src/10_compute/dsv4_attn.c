@@ -53,8 +53,8 @@
  * numerical contract is the L2 gate in `make test`.
  *
  * It was worth doing because this was the largest single-threaded loop left:
- * one core did the whole score pass while the other P-cores idled. Profile it
- * with `./bin/bench --filter sparse_attn` and `make e2e --detailed`.
+ * one core did the whole score pass while the other P-cores idled. Exercise it
+ * with `make e2e`.
  *
  * `scratch` becomes per-head rather than shared, since heads now run at once. */
 void dsv4_sparse_attn(float *o, const float *q, const float *kv,

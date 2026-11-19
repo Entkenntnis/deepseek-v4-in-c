@@ -16,30 +16,6 @@
 
 typedef struct DSV4PrefillVk DSV4PrefillVk;
 
-/* Which caller owns a GEMM. Kept separate so the instrumentation can tell
- * dense projections from routed-expert buckets. */
-enum {
-    DSV4_VK_KIND_DENSE = 0,
-    DSV4_VK_KIND_EXPERT = 1,
-    DSV4_VK_KIND_COUNT = 2
-};
-
-/* Per-kind counters accumulated inside the Vulkan backend. All times are
- * wall-clock on the submitting thread. submit_s is now only vkQueueSubmit;
- * wait_s is the fence wait. fill_s is CPU work the caller ran between those
- * two while the GPU was busy, so it is not GPU execution time. */
-typedef struct {
-    uint64_t calls, tiles, xbytes, ybytes;
-    double desc_s;       /* vkUpdateDescriptorSets                        */
-    double copy_in_s;    /* host memcpy into the mapped X buffer          */
-    double record_s;     /* reset/begin/bind/push/dispatch/end            */
-    double submit_s;     /* vkQueueSubmit                                 */
-    double wait_s;       /* vkWaitForFences                               */
-    double fill_s;       /* caller's CPU fill while the fence was pending */
-    double copy_out_s;   /* host memcpy out of the mapped Y buffer        */
-    double total_s;      /* whole dsv4_prefill_vk_gemm() call             */
-} DSV4PrefillVkStats;
-
 /* Called after a tile is submitted and before the fence is waited on. It must
  * not touch Vulkan state or the caller's in-flight X/Y buffers. Returns 1 when
  * it did work and 0 when no CPU bucket is ready. The backend calls it in a
@@ -52,25 +28,18 @@ int  dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
                           DSV4Trunk *tr, DSV4Cache *cache);
 void dsv4_prefill_vk_free(DSV4PrefillVk *v);
 
-/* Copy the accumulated per-kind counters. `out` must hold
- * DSV4_VK_KIND_COUNT entries. */
-void dsv4_prefill_vk_stats(const DSV4PrefillVk *v,
-                           DSV4PrefillVkStats out[DSV4_VK_KIND_COUNT]);
-
 /* Y[n][m->rows] = X[n][m->cols] * W[m->rows][m->cols]^T. Returns 0 when the
  * whole GEMM ran on the GPU, -1 for any unsupported geometry/allocation, in
- * which case the caller must use dsv4_mmq_n(). `kind` only selects the stats
- * bucket. */
+ * which case the caller must use dsv4_mmq_n(). */
 int  dsv4_prefill_vk_gemm(DSV4PrefillVk *v, float *y, const float *x,
-                          const DSV4QMat *m, int n, int kind);
+                          const DSV4QMat *m, int n);
 
 /* Same GEMM, but calls fill(fill_ctx) once after each tile submit and before
  * waiting for that tile. fill may be NULL (then this is exactly the synchronous
- * path). *fill_s, when non-NULL, receives the CPU time spent in fill. */
+ * path). */
 int  dsv4_prefill_vk_gemm_overlap(DSV4PrefillVk *v, float *y, const float *x,
-                                  const DSV4QMat *m, int n, int kind,
-                                  DSV4PrefillVkFillFn fill, void *fill_ctx,
-                                  double *fill_s);
+                                  const DSV4QMat *m, int n,
+                                  DSV4PrefillVkFillFn fill, void *fill_ctx);
 
 /* One routed expert: w1/w3, SwiGLU and w2 in one command buffer. `inter` is
  * the routed-expert intermediate width; `limit` is the SwiGLU clamp. */
@@ -78,7 +47,6 @@ int  dsv4_prefill_vk_expert_fused(DSV4PrefillVk *v, float *y, const float *x,
                                   const DSV4QMat *w1, const DSV4QMat *w3,
                                   const DSV4QMat *w2, int n, int inter,
                                   float limit,
-                                  DSV4PrefillVkFillFn fill, void *fill_ctx,
-                                  double *fill_s);
+                                  DSV4PrefillVkFillFn fill, void *fill_ctx);
 
 #endif /* DSV4_PREFILL_VK_H */

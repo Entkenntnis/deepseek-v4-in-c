@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_layer.h"
@@ -73,7 +72,6 @@ void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
         int take = avail;
         if (avail > 0) {
             if (w->has_idx) {
-                const double ti = dsv4_now_s();
                 dsv4_mmq(s->idx_q, s->qr, &w->attn.idx.wq_b);
                 for (int h = 0; h < c->index_n_heads; h++)
                     dsv4_rope_apply(s->idx_q + (size_t)h * c->index_head_dim,
@@ -85,7 +83,6 @@ void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
                                    c->index_head_dim, avail);
                 take = avail < c->index_topk ? avail : c->index_topk;
                 dsv4_topk(s->idxs + n_idx, s->idx_scores, avail, take);
-                dsv4_prof.idxer += dsv4_now_s() - ti;
             } else {
                 for (int i = 0; i < take; i++) s->idxs[n_idx + i] = i;
             }

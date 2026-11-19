@@ -7,15 +7,15 @@ String fields carry raw bytes as ``key=hex:<hex>`` so neither side needs to
 quote, escape, or parse Unicode.
 
 ``parse_event`` also reconstructs the small nested dictionaries the TUI uses
-(``sys``, ``cache``, ``trunk``, ``prof``, ``config``, ``context``) from their
-flattened wire prefixes, so event handlers keep their existing shape.
+(``sys``, ``cache``, ``trunk``, ``config``, ``context``) from their flattened
+wire prefixes, so event handlers keep their existing shape.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-_NESTED = ("config", "sys", "cache", "trunk", "prof")
+_NESTED = ("config", "sys", "cache", "trunk")
 
 
 def hex_field(value: str | bytes) -> str:
@@ -66,21 +66,6 @@ def _number(value: str) -> Any:
         return value
 
 
-def _top(value: str) -> list[list[float]]:
-    out: list[list[float]] = []
-    if not value:
-        return out
-    for item in value.split(","):
-        parts = item.split(":")
-        if len(parts) != 3:
-            continue
-        try:
-            out.append([int(parts[0]), float(parts[1]), float(parts[2])])
-        except ValueError:
-            continue
-    return out
-
-
 def parse_event(line: str) -> dict[str, Any] | None:
     """Parse one server event line into the dict shape the TUI consumes."""
     parts = line.strip().split()
@@ -94,10 +79,6 @@ def parse_event(line: str) -> dict[str, Any] | None:
             continue
         if value.startswith("hex:"):
             ev[key] = bytes.fromhex(value[4:]).decode("utf-8", "replace")
-        elif key == "top":
-            ev[key] = _top(value)
-        elif key == "config_compress_ratios":
-            ev[key] = [int(x) for x in value.split(",") if x]
         else:
             ev[key] = _number(value)
 

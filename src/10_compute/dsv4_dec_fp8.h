@@ -31,7 +31,7 @@
  * subnormals, so almost every block takes the fallback and this path is slower
  * there. That is a property of the benchmark input, not of the model: random
  * bytes are a far worse approximation to E4M3 weights. Compare with
- * `make bench`. */
+ * `make e2e`. */
 static inline __m256 fp8_8_normal(const uint8_t *wb, int i)
 {
     const __m128i b8 = _mm_loadl_epi64((const __m128i *)(wb + i));

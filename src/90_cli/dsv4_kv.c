@@ -13,6 +13,7 @@
 
 #include "dsv4_serve_int.h"
 #include "dsv4_state_file.h"
+#include "dsv4_time.h"
 
 static void model_tag(const char *dir, char *out, size_t cap)
 {
@@ -75,9 +76,8 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
         /* No block prefill: the per-token path produces the same KV state. */
         ok = 1;
         for (int i = 0; i < n; i++) {
-            TopK dummy;
             if (dsv4_forward(e, e->ids[i], i, 0, 0, "prefix",
-                             dsv4_now_s() - t0, &dummy) != 0) {
+                             dsv4_now_s() - t0, NULL) != 0) {
                 ok = 0;
                 dsv4_emit_kv_error("prefix prefill failed");
                 break;
@@ -102,7 +102,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     struct stat sb;
     long long bytes = stat(path, &sb) == 0 ? (long long)sb.st_size : 0;
     e->kv_prefix = 1;
-    dsv4_emit_kv_built(path, n, dsv4_now_s() - t0, bytes);
+    dsv4_emit_kv_built(n, dsv4_now_s() - t0, bytes);
     dsv4_cancel = 0;
 }
 
@@ -135,5 +135,5 @@ void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
     e->kv_prefix = 1;
     e->prefill_s = 0.0;
     e->prefill_tokens = 0;
-    dsv4_emit_kv_loaded(path, loaded, e->cap_ids, dsv4_now_s() - t0);
+    dsv4_emit_kv_loaded(loaded, e->cap_ids, dsv4_now_s() - t0);
 }

@@ -9,7 +9,6 @@
 #include <unistd.h>
 
 #include "dsv4_serve_int.h"
-#include "dsv4_trace.h"
 #include "dsv4_threads.h"
 
 #define MAX_FIELDS 16
@@ -115,8 +114,6 @@ static int handle_command(Engine *e, char *line)
             dsv4_emit_error("context reset failed");
         else
             dsv4_emit_reset(e, "user");
-    } else if (!strcmp(cmd, "stats")) {
-        dsv4_emit_ready(e, "stats");
     } else if (!strcmp(cmd, "kv_build")) {
         char path[4096];
         int nt = 0;
@@ -160,10 +157,6 @@ int main(int argc, char **argv)
      * workers otherwise starve the reader pool. */
     const char *pin = "p", *reader_pin = "e";
     int threads = 4, readers = 6;
-    const char *trace_path = NULL;
-    const char *trace_phase = "decode";
-    long trace_from = 0;
-    int trace_tokens = 4, trace_lo = -1, trace_hi = -1;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model) { model = argv[i]; continue; }
@@ -189,21 +182,6 @@ int main(int argc, char **argv)
             reader_pin = argv[++i];
         else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
             dsv4_set_stream_miss(atoi(argv[++i]));
-        else if (!strcmp(argv[i], "--trace") && i + 1 < argc)
-            trace_path = argv[++i];
-        else if (!strcmp(argv[i], "--trace-phase") && i + 1 < argc)
-            trace_phase = argv[++i];
-        else if (!strcmp(argv[i], "--trace-from") && i + 1 < argc)
-            trace_from = atol(argv[++i]);
-        else if (!strcmp(argv[i], "--trace-tokens") && i + 1 < argc)
-            trace_tokens = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--trace-layers") && i + 1 < argc) {
-            const char *v = argv[++i];
-            char *end = NULL;
-            trace_lo = (int)strtol(v, &end, 10);
-            trace_hi = trace_lo;
-            if (end && *end == '-') trace_hi = (int)strtol(end + 1, NULL, 10);
-        }
         else if (!strcmp(argv[i], "--think")) think = 1;
         else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { dsv4_usage(argv[0]); return 0; }
@@ -230,26 +208,6 @@ int main(int argc, char **argv)
     const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
     dsv4_threads_apply(&topts);
 
-    if (trace_path) {
-        int mask = DSV4_TRACE_PHASE_DECODE;
-        if (!strcmp(trace_phase, "prefill"))
-            mask = DSV4_TRACE_PHASE_PREFILL;
-        else if (!strcmp(trace_phase, "both"))
-            mask = DSV4_TRACE_PHASE_DECODE | DSV4_TRACE_PHASE_PREFILL;
-        else if (strcmp(trace_phase, "decode")) {
-            fprintf(stderr, "invalid --trace-phase (use decode|prefill|both)\n");
-            return 2;
-        }
-        if (dsv4_trace_open(trace_path) != 0) return 2;
-        dsv4_trace_window(trace_from, trace_tokens);
-        dsv4_trace_prefill_window(trace_from, trace_tokens);
-        dsv4_trace_phases(mask);
-        dsv4_trace_layers(trace_lo, trace_hi);
-        fprintf(stderr, "trace: %s blocks from %ld, %d block(s), "
-                        "layers %d-%d\n", trace_phase, trace_from,
-                trace_tokens, trace_lo, trace_hi);
-    }
-
     /* Line buffering is not enough on a pipe: every event must be visible to
      * the TUI the moment it is produced. */
     static char outbuf[1 << 16];
@@ -260,7 +218,6 @@ int main(int argc, char **argv)
                          ctx, ngen, think, layers) != 0) {
         dsv4_emit_error("engine init failed (see stderr for the loader's message)");
         dsv4_engine_free(&e);
-        dsv4_trace_close();
         return 1;
     }
 
@@ -280,6 +237,5 @@ int main(int argc, char **argv)
 
     /* Readers may still be finishing a prefetch; engine_free() stops the pool. */
     dsv4_engine_free(&e);
-    dsv4_trace_close();
     return 0;
 }

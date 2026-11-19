@@ -6,8 +6,8 @@
  *   that token. Prefill has the opposite shape -- the same weight is needed by
  *   every prompt token -- so the right unit of work is a batch of tokens
  *   through one layer. Keeping the batch code here means the decode path keeps
- *   its reference loop, gates and profile, and a change to one cannot silently
- *   move the other. The model-level numerical contract is L2 relative error,
+ *   its reference loop and gates, and a change to one cannot silently move the
+ *   other. The model-level numerical contract is L2 relative error,
  *   not bit identity; `make test` holds the matmul gates.
  *
  * WHAT IS BATCHED
@@ -31,9 +31,8 @@
  *   its own tile size. Either way a very long block does not turn the dense
  *   GEMMs into a DRAM stream. Prefill always initializes the Vulkan backend and
  *   uses it when available; the CPU kernels remain the fallback when the
- *   device is unavailable or a geometry is unsupported. `make bench-expert`
- *   reports the routed-expert CPU/GPU crossover; `make e2e` exercises the
- *   selected path end to end.
+ *   device is unavailable or a geometry is unsupported. `make e2e` exercises
+ *   the selected path end to end.
  */
 #ifndef DSV4_PREFILL_H
 #define DSV4_PREFILL_H

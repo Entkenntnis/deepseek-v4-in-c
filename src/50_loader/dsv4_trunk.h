@@ -23,8 +23,8 @@
  * WHY THE READ IS AFFORDABLE
  *   Unlike expert routing, the trunk's access order is FIXED, so the next read
  *   is always known before it is needed. The layer runs are large enough that
- *   one pread per layer with O_DIRECT is efficient; `make e2e --detailed`
- *   reports the observed trunk I/O.
+ *   one pread per layer with O_DIRECT is efficient; `make e2e` exercises the
+ *   observed trunk path end to end.
  *
  * LAYOUT
  *   tools/pack_trunk.py writes trunk.bin, where each layer is ONE contiguous
@@ -63,7 +63,7 @@ typedef struct {
     /* A pinned layer's run never moves, and its widened vectors are
      * independent of the token, so its binding can be built once. Rebuilding
      * it per token re-widens the mHC/compressor vectors every pass, which
-     * dominated the "bind / widen" profile row. */
+     * cost more than it saved. */
     DSV4LayerW       bind_cached;
     unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
     int              bind_ready;
@@ -85,9 +85,6 @@ typedef struct {
 
     unsigned char   *widen;      /* one widen area, reused per bind              */
     size_t           widen_cap;
-
-    uint64_t         hits, misses, bytes_read;
-    double           load_seconds;
 } DSV4Trunk;
 
 /* budget_bytes sizes the pinned prefix and the ring. Returns 0 on success. */

@@ -11,7 +11,7 @@
  * the FP4 expert kernel and the FP64 mHC dot products, while FP8 attention is
  * closer. The compute team therefore runs on the P-cores and the expert-reader
  * pthreads can be sent to the E-cores, where they mostly sleep in pread().
- * Reproduce with `./bin/bench --pin p` and `./bin/bench --pin e`.
+ * The decode microbenchmarks that measured this were removed with the other C benchmarks.
  *
  * If this is built for another CPU, pass `--pin off` (or `--pin all`), or edit
  * DSV4_P_LO..DSV4_E_HI in dsv4_threads.c. The engine still works; it simply

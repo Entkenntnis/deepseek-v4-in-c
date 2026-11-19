@@ -17,10 +17,8 @@ change can move the golden. Use --update-golden only after an intentional
 model/kernel change.
 
 Examples:
-    make e2e                              # table + minimal progress
-    python3 bench/e2e.py --detailed       # serve diagnostics + per-run detail
+    make e2e
     python3 bench/e2e.py --runs 3 --update-golden
-    python3 bench/e2e.py --json
 """
 import argparse
 import codecs
@@ -69,27 +67,8 @@ def parse_args():
     p.add_argument("--readers", type=int, default=6)
     p.add_argument("--reader-pin", default="e", choices=("off", "all", "p", "e"))
     p.add_argument("--stream-miss", type=int, default=6)
-    p.add_argument("--trace", default=None, metavar="FILE",
-                   help="write a scheduling trace to FILE")
-    p.add_argument("--trace-phase", default="decode",
-                   choices=("decode", "prefill"),
-                   help="trace decode tokens (default) or one prefill call")
-    p.add_argument("--trace-run", type=int, default=2,
-                   help="1-based run to trace (default 2, the first measured; "
-                        "an early stop=eos shifts later runs)")
-    p.add_argument("--trace-tokens", type=int, default=4,
-                   help="decode tokens to trace in that run (default 4)")
-    p.add_argument("--trace-layers", default=None, metavar="A-B",
-                   help="only record these layers")
-    p.add_argument("--trace-view", action="store_true",
-                   help="run tools/trace_view.py --summary --all-tokens "
-                        "after the turn")
     p.add_argument("--golden", default=DEFAULT_GOLDEN)
     p.add_argument("--update-golden", action="store_true")
-    p.add_argument("--json", action="store_true", dest="as_json",
-                   help="print a JSON summary instead of the table")
-    p.add_argument("--detailed", action="store_true",
-                   help="show serve stderr and per-run counters")
     return p.parse_args()
 
 
@@ -106,20 +85,6 @@ def build_command(a):
         "--reader-pin", a.reader_pin,
         "--stream-miss", str(a.stream_miss),
     ]
-    if a.trace:
-        cmd += ["--trace", str(a.trace), "--trace-phase", a.trace_phase]
-        if a.trace_phase == "prefill":
-            # One prefill call per run; trace the requested 1-based run.
-            cmd += ["--trace-from", str(a.trace_run - 1),
-                    "--trace-tokens", "1"]
-        else:
-            # Decode forwards per run are gen - 1: the last emitted token is
-            # not fed back. Traced indices count forwards, not emitted tokens.
-            cmd += ["--trace-from",
-                    str(max(0, (a.trace_run - 1) * (a.gen - 1))),
-                    "--trace-tokens", str(a.trace_tokens)]
-        if a.trace_layers:
-            cmd += ["--trace-layers", a.trace_layers]
     return cmd
 
 
@@ -277,8 +242,6 @@ def metrics(start, tokens, done):
         "stop": done.get("stop", "?"),
         "cache_hit_rate": hit_rate,
         "cache_read_gb": reads,
-        "sys": done.get("sys", {}),
-        "prof": done.get("prof", {}),
     }
 
 
@@ -297,9 +260,6 @@ def main():
         print("e2e: --runs must be at least 2 (one warm-up plus a measured run)",
               file=sys.stderr)
         return 2
-    if a.trace and not 1 <= a.trace_run <= a.runs:
-        print("e2e: --trace-run must be within 1..--runs", file=sys.stderr)
-        return 2
     if not Path(a.binary).is_file():
         print(f"e2e: {a.binary} not found; run `make serve` first", file=sys.stderr)
         return 2
@@ -309,18 +269,8 @@ def main():
         print(f"e2e: cannot load tokenizer {a.tok}: {exc}", file=sys.stderr)
         return 2
 
-    progress = Progress(enabled=not a.detailed and not a.as_json)
-    errfile = None
-    if not a.detailed or a.as_json:
-        errfile = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-
-    if a.detailed and not a.as_json:
-        print(f"e2e: model   {a.model}", file=sys.stderr)
-        print(f"e2e: trunk   {a.trunk}", file=sys.stderr)
-        print(f"e2e: binary  {a.binary}", file=sys.stderr)
-        print(f"e2e: gen={a.gen} budget={a.budget:g} GB ctx={a.ctx} "
-              f"runs={a.runs} (run 1 warm-up)", file=sys.stderr)
-        print(f"e2e: prompt  {len(PROMPT)} chars, repeated 5x", file=sys.stderr)
+    progress = Progress(enabled=True)
+    errfile = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
 
     progress.update("loading model", force=True)
     proc = subprocess.Popen(build_command(a), stdin=subprocess.PIPE,
@@ -441,59 +391,8 @@ def main():
     }
     rows.append(("median", median))
 
-    if a.as_json:
-        print(json.dumps({
-            "args": {
-                "gen": a.gen, "budget_gb": a.budget, "ctx": a.ctx,
-                "runs": a.runs, "prompt": PROMPT,
-            },
-            "runs": [{k: v for k, v in r.items()
-                      if k not in ("token_ids", "text")} for r in results],
-            "median": median,
-            "golden": str(golden_path),
-            "sha256": digest,
-            "status": status,
-        }, ensure_ascii=False, indent=2))
-    else:
-        print_table(rows)
-        if a.detailed:
-            print("\ndetails:")
-            for idx, m in enumerate(results):
-                label = "warmup" if idx == 0 else f"run {idx}"
-                print(f"  {label}: prefill {m['prefill_tokens']} tok in "
-                      f"{m['prefill_s']:.3f} s ({m['prefill_tps']:.2f} tok/s), "
-                      f"decode {m['generated']} tok ({m['decode_tps']:.2f} tok/s), "
-                      f"cache {100.0 * m['cache_hit_rate']:.1f}%, "
-                      f"read {m['cache_read_gb']:.2f} GB")
-                p = m.get("prof", {})
-                if p:
-                    keys = ("hc", "attn", "gate", "expert_io", "expert_mm",
-                            "shared", "head", "bind")
-                    print("    prof: " + " ".join(
-                        f"{k}={p.get(k, 0.0):.3f}s" for k in keys))
-                s = m.get("sys", {})
-                if s:
-                    print(f"    rss={s.get('rss_mb', 0.0) / 1024.0:.2f} GB "
-                          f"peak={s.get('peak_mb', 0.0) / 1024.0:.2f} GB "
-                          f"read={s.get('io_read_gb', 0.0):.2f} GB "
-                          f"cpu={s.get('cpu_s', 0.0):.1f}s")
-            print(f"\ngolden: {golden_path}")
-            print(f"sha256: {digest}")
-            print(status)
-        else:
-            print(f"golden: {status}", file=sys.stderr)
-
-    if a.trace:
-        print(f"trace: {a.trace} (run {a.trace_run}, "
-              f"{a.trace_tokens} token(s))", file=sys.stderr)
-        if a.trace_view:
-            if a.trace_phase == "prefill":
-                view = REPO / "tools" / "prefill_trace_view.py"
-                args = [str(a.trace), "--summary"]
-            else:
-                view = REPO / "tools" / "trace_view.py"
-                args = [str(a.trace), "--summary", "--all-tokens"]
-            subprocess.run([sys.executable, str(view)] + args, check=False)
+    print_table(rows)
+    print(f"golden: {status}", file=sys.stderr)
 
     # Warn about the thing the user wants to trust: run-to-run stability.
     if len(measured) >= 2:

@@ -4,16 +4,10 @@
 #define DSV4_PREFILL_INT_H
 
 #include <stdint.h>
-#include <stdio.h>
 
 #include "dsv4.h"
-#include "dsv4_prof.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_vk.h"
-#include "dsv4_trace.h"
-
-/* Instrumentation: bucket sizes are token requests per distinct expert. */
-#define DSV4_PF_HIST_BINS 8
 
 /* Routed-expert scheduling classes. The scheduler owns the split, not the
  * bucket function: 1..4 always run on the CPU, 9+ always on the GPU, and 5..8
@@ -26,63 +20,6 @@
  * further high bucket moves the CPU limit up by one, until it reaches 8. */
 #define DSV4_PF_MID_BACKLOG    2
 #define DSV4_PREFILL_FILL_MAX  (DSV4_PF_GPU_ALWAYS_MIN - 1)
-
-typedef struct {
-    int experts;            /* distinct experts in this layer               */
-    int requests;           /* n * topk, duplicates included                */
-    int buckets_cpu, buckets_gpu, gpu_fallbacks;
-    int fill_buckets;       /* CPU buckets run inside a GPU wait          */
-    int mid_cpu, mid_gpu;   /* contested 5..8 buckets by backend          */
-    int hist[DSV4_PF_HIST_BINS];
-    int hist_tokens[DSV4_PF_HIST_BINS];
-    double cpu_mm, gpu_mm;  /* expert matmul time by path                    */
-    double total_s;         /* whole layer                                   */
-    double attn_s, moe_s, gate_s, shared_s, hc_s, io_s;
-    double union_s;         /* prefetch start through end + weighted sum     */
-    double lead_s;          /* prefetch start -> union compute start         */
-    double begin_s, wait_s, end_s, compute_s;
-    uint64_t bytes;
-    DSV4PrefillVkStats vk[DSV4_VK_KIND_COUNT];
-} DSV4PrefillLayerInstr;
-
-/* Fine-grained accounting for one dsv4_prefill_range call. The public profile
- * only knows broad buckets, which cannot tell a kernel problem from a
- * scheduling problem. f_* are GFLOP (2 x MAC), so effective GF/s is
- * f_family / seconds_in_family. Timers nest: do not add the columns up. */
-typedef struct {
-    double embed, hc_pre, hc_post, hc_post_moe, norm;
-    double proj_qkv, q_norm, q_head, kv_norm;
-    double comp_proj, comp_step, win_idx;
-    double idx_proj, idx_rope, idx_score;
-    double attn_core, attn_deroep;
-    double oproj_pack, oproj, oproj_unpack;
-    double gate_mm, route, shared_mm, shared_swiglu;
-    double expert_io, expert_mm, expert_swiglu, expert_pack, expert_sum;
-    double bind, trunk_io;
-
-    double f_qkv, f_oproj, f_gate, f_shared, f_expert, f_comp, f_idx, f_attn;
-
-    uint64_t e_hits, e_misses, e_bytes, trunk_bytes;
-    int have_estats;
-
-    /* Instrumentation. The histograms are filled from the routed-expert
-     * buckets, not from the routing table, so they describe what actually ran. */
-    int buckets_total, buckets_cpu, buckets_gpu, gpu_fallbacks;
-    int fill_buckets;        /* CPU buckets run during a GPU wait           */
-    int mid_cpu, mid_gpu;    /* contested 5..8 buckets by backend           */
-    int bucket_hist[DSV4_PF_HIST_BINS];
-    int bucket_tokens[DSV4_PF_HIST_BINS];
-    double bucket_s[DSV4_PF_HIST_BINS];      /* whole bucket wall time      */
-    double bucket_mm_s[DSV4_PF_HIST_BINS];   /* matmul part of that time    */
-    double expert_mm_cpu, expert_mm_gpu;
-    int io_groups;
-    double io_begin_s, io_wait_s, io_end_s;
-    uint64_t io_read_n;
-    double io_read_s, io_read_max_s;
-    uint64_t read_lat_n[DSV4_PF_HIST_BINS];
-    double read_lat_s[DSV4_PF_HIST_BINS];
-    int cache_slots, cache_readers;
-} DSV4PrefillStats;
 
 /* One matrix over `n` token rows: the batched-matmul seam. It uses the Vulkan
  * backend when available and falls back to the CPU kernels otherwise. */
@@ -179,10 +116,6 @@ struct DSV4Prefill {
     int      pf_layer;       /* layer the prepared batch belongs to           */
     int      pf_active;      /* begin() succeeded and end() is still owed     */
     int      pf_prepared;    /* counts/order are valid for pf_layer           */
-    int      pf_estats;      /* pf_bytes0 is valid                            */
-    uint64_t pf_bytes0;      /* cache bytes_read when prefetch started        */
-    double   pf_t0;          /* prefetch start                                */
-    double   pf_compute_t0;  /* union compute start                           */
 
     /* Per-token projections that carry no position dependency are GEMMs too.
      * The compressor and indexer weights are read once per block instead of
@@ -191,27 +124,7 @@ struct DSV4Prefill {
      * stay per token and read these rows by index. */
     float *comp_kv_b, *comp_sc_b;
     float *idx_qb, *idx_wb;
-
-    double t_total, t_attn, t_idx, t_gate, t_shared, t_moe;
-    double t_moe_wall;       /* wall of the routed phase; t_moe is work sum */
-    double t_io, t_trunk, t_bind, t_hc;
-
-    DSV4PrefillStats st;   /* per-call sub-stage accounting */
-
-    /* Deep instrumentation, opt-in with DSV4_PREFILL_INSTRUMENT. */
-    int          instr;        /* 0 off, 1 summary, 2 summary + per layer */
-    int          instr_call;   /* 1-based prefill call counter            */
-    int          cur_layer;    /* layer being filled by the union         */
-    const char  *instr_file;
-    FILE        *instr_fp;
-    DSV4PrefillVkStats vk_stats[DSV4_VK_KIND_COUNT];
-    DSV4PrefillLayerInstr linstr[DSV4_MAX_LAYERS];
 };
-
-/* Reporting hooks (dsv4_prefill_report.c). */
-void dsv4_prefill_instr_init(DSV4Prefill *p);
-void dsv4_prefill_instr_layer(DSV4Prefill *p, int L);
-void dsv4_prefill_instr_summary(DSV4Prefill *p, int n, int pos0);
 
 /* Cancellation polling. The caller can distinguish a stop before any layer
  * touched model state from one that left partially written KV/compressor rows;
@@ -226,30 +139,10 @@ static inline int dsv4_prefill_cancel_code(const DSV4Prefill *p)
     return p->state_dirty ? DSV4_PREFILL_ABORTED : DSV4_PREFILL_CANCELLED;
 }
 
-/* Prefill trace helpers. A stage is a named span; the tag is copied into the
- * trace event, so short names ("qkv", "indexer", "shared") keep the file
- * readable. Both helpers are no-ops unless a prefill block is live. */
-static inline double dsv4_pf_trace_t0(void)
-{
-    return dsv4_trace_active() ? dsv4_now_s() : 0.0;
-}
-
-static inline void dsv4_pf_trace_stage(int layer, const char *tag, double t0)
-{
-    if (t0 <= 0.0 || !dsv4_trace_active()) return;
-    dsv4_trace_ev(&(DSV4TraceEv){
-        .kind = DSV4_TR_STAGE, .layer = layer, .k = -1,
-        .ms = (dsv4_now_s() - t0) * 1000.0, .at = t0, .tag = tag });
-}
-
-/* Batched-matmul seam and its timed wrappers. layer/tag are used only by the
- * trace; they are passed in so a stage span covers exactly the GEMM call. */
-int dsv4_prefill_pm_stats(DSV4Prefill *p, float *y, const float *x,
-                          const DSV4QMat *m, int n, double *timer,
-                          double *flops, int layer, const char *tag);
-int dsv4_prefill_pm_multi_stats(DSV4Prefill *p, const DSV4PMJob *jobs, int nj,
-                                double *timer, double *flops, int layer,
-                                const char *tag);
+/* Batched-matmul seam. */
+int dsv4_prefill_pm(DSV4Prefill *p, float *y, const float *x,
+                    const DSV4QMat *m, int n);
+int dsv4_prefill_pm_multi(DSV4Prefill *p, const DSV4PMJob *jobs, int nj);
 
 /* Sequential stages that still run per token. */
 int  dsv4_prefill_attention(DSV4Prefill *p, int L, const DSV4LayerW *w,
@@ -289,10 +182,9 @@ int  dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n);
 /* Drain any live prefetch batch on an error/cancel path. Safe when idle. */
 void dsv4_prefill_moe_abort(DSV4Prefill *p);
 
-/* Reporting. */
+/* Progress only. */
 void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
                            int tokens_done, int tokens_total,
                            double elapsed, double progress);
-void dsv4_prefill_report(DSV4Prefill *p, int n);
 
 #endif /* DSV4_PREFILL_INT_H */

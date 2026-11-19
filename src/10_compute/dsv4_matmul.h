@@ -14,7 +14,7 @@
  *   contract is L2 relative error, not bit identity: test_matmul's random-data
  *   gates bound the production kernels against the scalar double reference,
  *   and the Vulkan prefill path has its own reduction order. Run `make test`
- *   for the gates; `make bench` and `make e2e` report throughput.
+ *   for the gates; `make e2e` reports throughput.
  */
 #ifndef DSV4_MATMUL_H
 #define DSV4_MATMUL_H
@@ -25,7 +25,7 @@
  * is one block, and dsv4_mmq_n() walks it in tiles of at most this many rows.
  * The value bounds the fixed-size accumulator arrays in the batch kernels and
  * keeps the activation working set in LLC. The kernel curve flattens well
- * before this size (see the nt filters in `make bench`); 128 is deliberately
+ * before this size (see the nt filters in the old microbenchmarks); 128 is deliberately
  * above that point and costs only stack/workspace, not another copy of the
  * weights. */
 #define DSV4_MAX_BATCH     128

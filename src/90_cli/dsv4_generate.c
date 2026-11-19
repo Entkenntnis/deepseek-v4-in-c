@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "dsv4_serve_int.h"
-#include "dsv4_trace.h"
+#include "dsv4_time.h"
 
 /* Stop a turn before its first token. With a snapshot the layer state and the
  * token array roll back to the end of the previous turn, so the conversation
@@ -36,7 +36,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
 {
     const double t0 = dsv4_now_s();
     dsv4_cancel = 0;
-    e->prof_base = dsv4_prof;
+    e->head_s = 0.0;
 
     if (ngen < 0) ngen = 0;
     if (n_tokens <= 0) {
@@ -66,9 +66,8 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     }
     if (e->pending_forward) {
         const int pos = e->n_ids - 1;
-        TopK dummy;
         if (dsv4_forward(e, e->ids[pos], pos, 0, emit_layers, "resume",
-                         dsv4_now_s() - t0, &dummy) != 0) return;
+                         dsv4_now_s() - t0, NULL) != 0) return;
         e->pending_forward = 0;
     }
 
@@ -93,16 +92,13 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
         dsv4_prefill_release(e->pf);
         use_batched = 0;
     }
-    dsv4_emit_start(e, start_pos, n_added, ngen, think ? "thinking" : "chat",
+    dsv4_emit_start(e, start_pos, n_added, ngen,
                     use_batched ? n_added : 0);
 
     /* Save the old context before the first layer can touch it. The snapshot is
      * model-sized, not prompt-sized, and is overwritten every turn. */
     const int snap_ok =
         e->snap && dsv4_state_snapshot_save(e->snap) == 0;
-
-    TopK top;
-    memset(&top, 0, sizeof top);
 
     /* Prefill the new turn. The head runs only on the final prompt token. Once
      * the block path starts it cannot fall back: it has already written KV and
@@ -134,7 +130,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                 return;
             }
             if (dsv4_forward(e, e->ids[i], i, 0, emit_layers, "prompt",
-                             dsv4_now_s() - t0, &top) != 0) return;
+                             dsv4_now_s() - t0, NULL) != 0) return;
         }
     }
     e->prefill_s = dsv4_now_s() - tp0;
@@ -157,7 +153,8 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
         };
         dsv4_emit_prefill_progress(e, &hp);
     }
-    dsv4_head_from_h(e, &top);
+    int32_t best = 0;
+    dsv4_head_from_h(e, &best);
     if (dsv4_cancel) {
         cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;
@@ -166,7 +163,6 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     int generated = 0;
     double ttft = 0.0;
     const char *stop = "max";
-    int best = top.n > 0 ? top.id[0] : 0;
 
     while (generated < ngen) {
         if (dsv4_cancel) {
@@ -192,7 +188,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
 
         const double el = dsv4_now_s() - t0;
         if (generated == 0) ttft = el;
-        dsv4_emit_token(e, id, generated, pos, el, ttft, &top);
+        dsv4_emit_token(e, id, generated, el, ttft);
         generated++;
         /* The prefix-only context has now become a real completed-prefix turn;
          * the next generate may need the normal EOS handling again. */
@@ -209,17 +205,14 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
             break;
         }
 
-        dsv4_trace_token_begin(pos, "gen");
         const int frc = dsv4_forward(e, id, pos, 1, emit_layers, "gen",
-                                     dsv4_now_s() - t0, &top);
-        dsv4_trace_token_end();
+                                     dsv4_now_s() - t0, &best);
         if (frc != 0) {
             e->pending_forward = 1;   /* the emitted token is not in the KV yet */
             stop = "error";
             break;
         }
         e->pending_forward = 0;
-        best = top.n > 0 ? top.id[0] : 0;
     }
 
     const double dt = dsv4_now_s() - t0;
