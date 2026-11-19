@@ -21,10 +21,7 @@
 
 #include "dsv4_quant.h"
 #include "dsv4_dec_common.h"
-#include "dsv4_dec_bf16.h"
-#include "dsv4_dec_reduce.h"
 #include "dsv4_dec_fp8.h"
 #include "dsv4_dec_fp4.h"
-#include "dsv4_dec_scale.h"
 
 #endif /* DSV4_QMAT_DEC_H */

@@ -1,110 +1,104 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_bind.c - resolve, validate and read a planned layer/model.
- *
- * THE CHECK THAT EARNS ITS KEEP is plan_resolve: every tensor's element count is
- * compared against what the CONFIG implies before a single byte is read. The
- * expectations are expressions of config fields, never literals. A checkpoint
- * that disagrees with its own config fails at load, loudly, instead of feeding
- * every kernel downstream the wrong strides while producing plausible output.
- */
+/* dsv4_bind.c - slot tables and the byte-to-field binding loop. */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "dsv4_bind.h"
-#include "dsv4_bind_int.h"
+#include "dsv4_trunk.h"
 
-static int64_t plan_resolve(DSV4BindPlan *p, const DSV4St *s)
-{
-    size_t off = 0;
-    for (int i = 0; i < p->n; i++) {
-        DSV4BindReq *q = &p->r[i];
-        q->t = dsv4_st_find(s, q->name);
-        if (!q->t) {
-            fprintf(stderr, "dsv4_bind: missing tensor %s\n", q->name);
-            p->bad++;
-            continue;
-        }
-        const int64_t have = dsv4_st_numel(q->t);
-        if (q->want >= 0 && have != q->want) {
-            fprintf(stderr, "dsv4_bind: %s has %lld elements, config implies %lld\n",
-                    q->name, (long long)have, (long long)q->want);
-            p->bad++;
-            continue;
-        }
-        /* Asking to widen an FP8/FP4/I64 tensor is a planning bug: those have
-         * no meaning without their scale, or are not floats at all. */
-        if (!q->narrow && dsv4_st_elemsize(q->t->dtype) > 0 &&
-            (q->t->dtype == DSV4_DT_F8_E4M3 || q->t->dtype == DSV4_DT_F8_E8M0 ||
-             q->t->dtype == DSV4_DT_I8 || q->t->dtype == DSV4_DT_I64)) {
-            fprintf(stderr, "dsv4_bind: %s was planned WIDE but is a quantised or "
-                            "index dtype; it must be requested narrow\n", q->name);
-            p->bad++;
-            continue;
-        }
-        const size_t bytes = q->narrow
-            ? (size_t)q->t->nbytes
-            : (size_t)have * sizeof(float);
-        q->off = off;
-        off = dsv4_bind_align8(off + bytes);
-    }
-    return p->bad ? -1 : (int64_t)off;
-}
+/* ---- model-level slots ---- */
+enum {
+    M_EMBED = 1, M_NORM, M_HEAD,
+    M_HC_FN, M_HC_BASE, M_HC_SCALE
+};
 
-static int plan_load(DSV4BindPlan *p, const DSV4St *s, unsigned char *blob)
+typedef struct {
+    int      slot;
+    uint16_t dst;
+    uint8_t  wide;      /* 1 = widen to f32, 0 = keep raw bytes */
+} ModelSlot;
+
+static const ModelSlot model_slots[] = {
+    { M_EMBED,    offsetof(DSV4ModelW, embed),          0 },
+    { M_NORM,     offsetof(DSV4ModelW, norm),           1 },
+    { M_HEAD,     offsetof(DSV4ModelW, head),           0 },
+    { M_HC_FN,    offsetof(DSV4ModelW, hc_head.fn),     1 },
+    { M_HC_BASE,  offsetof(DSV4ModelW, hc_head.base),   1 },
+    { M_HC_SCALE, offsetof(DSV4ModelW, hc_head.scale),  1 },
+};
+
+static int64_t model_bytes(const DSV4St *s, int want_head)
 {
-    for (int i = 0; i < p->n; i++) {
-        DSV4BindReq *q = &p->r[i];
-        unsigned char *dst = blob + q->off;
-        if (q->narrow) {
-            if (dsv4_st_read(s, q->t, dst) != q->t->nbytes) {
-                fprintf(stderr, "dsv4_bind: short read on %s\n", q->name);
-                return -1;
-            }
-        } else {
-            const int64_t n = dsv4_st_numel(q->t);
-            if (dsv4_st_read_f32(s, q->t, (float *)dst) != n) {
-                fprintf(stderr, "dsv4_bind: short widen on %s\n", q->name);
-                return -1;
-            }
+    int64_t total = 0;
+    for (size_t i = 0; i < sizeof model_slots / sizeof model_slots[0]; i++) {
+        const ModelSlot *ms = &model_slots[i];
+        if (ms->slot == M_HEAD && !want_head) continue;
+        const DSV4ModelLoc *loc = dsv4_st_model(s, ms->slot);
+        if (!loc) {
+            fprintf(stderr, "dsv4_bind: model slot %d is missing\n", ms->slot);
+            return -1;
         }
-        *q->dest = dst;
+        int64_t bytes = loc->nbytes;
+        if (ms->wide) {
+            const int esz = dsv4_st_elemsize((DSV4Dtype)loc->dtype);
+            if (esz <= 0 || loc->nbytes % esz) return -1;
+            bytes = (loc->nbytes / esz) * 4;
+        }
+        total = (total + bytes + 7) & ~(int64_t)7;
     }
-    return 0;
+    return total;
 }
 
 int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head)
 {
-    DSV4BindPlan p; memset(&p, 0, sizeof p);
-    DSV4ModelW tmp;
-    dsv4_bind_plan_model(&p, c, want_head, &tmp);
-    return plan_resolve(&p, s);
+    (void)c;
+    return model_bytes(s, want_head);
 }
 
 int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
                     DSV4ModelBind *m)
 {
     memset(m, 0, sizeof *m);
+    const int64_t need = model_bytes(s, want_head);
+    if (need < 0) return -1;
 
-    DSV4BindPlan p; memset(&p, 0, sizeof p);
-    dsv4_bind_plan_model(&p, c, want_head, &m->w);
-    const int64_t need = plan_resolve(&p, s);
-    if (need < 0) {
-        fprintf(stderr, "dsv4_bind: model could not be planned\n");
-        return -1;
+    unsigned char *blob = (unsigned char *)malloc(need ? (size_t)need : 1);
+    if (!blob) return -1;
+
+    size_t at = 0;
+    for (size_t i = 0; i < sizeof model_slots / sizeof model_slots[0]; i++) {
+        const ModelSlot *ms = &model_slots[i];
+        if (ms->slot == M_HEAD && !want_head) continue;
+        const DSV4ModelLoc *loc = dsv4_st_model(s, ms->slot);
+        if (!loc) { free(blob); return -1; }
+
+        unsigned char *dst = blob + at;
+        if (ms->wide) {
+            const int esz = dsv4_st_elemsize((DSV4Dtype)loc->dtype);
+            const int64_t n = loc->nbytes / esz;
+            if (dsv4_st_read_f32(s, loc->shard, loc->off, loc->nbytes,
+                                 loc->dtype, (float *)dst) != n) {
+                free(blob);
+                return -1;
+            }
+            at += (size_t)n * sizeof(float);
+        } else {
+            if (dsv4_st_read(s, loc->shard, loc->off, loc->nbytes, dst)
+                != loc->nbytes) {
+                free(blob);
+                return -1;
+            }
+            at += (size_t)loc->nbytes;
+        }
+        at = (at + 7) & ~(size_t)7;
+        *(const void **)((unsigned char *)&m->w + ms->dst) = dst;
     }
 
-    m->blob = malloc((size_t)need);
-    if (!m->blob) {
-        fprintf(stderr, "dsv4_bind: OOM allocating %lld bytes for the model\n",
-                (long long)need);
-        return -1;
-    }
-
-    if (plan_load(&p, s, (unsigned char *)m->blob) != 0) {
-        free(m->blob); m->blob = NULL;
-        return -1;
-    }
+    m->blob = blob;
+    m->w.wdt = DSV4_WBF16;
+    (void)c;
     return 0;
 }
 

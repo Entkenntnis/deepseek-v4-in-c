@@ -5,7 +5,6 @@
 #include "dsv4.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
-#include "dsv4_prefill_union_int.h"
 
 static int union_bucket_count(const DSV4PFillCtx *f, int j)
 {
@@ -79,9 +78,9 @@ static int union_fill_cpu(void *ctx)
     /* Readers keep publishing while the GPU tile runs. Pull in whatever has
      * landed since the last window; this is non-blocking and is what lets the
      * later w3/w2 windows find CPU buckets that were not ready for w1. */
-    if (!f->io_done && p->src->try_any) {
+    if (!f->io_done) {
         int k;
-        while (p->src->try_any(p->src->ctx, &k)) {
+        while (dsv4_cache_try(p->cache, &k)) {
             if (k >= 0 && k < f->ng && !f->done[k] && f->ex[k])
                 f->q[(*f->qt)++] = k;
         }

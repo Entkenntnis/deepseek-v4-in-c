@@ -1,14 +1,16 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_cache_geom.c - expert slot geometry and pointer binding. */
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <unistd.h>
 
 #include "dsv4_cache.h"
+#include "dsv4_trunk.h"
 #include "dsv4_cache_int.h"
 
-/* An expert's six tensors, in the order they are laid out inside a slot.
- * w2 is the down projection and has the transposed shape, which is why its
- * lengths are computed separately. The order mirrors DISK order (scales, then
- * weights) so each run lands in one pread. */
 int dsv4_cache_expert_geometry(DSV4Cache *c, const DSV4Cfg *cfg)
 {
     const int64_t inter = cfg->moe_inter, hid = cfg->hidden;
@@ -28,7 +30,6 @@ int dsv4_cache_expert_geometry(DSV4Cache *c, const DSV4Cfg *cfg)
     return 0;
 }
 
-/* Point a slot's DSV4ExpertW at its own bytes. Done once per load, not per use. */
 void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s)
 {
     const DSV4Cfg *cfg = c->cfg;
@@ -54,4 +55,47 @@ int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg)
     memset(&tmp, 0, sizeof tmp);
     dsv4_cache_expert_geometry(&tmp, cfg);
     return tmp.slot_bytes;
+}
+
+typedef struct {
+    int     expert;
+    int     shard;
+    int64_t off;
+} PfKey;
+
+static int pf_key_before(const PfKey *a, const PfKey *b)
+{
+    if (a->shard != b->shard) return a->shard < b->shard;
+    if (a->off != b->off) return a->off < b->off;
+    return a->expert < b->expert;
+}
+
+void dsv4_cache_sort_experts(const DSV4Cache *c, int layer, int *experts, int n)
+{
+    if (!c || !c->st || !experts || n <= 1) return;
+    /* The caller uses the grouped fallback for batches this large; keep this
+     * helper's stack array fixed. */
+    if (n > DSV4_MAX_PREFETCH) return;
+
+    PfKey key[DSV4_MAX_PREFETCH];
+    for (int i = 0; i < n; i++) {
+        const int e = experts[i];
+        const DSV4Loc *loc = dsv4_st_expert(c->st, layer, e);
+        key[i].expert = e;
+        key[i].shard = loc ? loc[DSV4_EXP_W1W].shard : INT_MAX;
+        key[i].off = loc ? loc[DSV4_EXP_W1W].off : INT64_MAX;
+    }
+
+    /* At most 256 entries: insertion sort avoids a qsort context and keeps the
+     * equal-offset tie on expert id deterministic. */
+    for (int i = 1; i < n; i++) {
+        const PfKey k = key[i];
+        int j = i - 1;
+        while (j >= 0 && pf_key_before(&k, &key[j])) {
+            key[j + 1] = key[j];
+            j--;
+        }
+        key[j + 1] = k;
+    }
+    for (int i = 0; i < n; i++) experts[i] = key[i].expert;
 }

@@ -8,7 +8,7 @@
 
 #include "dsv4.h"
 #include "dsv4_layer.h"
-#include "dsv4_state_file.h"
+#include "dsv4_kvfile.h"
 
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \
@@ -155,10 +155,10 @@ int main(void)
     if (fd >= 0) close(fd);
 
     printf("\n-- GATE 1  save/load preserves every persistent float --\n");
-    CHECK(dsv4_state_file_save(path, "tiny-model", &c, src, ids, NIDS) == 0,
+    CHECK(dsv4_kv_save(path, "tiny-model", &c, src, ids, NIDS) == 0,
           "save failed");
     int n = 0;
-    CHECK(dsv4_state_file_load(path, "tiny-model", &c, dst, c.max_pos,
+    CHECK(dsv4_kv_load(path, "tiny-model", &c, dst, c.max_pos,
                                ids, NIDS, &n, ids, NIDS) == 0, "load failed");
     CHECK(n == NIDS, "loaded %d ids, expected %d", n, NIDS);
     CHECK(same_state(&c, src, dst), "state changed across the round trip");
@@ -169,7 +169,7 @@ int main(void)
         const float sentinel = 1234.5f;
         dst[0].kv_cache[0] = sentinel;
         int got = 0;
-        CHECK(dsv4_state_file_load(path, "tiny-model", &c, dst, c.max_pos,
+        CHECK(dsv4_kv_load(path, "tiny-model", &c, dst, c.max_pos,
                                    ids, NIDS, &got, bad_ids, NIDS) != 0,
               "mismatched prefix was accepted");
         CHECK(dst[0].kv_cache[0] == sentinel,
@@ -184,7 +184,7 @@ int main(void)
         const float sentinel = 2345.5f;
         dst[0].kv_cache[0] = sentinel;
         int got = 0;
-        CHECK(dsv4_state_file_load(path, "tiny-model", &other, dst,
+        CHECK(dsv4_kv_load(path, "tiny-model", &other, dst,
                                    other.max_pos, ids, NIDS, &got,
                                    ids, NIDS) != 0,
               "cache built for another geometry was accepted");
@@ -196,7 +196,7 @@ int main(void)
     printf("\n-- GATE 4  a missing file is a clean miss --\n");
     {
         int got = 0;
-        CHECK(dsv4_state_file_load("/tmp/dsv4_kv_does_not_exist.bin",
+        CHECK(dsv4_kv_load("/tmp/dsv4_kv_does_not_exist.bin",
                                    "tiny-model", &c, dst, c.max_pos, ids,
                                    NIDS, &got, ids, NIDS) != 0,
               "missing file was accepted");

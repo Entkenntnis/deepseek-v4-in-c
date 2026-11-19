@@ -23,9 +23,11 @@ struct DSV4CacheBatch;
 struct DSV4CacheJob;
 struct DSV4Slot;
 
-typedef struct {
+typedef struct DSV4Cache {
     const DSV4St  *st;
+    struct DSV4Trunk *tr;
     const DSV4Cfg *cfg;
+    struct DSV4CacheBatch *batch;
     struct DSV4Slot *slot;
     int            nslot;
     unsigned char *slot_arena;   /* one allocation for every slot, or NULL */
@@ -81,8 +83,8 @@ int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg);
 
 /* budget_bytes decides the slot count. Returns 0 on success. A budget below one
  * expert is an error. */
-int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
-                     int64_t budget_bytes);
+int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
+                     const DSV4Cfg *cfg, int64_t budget_bytes);
 void dsv4_cache_free(DSV4Cache *c);
 
 /* ---- hash-layer prefetch (automatic; init enables it) -------------------- */
@@ -108,7 +110,7 @@ typedef struct DSV4CacheBatch {
     int rdone;
     int slot_of[DSV4_MAX_PREFETCH];
     int k_of[DSV4_MAX_PREFETCH];
-    const DSV4Tensor *t_of[DSV4_MAX_PREFETCH][6];
+    DSV4Loc t_of[DSV4_MAX_PREFETCH][6];
     int expert_of[DSV4_MAX_PREFETCH];
     int layer_of[DSV4_MAX_PREFETCH];
     int failed[DSV4_MAX_PREFETCH];
@@ -131,6 +133,13 @@ typedef struct DSV4CacheBatch {
 int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               int n, const DSV4ExpertW **out,
                               DSV4CacheBatch *b);
+
+/* Engine-facing wrappers: one batch is owned by the cache. */
+int dsv4_cache_begin(DSV4Cache *c, int layer, const int *experts, int n,
+                     const DSV4ExpertW **out);
+int dsv4_cache_end(DSV4Cache *c, const DSV4ExpertW **out);
+int dsv4_cache_wait(DSV4Cache *c, int *k);
+int dsv4_cache_try(DSV4Cache *c, int *k);
 int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
                             DSV4CacheBatch *b);
 

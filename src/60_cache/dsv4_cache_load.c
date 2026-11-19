@@ -12,34 +12,29 @@
  * slot is chosen, so a request that cannot be satisfied costs nothing. Reading
  * straight into the victim slot and clearing it on failure threw away a
  * perfectly good cached expert because a DIFFERENT one was missing. */
-int dsv4_cache_resolve(DSV4Cache *c, int layer, int expert,
-                       const DSV4Tensor *out[6])
+int dsv4_cache_resolve(DSV4Cache *c, int layer, int expert, DSV4Loc out[6])
 {
-    static const char *wn[3] = { "w1", "w2", "w3" };
-    char name[224];
-
+    const DSV4Loc *loc = dsv4_st_expert(c->st, layer, expert);
+    if (!loc) {
+        fprintf(stderr, "dsv4_cache: expert %d of layer %d is not indexed\n",
+                expert, layer);
+        return -1;
+    }
     for (int i = 0; i < 3; i++) {
-        snprintf(name, sizeof name, "layers.%d.ffn.experts.%d.%s.weight",
-                 layer, expert, wn[i]);
-        const DSV4Tensor *t = dsv4_st_find(c->st, name);
-        if (!t || t->nbytes != c->len_w[i]) {
-            fprintf(stderr, "dsv4_cache: %s %s (%lld bytes, expected %lld)\n",
-                    name, t ? "has the wrong size" : "is missing",
-                    t ? (long long)t->nbytes : 0LL, (long long)c->len_w[i]);
+        out[i * 2] = loc[i * 2];
+        out[i * 2 + 1] = loc[i * 2 + 1];
+        if (out[i * 2].nbytes != c->len_w[i]) {
+            fprintf(stderr, "dsv4_cache: layer %d expert %d w%d has %lld bytes, "
+                            "expected %lld\n", layer, expert, i + 1,
+                    (long long)out[i * 2].nbytes, (long long)c->len_w[i]);
             return -1;
         }
-        out[i * 2] = t;
-
-        snprintf(name, sizeof name, "layers.%d.ffn.experts.%d.%s.scale",
-                 layer, expert, wn[i]);
-        const DSV4Tensor *sc = dsv4_st_find(c->st, name);
-        if (!sc || sc->nbytes != c->len_s[i]) {
-            fprintf(stderr, "dsv4_cache: %s %s (%lld bytes, expected %lld)\n",
-                    name, sc ? "has the wrong size" : "is missing",
-                    sc ? (long long)sc->nbytes : 0LL, (long long)c->len_s[i]);
+        if (out[i * 2 + 1].nbytes != c->len_s[i]) {
+            fprintf(stderr, "dsv4_cache: layer %d expert %d w%d scale has "
+                            "%lld bytes, expected %lld\n", layer, expert, i + 1,
+                    (long long)out[i * 2 + 1].nbytes, (long long)c->len_s[i]);
             return -1;
         }
-        out[i * 2 + 1] = sc;
     }
     return 0;
 }
@@ -50,19 +45,19 @@ int dsv4_cache_resolve(DSV4Cache *c, int layer, int expert,
  * than six separate reads. The cache stats from `make e2e` show the
  * effect. A short read leaves the slot
  * unusable, so the caller must clear the key. */
-int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
+int dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Loc t[6],
                     unsigned char *bounce, uint64_t *bytes_read)
 {
     /* (file offset, length, shard, which tensor), in slot order: s,s,s,w,w,w. */
     struct { int64_t foff, len; int shard, idx; } r[6];
     for (int i = 0; i < 3; i++) {
-        r[i].foff     = t[i * 2 + 1]->off;
-        r[i].len      = t[i * 2 + 1]->nbytes;
-        r[i].shard    = t[i * 2 + 1]->shard;
+        r[i].foff     = t[i * 2 + 1].off;
+        r[i].len      = t[i * 2 + 1].nbytes;
+        r[i].shard    = t[i * 2 + 1].shard;
         r[i].idx      = i;
-        r[3 + i].foff = t[i * 2]->off;
-        r[3 + i].len  = t[i * 2]->nbytes;
-        r[3 + i].shard = t[i * 2]->shard;
+        r[3 + i].foff = t[i * 2].off;
+        r[3 + i].len  = t[i * 2].nbytes;
+        r[3 + i].shard = t[i * 2].shard;
         r[3 + i].idx  = 3 + i;
     }
     for (int i = 1; i < 6; i++)              /* six elements: insertion sort */

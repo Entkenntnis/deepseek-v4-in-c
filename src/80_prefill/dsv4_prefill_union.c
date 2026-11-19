@@ -61,7 +61,7 @@ static int union_prepare(DSV4Prefill *p, int L, int n)
                 p->ex_order[nord++] = e;
             }
         }
-    if (p->src->sort) p->src->sort(p->src->ctx, L, p->ex_order, nord);
+    dsv4_cache_sort_experts(p->cache, L, p->ex_order, nord);
     return nord;
 }
 
@@ -92,9 +92,9 @@ int dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n)
 
     for (int j = 0; j < nord; j++) p->pf_ex[j] = NULL;
 
-    const int rc = p->src->begin(p->src->ctx, L, p->ex_order, nord, p->pf_ex);
+    const int rc = dsv4_cache_begin(p->cache, L, p->ex_order, nord, p->pf_ex);
     if (rc != 0) {
-        p->src->end(p->src->ctx, p->pf_ex);
+        dsv4_cache_end(p->cache, p->pf_ex);
         p->pf_prepared = 0;
         return -1;
     }
@@ -105,7 +105,7 @@ int dsv4_prefill_moe_prefetch(DSV4Prefill *p, int L, int n)
 void dsv4_prefill_moe_abort(DSV4Prefill *p)
 {
     if (!p || !p->pf_active) return;
-    p->src->end(p->src->ctx, p->pf_ex);
+    dsv4_cache_end(p->cache, p->pf_ex);
     p->pf_active = 0;
     p->pf_prepared = 0;
 }

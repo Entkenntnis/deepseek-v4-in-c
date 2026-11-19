@@ -1,134 +1,169 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_bind_layer.c - the per-layer plan. This is the single declaration of
- * what a layer needs; both the resident and the streamed binder walk it. */
+/* dsv4_bind_layer.c - slot -> DSV4LayerW mapping and the bind loop. */
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "dsv4_bind.h"
-#include "dsv4_bind_int.h"
+#include "dsv4_trunk.h"
 
-/* The compressor's projections widen by coff: 2 on the overlapped ratio-4 path
- * and 1 otherwise (model.py: self.overlap = ratio == 4). */
-static int comp_coff(int ratio) { return ratio == 4 ? 2 : 1; }
+/* ---- layer slots ---- */
+enum {
+    L_ATTN_NORM = 1, L_FFN_NORM, L_ATTN_SINK, L_Q_NORM, L_KV_NORM,
+    L_WQ_A = 10, L_WQ_A_S, L_WQ_B, L_WQ_B_S, L_WKV, L_WKV_S,
+    L_WO_A, L_WO_A_S, L_WO_B, L_WO_B_S,
+    L_COMP_APE = 20, L_COMP_NORM, L_COMP_WKV, L_COMP_WGATE,
+    L_IDX_WQ_B = 24, L_IDX_WQ_B_S, L_IDX_WP,
+    L_IDX_COMP_APE, L_IDX_COMP_NORM, L_IDX_COMP_WKV, L_IDX_COMP_WGATE,
+    L_HC_ATTN_FN = 31, L_HC_ATTN_BASE, L_HC_ATTN_SCALE,
+    L_HC_FFN_FN, L_HC_FFN_BASE, L_HC_FFN_SCALE,
+    L_GATE = 40, L_TID2EID, L_BIAS,
+    L_SH_W1 = 50, L_SH_W1_S, L_SH_W2, L_SH_W2_S, L_SH_W3, L_SH_W3_S,
+    L_SLOT_MAX = 64
+};
 
-static void plan_compressor(DSV4BindPlan *p, const DSV4Cfg *c,
-                            DSV4CompressorW *w, int ratio, int head_dim,
-                            const char *base)
+enum { SK_NONE, SK_VEC, SK_I64, SK_QMAT, SK_SCALE };
+
+typedef struct {
+    uint16_t dst;      /* offsetof(DSV4LayerW, field) */
+    uint8_t  kind;
+} LayerSlot;
+
+static const LayerSlot layer_slots[L_SLOT_MAX] = {
+    [L_ATTN_NORM]  = { offsetof(DSV4LayerW, attn_norm), SK_VEC },
+    [L_FFN_NORM]   = { offsetof(DSV4LayerW, ffn_norm),  SK_VEC },
+    [L_ATTN_SINK]  = { offsetof(DSV4LayerW, attn.sink), SK_VEC },
+    [L_Q_NORM]     = { offsetof(DSV4LayerW, attn.q_norm), SK_VEC },
+    [L_KV_NORM]    = { offsetof(DSV4LayerW, attn.kv_norm), SK_VEC },
+
+    [L_WQ_A]   = { offsetof(DSV4LayerW, attn.wq_a), SK_QMAT },
+    [L_WQ_A_S] = { offsetof(DSV4LayerW, attn.wq_a), SK_SCALE },
+    [L_WQ_B]   = { offsetof(DSV4LayerW, attn.wq_b), SK_QMAT },
+    [L_WQ_B_S] = { offsetof(DSV4LayerW, attn.wq_b), SK_SCALE },
+    [L_WKV]    = { offsetof(DSV4LayerW, attn.wkv),  SK_QMAT },
+    [L_WKV_S]  = { offsetof(DSV4LayerW, attn.wkv),  SK_SCALE },
+    [L_WO_A]   = { offsetof(DSV4LayerW, attn.wo_a), SK_QMAT },
+    [L_WO_A_S] = { offsetof(DSV4LayerW, attn.wo_a), SK_SCALE },
+    [L_WO_B]   = { offsetof(DSV4LayerW, attn.wo_b), SK_QMAT },
+    [L_WO_B_S] = { offsetof(DSV4LayerW, attn.wo_b), SK_SCALE },
+
+    [L_COMP_APE]   = { offsetof(DSV4LayerW, attn.comp.ape),  SK_VEC },
+    [L_COMP_NORM]  = { offsetof(DSV4LayerW, attn.comp.norm), SK_VEC },
+    [L_COMP_WKV]   = { offsetof(DSV4LayerW, attn.comp.wkv),  SK_QMAT },
+    [L_COMP_WGATE] = { offsetof(DSV4LayerW, attn.comp.wgate), SK_QMAT },
+
+    [L_IDX_WQ_B]        = { offsetof(DSV4LayerW, attn.idx.wq_b), SK_QMAT },
+    [L_IDX_WQ_B_S]      = { offsetof(DSV4LayerW, attn.idx.wq_b), SK_SCALE },
+    [L_IDX_WP]          = { offsetof(DSV4LayerW, attn.idx.weights_proj), SK_QMAT },
+    [L_IDX_COMP_APE]    = { offsetof(DSV4LayerW, attn.idx.comp.ape),  SK_VEC },
+    [L_IDX_COMP_NORM]   = { offsetof(DSV4LayerW, attn.idx.comp.norm), SK_VEC },
+    [L_IDX_COMP_WKV]    = { offsetof(DSV4LayerW, attn.idx.comp.wkv),  SK_QMAT },
+    [L_IDX_COMP_WGATE]  = { offsetof(DSV4LayerW, attn.idx.comp.wgate), SK_QMAT },
+
+    [L_HC_ATTN_FN]    = { offsetof(DSV4LayerW, hc_attn.fn), SK_VEC },
+    [L_HC_ATTN_BASE]  = { offsetof(DSV4LayerW, hc_attn.base), SK_VEC },
+    [L_HC_ATTN_SCALE] = { offsetof(DSV4LayerW, hc_attn.scale), SK_VEC },
+    [L_HC_FFN_FN]     = { offsetof(DSV4LayerW, hc_ffn.fn), SK_VEC },
+    [L_HC_FFN_BASE]   = { offsetof(DSV4LayerW, hc_ffn.base), SK_VEC },
+    [L_HC_FFN_SCALE]  = { offsetof(DSV4LayerW, hc_ffn.scale), SK_VEC },
+
+    [L_GATE]    = { offsetof(DSV4LayerW, moe.gate), SK_QMAT },
+    [L_TID2EID] = { offsetof(DSV4LayerW, moe.tid2eid), SK_I64 },
+    [L_BIAS]    = { offsetof(DSV4LayerW, moe.bias), SK_VEC },
+
+    [L_SH_W1]   = { offsetof(DSV4LayerW, moe.shared.w1), SK_QMAT },
+    [L_SH_W1_S] = { offsetof(DSV4LayerW, moe.shared.w1), SK_SCALE },
+    [L_SH_W2]   = { offsetof(DSV4LayerW, moe.shared.w2), SK_QMAT },
+    [L_SH_W2_S] = { offsetof(DSV4LayerW, moe.shared.w2), SK_SCALE },
+    [L_SH_W3]   = { offsetof(DSV4LayerW, moe.shared.w3), SK_QMAT },
+    [L_SH_W3_S] = { offsetof(DSV4LayerW, moe.shared.w3), SK_SCALE },
+};
+
+static int widen_vector(const uint8_t *src, int64_t nbytes, int dtype,
+                        float *dst, size_t cap, size_t *woff)
 {
-    const int coff = comp_coff(ratio);
-    dsv4_bind_reqw(p, &w->ape,  (int64_t)ratio * coff * head_dim, "%s.ape", base);
-    dsv4_bind_reqw(p, &w->norm, head_dim, "%s.norm.weight", base);
-    dsv4_bind_reqq(p, &w->wkv, DSV4_WBF16, (int64_t)coff * head_dim, c->hidden,
-                   "%s.wkv", base);
-    dsv4_bind_reqq(p, &w->wgate, DSV4_WBF16, (int64_t)coff * head_dim, c->hidden,
-                   "%s.wgate", base);
+    const int esz = dsv4_st_elemsize((DSV4Dtype)dtype);
+    if (esz <= 0 || nbytes % esz) return -1;
+    const int64_t n = nbytes / esz;
+    const size_t need = (size_t)n * sizeof(float);
+    if (*woff + need > cap) return -1;
+
+    if (dtype == DSV4_DT_F32) {
+        memcpy(dst, src, (size_t)nbytes);
+    } else if (dtype == DSV4_DT_BF16) {
+        const uint16_t *p = (const uint16_t *)src;
+        for (int64_t i = 0; i < n; i++) dst[i] = dsv4_bf16_to_f32(p[i]);
+    } else {
+        return -1;
+    }
+    *woff = (*woff + need + 7) & ~(size_t)7;
+    return 0;
 }
 
-/* Everything one decoder layer needs, and NOTHING it must not have. The five
- * shapes come from compress_ratio, has_indexer and is_hash_routed. */
-static void plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L, DSV4LayerW *w)
+int dsv4_bind_layer(const DSV4Cfg *c, int layer,
+                    const struct DSV4TrunkLayer *lay,
+                    const unsigned char *run, DSV4LayerW *w,
+                    unsigned char *widen, size_t widen_cap)
 {
-    const int ratio = dsv4_compress_ratio(c, L);
-    const int hash  = dsv4_is_hash_routed(c, L);
-
     memset(w, 0, sizeof *w);
-    w->layer = L;
-    w->compress_ratio = ratio;
-    w->has_comp = (ratio != 0);
-    w->has_idx  = dsv4_has_indexer(c, L);
+    w->layer = layer;
+    w->compress_ratio = dsv4_compress_ratio(c, layer);
+    w->has_comp = w->compress_ratio != 0;
+    w->has_idx = dsv4_has_indexer(c, layer);
 
-    dsv4_bind_reqw(p, &w->attn_norm, c->hidden, "layers.%d.attn_norm.weight", L);
-    dsv4_bind_reqw(p, &w->ffn_norm,  c->hidden, "layers.%d.ffn_norm.weight",  L);
+    size_t woff = 0;
+    for (int i = 0; i < lay->nt; i++) {
+        const DSV4TrunkTensor *t = &lay->t[i];
+        if (t->slot <= 0 || t->slot >= L_SLOT_MAX ||
+            layer_slots[t->slot].kind == SK_NONE) {
+            fprintf(stderr, "dsv4_bind: layer %d has unknown slot %d\n",
+                    layer, t->slot);
+            return -1;
+        }
+        const LayerSlot *ls = &layer_slots[t->slot];
+        unsigned char *dst = (unsigned char *)w + ls->dst;
 
-    /* ---- attention ---- */
-    DSV4AttnW *a = &w->attn;
-    dsv4_bind_reqw(p, &a->sink,    c->n_heads,  "layers.%d.attn.attn_sink",      L);
-    dsv4_bind_reqw(p, &a->q_norm,  c->q_lora,   "layers.%d.attn.q_norm.weight",  L);
-    dsv4_bind_reqw(p, &a->kv_norm, c->head_dim, "layers.%d.attn.kv_norm.weight", L);
-
-    dsv4_bind_reqq(p, &a->wq_a, DSV4_WFP8, c->q_lora, c->hidden,
-                   "layers.%d.attn.wq_a", L);
-    dsv4_bind_reqq(p, &a->wq_b, DSV4_WFP8, (int64_t)c->n_heads * c->head_dim,
-                   c->q_lora, "layers.%d.attn.wq_b", L);
-    dsv4_bind_reqq(p, &a->wkv,  DSV4_WFP8, c->head_dim, c->hidden,
-                   "layers.%d.attn.wkv", L);
-    /* The output projection is low-rank AND grouped. The column count is gw,
-     * NOT hidden: Flash makes them equal, and writing c->hidden here encoded a
-     * coincidence as a rule and rejected a config where they differ. */
-    const int64_t gw = (int64_t)c->n_heads * c->head_dim / c->o_groups;
-    dsv4_bind_reqq(p, &a->wo_a, DSV4_WFP8, (int64_t)c->o_lora * c->o_groups, gw,
-                   "layers.%d.attn.wo_a", L);
-    dsv4_bind_reqq(p, &a->wo_b, DSV4_WFP8, c->hidden,
-                   (int64_t)c->o_lora * c->o_groups, "layers.%d.attn.wo_b", L);
-
-    /* HCA. Absent on ratio-0 layers: model.py constructs no Compressor there. */
-    if (w->has_comp) {
-        char nm[192];
-        snprintf(nm, sizeof nm, "layers.%d.attn.compressor", L);
-        plan_compressor(p, c, &a->comp, ratio, c->head_dim, nm);
+        switch (ls->kind) {
+        case SK_VEC: {
+            const void *p = run + t->off;
+            if (t->dtype != DSV4_DT_F32) {
+                if (!widen) {
+                    fprintf(stderr, "dsv4_bind: layer %d slot %d needs a "
+                                    "widen buffer\n", layer, t->slot);
+                    return -1;
+                }
+                unsigned char *at = widen + woff;
+                if (widen_vector(run + t->off, t->nbytes, t->dtype,
+                                 (float *)at, widen_cap, &woff) != 0) {
+                    fprintf(stderr, "dsv4_bind: layer %d slot %d cannot "
+                                    "widen (dtype %d, %lld bytes)\n",
+                            layer, t->slot, t->dtype, (long long)t->nbytes);
+                    return -1;
+                }
+                p = at;
+            }
+            *(const void **)dst = p;
+            break;
+        }
+        case SK_I64:
+            *(const void **)dst = run + t->off;
+            break;
+        case SK_QMAT: {
+            DSV4QMat *q = (DSV4QMat *)dst;
+            q->wdt = t->wdt;
+            q->rows = t->rows;
+            q->cols = t->cols;
+            q->blk_r = t->blk_r;
+            q->blk_c = t->blk_c;
+            q->w = run + t->off;
+            break;
+        }
+        case SK_SCALE:
+            ((DSV4QMat *)dst)->s = run + t->off;
+            break;
+        default:
+            return -1;
+        }
     }
-
-    /* CSA. Present ONLY where the ratio is 4. Its compressor is narrower: it
-     * works in index_head_dim, not head_dim. */
-    if (w->has_idx) {
-        char nm[192];
-        dsv4_bind_reqq(p, &a->idx.wq_b, DSV4_WFP8,
-                       (int64_t)c->index_n_heads * c->index_head_dim, c->q_lora,
-                       "layers.%d.attn.indexer.wq_b", L);
-        dsv4_bind_reqq(p, &a->idx.weights_proj, DSV4_WBF16, c->index_n_heads,
-                       c->hidden, "layers.%d.attn.indexer.weights_proj", L);
-        snprintf(nm, sizeof nm, "layers.%d.attn.indexer.compressor", L);
-        plan_compressor(p, c, &a->idx.comp, ratio, c->index_head_dim, nm);
-    }
-
-    /* ---- mHC. mix_hc rows per block, 3 scales (pre, post, comb). ---- */
-    {
-        char nm[192];
-        snprintf(nm, sizeof nm, "layers.%d.hc_attn", L);
-        dsv4_bind_plan_hc(p, c, &w->hc_attn, dsv4_mix_hc(c), 3, nm);
-        snprintf(nm, sizeof nm, "layers.%d.hc_ffn", L);
-        dsv4_bind_plan_hc(p, c, &w->hc_ffn,  dsv4_mix_hc(c), 3, nm);
-    }
-
-    /* ---- MoE ---- */
-    DSV4MoeW *mo = &w->moe;
-    dsv4_bind_reqq(p, &mo->gate, DSV4_WBF16, c->n_experts, c->hidden,
-                   "layers.%d.ffn.gate", L);
-    /* Exactly one of these two exists. Requesting both fails on every layer;
-     * requesting neither loses the routing. */
-    if (hash)
-        dsv4_bind_reqn(p, (const void **)&mo->tid2eid,
-                       (int64_t)c->vocab * c->topk, "layers.%d.ffn.gate.tid2eid", L);
-    else
-        dsv4_bind_reqw(p, &mo->bias, c->n_experts, "layers.%d.ffn.gate.bias", L);
-
-    /* The shared expert is FP8 and resident. Routed experts are FP4 and
-     * streamed, so they never appear here. */
-    for (int i = 1; i <= 3; i++) {
-        DSV4QMat *q = (i == 1) ? &mo->shared.w1
-                    : (i == 3) ? &mo->shared.w3 : &mo->shared.w2;
-        const int64_t inter = (int64_t)c->moe_inter * c->n_shared;
-        const char *f = "layers.%d.ffn.shared_experts.w%d";
-        if (i == 2) dsv4_bind_reqq(p, q, DSV4_WFP8, c->hidden, inter, f, L, i);
-        else        dsv4_bind_reqq(p, q, DSV4_WFP8, inter, c->hidden, f, L, i);
-    }
-}
-
-int dsv4_bind_layer_plan(const DSV4Cfg *c, int L,
-                         int (*emit)(void *ctx, int i, const char *name),
-                         void *ctx)
-{
-    DSV4BindPlan p; memset(&p, 0, sizeof p);
-    DSV4LayerW tmp;
-    plan_layer(&p, c, L, &tmp);
-    if (p.bad) return -1;
-    for (int i = 0; i < p.n; i++)
-        if (emit && emit(ctx, i, p.r[i].name) != 0) return -1;
-    return p.n;
-}
-
-void dsv4_bind_plan_layer(DSV4BindPlan *p, const DSV4Cfg *c, int L,
-                          DSV4LayerW *w)
-{
-    plan_layer(p, c, L, w);
+    return 0;
 }

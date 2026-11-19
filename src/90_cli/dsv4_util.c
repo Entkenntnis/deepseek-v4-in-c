@@ -91,9 +91,7 @@ void dsv4_usage(const char *me)
 {
     fprintf(stderr,
             "usage: %s <model_dir> --trunk <dir> "
-            "[--budget GB|auto] [--ctx N] [--gen N] [--think] [--no-layers]\n"
-            "       [--threads N] [--pin off|all|p|e] [--readers N]\n"
-            "       [--reader-pin off|all|p|e] [--stream-miss N (default 6)]\n"
+            "[--budget GB|auto] [--ctx N] [--gen N]\n"
             "\n"
             "Speaks a line protocol on stdin/stdout: one command or event per\n"
             "line, whitespace-separated key=value fields, strings as hex:... .\n"

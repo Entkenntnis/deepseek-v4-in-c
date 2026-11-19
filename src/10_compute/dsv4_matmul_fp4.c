@@ -3,7 +3,6 @@
 #include <stdint.h>
 
 #include "dsv4_matmul.h"
-#include "dsv4_matmul_int.h"
 #include "dsv4_qmat_dec.h"
 
 /* Float inner block, float cross-block fold. The matmul gate bounds it in L2

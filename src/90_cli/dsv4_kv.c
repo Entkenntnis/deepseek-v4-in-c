@@ -12,8 +12,8 @@
 #include <sys/stat.h>
 
 #include "dsv4_serve_int.h"
-#include "dsv4_state_file.h"
-#include "dsv4_time.h"
+#include "dsv4_kvfile.h"
+#include "dsv4_util.h"
 
 static void model_tag(const char *dir, char *out, size_t cap)
 {
@@ -93,7 +93,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
 
     char tag[128];
     model_tag(e->model_dir, tag, sizeof tag);
-    if (dsv4_state_file_save(path, tag, &e->c, e->lst, e->ids, n) != 0) {
+    if (dsv4_kv_save(path, tag, &e->c, e->lst, e->ids, n) != 0) {
         dsv4_emit_kv_error("could not write the KV cache file");
         dsv4_cancel = 0;
         return;
@@ -123,9 +123,9 @@ void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
     char tag[128];
     model_tag(e->model_dir, tag, sizeof tag);
     int loaded = 0;
-    if (dsv4_state_file_load(path, tag, &e->c, e->lst, e->maxpos,
-                             e->ids, e->cap_ids, &loaded,
-                             n_expect > 0 ? tokens : NULL, n_expect) != 0) {
+    if (dsv4_kv_load(path, tag, &e->c, e->lst, e->maxpos,
+                         e->ids, e->cap_ids, &loaded,
+                         n_expect > 0 ? tokens : NULL, n_expect) != 0) {
         dsv4_emit_kv_error("cached prefix rejected (see stderr)");
         return;
     }

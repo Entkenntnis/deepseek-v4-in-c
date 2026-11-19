@@ -38,8 +38,8 @@ int  dsv4_cache_enable_prefetch(DSV4Cache *c);
 void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s);
 int  dsv4_cache_rq_push(DSV4Cache *c, DSV4CacheBatch *b, int j);
 int  dsv4_cache_resolve(DSV4Cache *c, int layer, int expert,
-                        const DSV4Tensor *out[6]);
-int  dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Tensor *t[6],
+                        DSV4Loc out[6]);
+int  dsv4_cache_load(DSV4Cache *c, DSV4Slot *s, const DSV4Loc t[6],
                      unsigned char *bounce, uint64_t *bytes_read);
 int  dsv4_cache_claim_slot(DSV4Cache *c, int layer, int expert,
                            const int *claimed, int nclaim);

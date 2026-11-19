@@ -46,11 +46,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--budget", default=DEFAULT_BUDGET,
                    help="GB or auto (default: auto)")
     p.add_argument("--ctx", type=int, default=DEFAULT_CTX)
-    p.add_argument("--threads", type=int)
-    p.add_argument("--pin", choices=("off", "all", "p", "e"))
-    p.add_argument("--readers", type=int)
-    p.add_argument("--reader-pin", choices=("off", "all", "p", "e"))
-    p.add_argument("--stream-miss", type=int)
     p.add_argument("--output", default=None,
                    help=f"cache file to write (default: {DEFAULT_KV})")
     return p.parse_args()
@@ -100,12 +95,6 @@ def build_command(a: argparse.Namespace) -> list[str]:
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
     ]
-    for flag, value in (("--threads", a.threads), ("--pin", a.pin),
-                        ("--readers", a.readers),
-                        ("--reader-pin", a.reader_pin),
-                        ("--stream-miss", a.stream_miss)):
-        if value is not None:
-            cmd += [flag, str(value)]
     return cmd
 
 

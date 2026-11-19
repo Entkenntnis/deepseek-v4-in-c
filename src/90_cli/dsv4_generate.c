@@ -3,10 +3,10 @@
 #include <stdio.h>
 
 #include "dsv4_serve_int.h"
-#include "dsv4_time.h"
+#include "dsv4_util.h"
 
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
-                          int ngen, int eos, int think, int emit_layers)
+                          int ngen, int eos, int emit_layers)
 {
     const double t0 = dsv4_now_s();
     dsv4_cancel = 0;

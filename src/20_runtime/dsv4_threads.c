@@ -4,7 +4,7 @@
  * The CPU groups are compiled in, not discovered. This engine is tuned for one
  * machine (Intel Core Ultra 7 258V) and a sysfs probe would be a portability
  * claim the rest of the file does not make. The two constants below are the
- * whole CPU policy; change them for different silicon, or use --pin off/all.
+ * whole CPU policy; change them for different silicon.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -31,15 +31,6 @@ static char g_desc[192] = "threads: inherited";
 
 static cpu_set_t g_orig;
 static int       g_have_orig;
-
-int dsv4_threads_parse_pin(const char *s)
-{
-    if (!s || !*s || !strcmp(s, "off") || !strcmp(s, "none")) return DSV4_PIN_OFF;
-    if (!strcmp(s, "all")) return DSV4_PIN_ALL;
-    if (!strcmp(s, "p") || !strcmp(s, "pcores")) return DSV4_PIN_P;
-    if (!strcmp(s, "e") || !strcmp(s, "ecores")) return DSV4_PIN_E;
-    return -1;
-}
 
 static const char *pin_name(int p)
 {

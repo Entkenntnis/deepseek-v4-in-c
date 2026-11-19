@@ -5,6 +5,8 @@
 
 #include "dsv4.h"
 
+typedef struct DSV4Cache DSV4Cache;
+
 /* Per-layer scratch, allocated once and reused. A decode step touches every
  * buffer here once per layer per token, so churning them would dominate.
  *
@@ -28,31 +30,6 @@ typedef struct {
     float  topk_w[DSV4_MAX_TOPK];
     void  *arena;
 } DSV4Scratch;
-
-/* A source of routed experts.
- *
- * Routed experts are streamed, not resident (13.4 MB each, 137 GB for Flash).
- * NULL means the expert could not be provided, which is a correctness failure
- * the caller must surface: silently skipping it routes the token through fewer
- * experts than the model specifies.
- *
- * begin() decides the whole layer's top-k and returns at once, filling out[k]
- * for residents and NULL for misses; end() waits for the misses. Between them
- * the caller owns the CPU, so resident matmuls overlap the reads. Both or
- * neither. wait_any() additionally hands back each miss as its read lands.
- * Output is identical on every path: the sum still runs in k order. */
-typedef struct {
-    /* Serial fallback, used by synthetic sources (the layer gate). */
-    const DSV4ExpertW *(*get)(void *ctx, int layer, int expert);
-    int (*begin)(void *ctx, int layer, const int *experts, int n,
-                 const DSV4ExpertW **out);
-    int (*end)(void *ctx, const DSV4ExpertW **out);
-    int (*wait_any)(void *ctx, int *k);
-    int (*try_any)(void *ctx, int *k);   /* same, non-blocking, optional */
-    /* Optional: reorder a layer's distinct experts into checkpoint order. */
-    void (*sort)(void *ctx, int layer, int *experts, int n);
-    void *ctx;
-} DSV4ExpertSrc;
 
 /* max_pos must be the same bound passed to dsv4_state_init: the indexer's row
  * count is a function of it, so a scratch sized differently is sized by
@@ -96,8 +73,17 @@ void dsv4_state_snapshot_restore(DSV4StateSnapshot *s);
 /* `h` is [hc_mult][hidden] in and out. cs/sn are the layer's RoPE table; a
  * compressed layer takes the compress table, ratio 0 the plain one. */
 void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
-                        DSV4Scratch *s, const DSV4ExpertSrc *src,
+                        DSV4Scratch *s, DSV4Cache *cache,
                         DSV4LayerState *st, const float *cs, const float *sn,
                         int pos, int token_id);
+
+
+/* Seams inside the decoder implementation. */
+void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
+                          const DSV4Cfg *c, DSV4Scratch *s, DSV4LayerState *st,
+                          const float *cs, const float *sn, int pos, int n_idx);
+void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
+                    const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
+                    int layer, int token_id);
 
 #endif /* DSV4_LAYER_H */

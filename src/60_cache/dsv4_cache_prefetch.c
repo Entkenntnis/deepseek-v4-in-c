@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
+#include "dsv4_trunk.h"
 
 int dsv4_cache_enable_prefetch(DSV4Cache *c)
 {
@@ -20,8 +22,6 @@ int dsv4_cache_enable_prefetch(DSV4Cache *c)
     return 0;
 }
 
-/* True when the main cache can hold `n` prefetched experts AND still leave one
- * layer's top-k worth of slots for normal misses. */
 static int pf_has_room(const DSV4Cache *c, int n)
 {
     return c->pf_enabled && c->nrth > 0 && n > 0 &&
@@ -35,9 +35,7 @@ static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
     if (!pf_has_room(c, n)) return 0;
 
     pthread_mutex_lock(&c->rmx);
-    /* The previous token's prefetch must have landed before its batch is
-     * reused. Its slots are normal residents by now. */
-    while (c->pf_batch->ntodo > c->pf_batch->rdone)
+        while (c->pf_batch->ntodo > c->pf_batch->rdone)
         pthread_cond_wait(&c->rdone, &c->rmx);
     c->pf_batch->ntodo = 0;
     c->pf_batch->rdone = 0;
@@ -58,7 +56,7 @@ static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
             continue;
         }
 
-        const DSV4Tensor *t[6];
+        DSV4Loc t[6];
         if (dsv4_cache_resolve(c, layer, expert, t) != 0) continue;
         const int slot = dsv4_cache_claim_slot(c, layer, expert, NULL, 0);
         if (slot < 0) break;              /* cannot happen with pf_has_room */
@@ -97,17 +95,16 @@ int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id)
 
     int layers[DSV4_MAX_PREFETCH], experts[DSV4_MAX_PREFETCH], n = 0;
     for (int L = 0; L < cfg->num_hash_layers && L < cfg->n_layers; L++) {
-        char name[224];
-        snprintf(name, sizeof name, "layers.%d.ffn.gate.tid2eid", L);
-        const DSV4Tensor *t = dsv4_st_find(c->st, name);
+        const DSV4TrunkTensor *t = dsv4_trunk_slot(c->tr, L,
+                                                   DSV4_TRUNK_SLOT_TID2EID);
         if (!t || t->dtype != DSV4_DT_I64) continue;
         const int64_t row_bytes = (int64_t)cfg->topk * (int64_t)sizeof(int64_t);
         if ((int64_t)(token_id + 1) * row_bytes > t->nbytes) continue;
-        DSV4Tensor row = *t;
-        row.off += (int64_t)token_id * row_bytes;
-        row.nbytes = row_bytes;
+        const int64_t file_off = c->tr->lay[L].file_off + t->off
+                               + (int64_t)token_id * row_bytes;
         int64_t vals[DSV4_MAX_TOPK];
-        if (dsv4_st_read(c->st, &row, vals) != row_bytes) continue;
+        if (pread(c->tr->bfd, vals, (size_t)row_bytes, (off_t)file_off)
+            != row_bytes) continue;
         for (int k = 0; k < cfg->topk && n < DSV4_MAX_PREFETCH; k++) {
             layers[n] = L;
             experts[n] = (int)vals[k];

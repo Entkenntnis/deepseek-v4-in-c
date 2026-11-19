@@ -16,6 +16,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include "dsv4_layer.h"
+#include "dsv4_cache.h"
+#include "dsv4_cache_int.h"
 
 static int fails = 0;
 #define CHECK(cond, ...) do {                                                  \
@@ -65,12 +67,8 @@ static void mk_bf16(DSV4QMat *m, int rows, int cols, unsigned seed, float amp)
 }
 
 static DSV4ExpertW g_experts[NEXP];
-
-static const DSV4ExpertW *get_expert(void *ctx, int layer, int e)
-{
-    (void)ctx; (void)layer;
-    return (e >= 0 && e < NEXP) ? &g_experts[e] : NULL;
-}
+static DSV4Cache  g_cache;
+static int        g_cache_live;
 
 static void mk_expert(DSV4ExpertW *e, unsigned seed)
 {
@@ -82,6 +80,21 @@ static void mk_expert(DSV4ExpertW *e, unsigned seed)
 static DSV4Cfg   g_cfg;
 static DSV4LayerW g_w;
 static float *g_hcfn_a, *g_hcfn_f;
+
+static void cache_build(void)
+{
+    if (g_cache_live) { dsv4_cache_free(&g_cache); g_cache_live = 0; }
+    DSV4St st;
+    memset(&st, 0, sizeof st);
+    if (dsv4_cache_init(&g_cache, &st, NULL, &g_cfg, 1u << 20) != 0) return;
+    g_cache_live = 1;
+    for (int e = 0; e < NEXP && e < g_cache.nslot; e++) {
+        g_cache.slot[e].layer = 0;
+        g_cache.slot[e].expert = e;
+        g_cache.slot[e].pending = 0;
+        g_cache.slot[e].w = g_experts[e];
+    }
+}
 
 static void build(int hash_routed)
 {
@@ -141,6 +154,7 @@ static void build(int hash_routed)
     }
     mk_expert(&g_w.moe.shared, 50);
     for (int e = 0; e < NEXP; e++) mk_expert(&g_experts[e], 60u + (unsigned)e * 10u);
+    cache_build();
 }
 
 int main(void)
@@ -156,11 +170,6 @@ int main(void)
             sn[t * (RD / 2) + i] = sinf((float)t * 0.1f);
         }
 
-    /* Named, so adding a member to DSV4ExpertSrc cannot silently
-     * shift what this gate is testing. get() only: these gates check
-     * the arithmetic, and the fetch path has its own. */
-    DSV4ExpertSrc src = { .get = get_expert };
-
     printf("\n-- GATE 1  a block runs and keeps the stream finite --\n");
     {
         build(0);
@@ -173,7 +182,7 @@ int main(void)
         fill(h, hcd, 77, 0.1f);
         memcpy(before, h, (size_t)hcd * sizeof(float));
 
-        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 3);
+        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 3);
 
         int finite = 0, changed = 0;
         for (int i = 0; i < hcd; i++) {
@@ -200,10 +209,10 @@ int main(void)
         memcpy(h2, h1, (size_t)hcd * sizeof(float));
 
         dsv4_state_init(&lstate, &g_cfg, 0, 64);
-        dsv4_layer_forward(h1, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 1);
+        dsv4_layer_forward(h1, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 1);
         dsv4_state_free(&lstate);
         dsv4_state_init(&lstate, &g_cfg, 0, 64);
-        dsv4_layer_forward(h2, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 2);
+        dsv4_layer_forward(h2, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 2);
 
         CHECK(memcmp(h1, h2, (size_t)hcd * sizeof(float)) != 0,
               "tokens 1 and 2 gave identical output; token_id is not reaching "
@@ -225,10 +234,10 @@ int main(void)
         memcpy(h2, h1, (size_t)hcd * sizeof(float));
 
         dsv4_state_init(&lstate, &g_cfg, 0, 64);
-        dsv4_layer_forward(h1, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 1);
+        dsv4_layer_forward(h1, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 1);
         dsv4_state_free(&lstate);
         dsv4_state_init(&lstate, &g_cfg, 0, 64);
-        dsv4_layer_forward(h2, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 9);
+        dsv4_layer_forward(h2, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 9);
 
         CHECK(memcmp(h1, h2, (size_t)hcd * sizeof(float)) == 0,
               "a scored layer's output depends on token_id; it must not");
@@ -249,7 +258,7 @@ int main(void)
         int distinct = 0;
         for (int pos = 0; pos < WIN + 2; pos++) {
             memcpy(prev, h, (size_t)hcd * sizeof(float));
-        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, pos, 3);
+        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, pos, 3);
             for (int i = 0; i < hcd; i++)
                 if (!isfinite(h[i])) { CHECK(0, "non-finite at pos %d", pos); break; }
             if (memcmp(prev, h, (size_t)hcd * sizeof(float)) != 0) distinct++;
@@ -287,7 +296,7 @@ int main(void)
         fill(in, hcd, 99, 0.1f);
 
         memcpy(h, in, (size_t)hcd * sizeof(float));
-        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 3);
+        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 3);
         float ref[HC * HID]; memcpy(ref, h, sizeof ref);
 
         /* Zero wo_b so attention contributes nothing to x, leaving only the
@@ -297,7 +306,7 @@ int main(void)
         g_w.attn.wo_b.w = zeros;
         memcpy(h, in, (size_t)hcd * sizeof(float));
         dsv4_state_free(&lstate); dsv4_state_init(&lstate, &g_cfg, 0, 64);
-        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &src, &lstate, cs, sn, 0, 3);
+        dsv4_layer_forward(h, &g_w, &g_cfg, &s, &g_cache, &lstate, cs, sn, 0, 3);
 
         CHECK(memcmp(ref, h, sizeof ref) != 0,
               "zeroing the attention output changed nothing; attention is not "
@@ -314,6 +323,7 @@ int main(void)
 
     printf("\n");
     if (fails) { printf("LAYER GATE FAILED: %d check(s)\n", fails); return 1; }
+    if (g_cache_live) dsv4_cache_free(&g_cache);
     printf("LAYER GATE PASSED\n");
     return 0;
 }

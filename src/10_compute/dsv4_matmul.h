@@ -42,4 +42,13 @@ void dsv4_mmq_n(float *y, const float *x, const DSV4QMat *m, int nt);
 /* The single-token dispatch. */
 void dsv4_mmq(float *y, const float *x, const DSV4QMat *m);
 
+
+/* per-format bodies used by the dispatcher */
+void bf16_n(float *y, const float *x, const uint16_t *W,
+            int in, int out, int nt);
+void fp8_n(float *y, const float *x, const uint8_t *W, const uint8_t *S,
+           int in, int out, int blk_r, int blk_c, int nt);
+void fp4_n(float *y, const float *x, const uint8_t *W, const uint8_t *S,
+           int in, int out, int blk_r, int blk_c, int nt);
+
 #endif /* DSV4_MATMUL_H */

@@ -1,14 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_trunk.c - open and size the streamed trunk. */
-
-/* O_DIRECT is a GNU extension, so the feature macro has to precede EVERY libc
- * header. Defining it after an include silently leaves O_DIRECT undeclared and
- * the fallback path becomes the only path -- a large slowdown that compiles. */
-#ifndef _GNU_SOURCE
+/* dsv4_trunk.c - open, stream and bind the dense trunk. */
 #define _GNU_SOURCE
-#endif
-
-#include "dsv4_portable_io.h"   /* then: sets _DARWIN_C_SOURCE before libc */
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -17,17 +9,40 @@
 #include <unistd.h>
 
 #include "dsv4_trunk.h"
-#include "dsv4_trunk_int.h"
+#include "dsv4_bind.h"
+
+int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
+{
+    const int64_t off = tr->lay[L].file_off;
+    int64_t want = tr->lay[L].nbytes;
+    if (tr->direct)
+        want = (want + DSV4_TRUNK_ALIGN - 1) / DSV4_TRUNK_ALIGN
+             * DSV4_TRUNK_ALIGN;
+
+    int64_t got = 0;
+    while (got < want) {
+        const ssize_t r = pread(tr->fd, dst + got, (size_t)(want - got),
+                                (off_t)(off + got));
+        if (r <= 0) {
+            if (r == 0 && got >= tr->lay[L].nbytes) break;
+            fprintf(stderr, "dsv4_trunk: short read on layer %d at %lld\n",
+                    L, (long long)(off + got));
+            return -1;
+        }
+        got += r;
+    }
+    return 0;
+}
 
 int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
                     int64_t budget_bytes)
 {
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
-    if (dsv4_trunk_load_manifest(tr, dir) != 0) { dsv4_trunk_close(tr); return -1; }
-    if (dsv4_trunk_build_maps(tr, c) != 0) {
-        fprintf(stderr, "dsv4_trunk: cannot resolve the bind map\n");
-        dsv4_trunk_close(tr); return -1;
+    tr->bfd = -1;
+    if (dsv4_trunk_load_manifest(tr, dir) != 0) {
+        dsv4_trunk_close(tr);
+        return -1;
     }
 
     char p[1024];
@@ -35,35 +50,32 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
     tr->fd = open(p, O_RDONLY | O_DIRECT);
     tr->direct = 1;
     if (tr->fd < 0) {
-        /* O_DIRECT is unavailable on some filesystems -- notably /mnt/c under
-         * WSL, where it works but much slower. Falling back keeps the engine
-         * CORRECT there; it does not make it fast. */
         tr->fd = open(p, O_RDONLY);
         tr->direct = 0;
         if (tr->fd < 0) { perror(p); dsv4_trunk_close(tr); return -1; }
-        fprintf(stderr, "dsv4_trunk: O_DIRECT unavailable on %s, using buffered "
-                        "reads (expect a large slowdown)\n", p);
+        fprintf(stderr, "dsv4_trunk: O_DIRECT unavailable on %s, using "
+                        "buffered reads (expect a large slowdown)\n", p);
     }
-    dsv4_set_direct(tr->fd);
+    tr->bfd = open(p, O_RDONLY);
+    if (tr->bfd < 0) { dsv4_trunk_close(tr); return -1; }
 
-    /* Widest layer decides the slot size, because ring slots are uniform. */
     int64_t widest = 0;
-    for (int L = 0; L < tr->n_layers; L++)
+    tr->widen_cap = 0;
+    for (int L = 0; L < tr->n_layers; L++) {
         if (tr->lay[L].nbytes > widest) widest = tr->lay[L].nbytes;
-    /* Room for an O_DIRECT read widened out to the enclosing aligned window. */
+        if (tr->lay[L].widen_bytes > (int64_t)tr->widen_cap)
+            tr->widen_cap = (size_t)tr->lay[L].widen_bytes;
+    }
     tr->slot_bytes = (widest + 2 * DSV4_TRUNK_ALIGN + DSV4_TRUNK_ALIGN - 1)
                    / DSV4_TRUNK_ALIGN * DSV4_TRUNK_ALIGN;
 
-    tr->widen_cap = dsv4_bind_widen_bytes(c);
     if (posix_memalign((void **)&tr->widen, DSV4_TRUNK_ALIGN,
                        tr->widen_cap ? tr->widen_cap : 1) != 0) {
-        dsv4_trunk_close(tr); return -1;
+        dsv4_trunk_close(tr);
+        return -1;
     }
 
-    /* Spend the budget on pinned layers first, keeping one ring slot. A pinned
-     * layer gets an EXACT allocation: sizing every pin like the widest layer
-     * would waste the difference on every narrower layer. */
-    int64_t left = budget_bytes - tr->slot_bytes - (int64_t)tr->widen_cap;
+        int64_t left = budget_bytes - tr->slot_bytes - (int64_t)tr->widen_cap;
     int npin = 0;
     while (npin < tr->n_layers && tr->lay[npin].nbytes > 0
            && left >= tr->lay[npin].nbytes) {
@@ -71,31 +83,23 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
         npin++;
     }
     tr->npin = npin;
-    /* Never more slots than unpinned layers to put in them: a generous budget
-     * otherwise asks for thousands of slots and the allocation fails, so an
-     * over-provisioned machine could not open the trunk at all.
-     *
-     * Zero is the right answer when every layer is pinned. The old clamp kept
-     * one slot "just in case", which allocated a whole layer's worth of memory
-     * that bind() can never touch (its ring branch requires L >= npin) and
-     * charged it against the budget, costing the expert cache slots. */
-    {
-        const int tail = tr->n_layers - tr->npin;
-        if (tail <= 0) {
-            tr->nslot = 0;
-        } else {
-            tr->nslot = 1 + (int)(left / tr->slot_bytes);
-            if (tr->nslot < 1) tr->nslot = 1;
-            if (tr->nslot > tail) tr->nslot = tail;
-        }
+
+    const int tail = tr->n_layers - tr->npin;
+    if (tail <= 0) {
+        tr->nslot = 0;
+    } else {
+        tr->nslot = 1 + (int)(left / tr->slot_bytes);
+        if (tr->nslot < 1) tr->nslot = 1;
+        if (tr->nslot > tail) tr->nslot = tail;
     }
 
     tr->pin = (unsigned char **)calloc((size_t)(npin ? npin : 1), sizeof(void *));
     tr->layer_of = tr->nslot
                  ? (int *)malloc((size_t)tr->nslot * sizeof(int)) : NULL;
-    tr->slot_of  = (int32_t *)malloc((size_t)tr->n_layers * sizeof(int32_t));
+    tr->slot_of = (int32_t *)malloc((size_t)tr->n_layers * sizeof(int32_t));
     if (!tr->pin || (tr->nslot && !tr->layer_of) || !tr->slot_of) {
-        dsv4_trunk_close(tr); return -1;
+        dsv4_trunk_close(tr);
+        return -1;
     }
     for (int i = 0; i < tr->nslot; i++) tr->layer_of[i] = -1;
     for (int i = 0; i < tr->n_layers; i++) tr->slot_of[i] = -1;
@@ -103,7 +107,8 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
     if (tr->nslot > 0 &&
         posix_memalign((void **)&tr->ring, DSV4_TRUNK_ALIGN,
                        (size_t)tr->nslot * (size_t)tr->slot_bytes) != 0) {
-        dsv4_trunk_close(tr); return -1;
+        dsv4_trunk_close(tr);
+        return -1;
     }
     return 0;
 }
@@ -119,16 +124,77 @@ void dsv4_trunk_close(DSV4Trunk *tr)
 {
     if (!tr) return;
     if (tr->fd >= 0) close(tr->fd);
+    if (tr->bfd >= 0) close(tr->bfd);
     for (int i = 0; i < tr->npin; i++) if (tr->pin) free(tr->pin[i]);
-    free(tr->pin); free(tr->ring); free(tr->widen);
-    free(tr->layer_of); free(tr->slot_of);
+    free(tr->pin);
+    free(tr->ring);
+    free(tr->widen);
+    free(tr->layer_of);
+    free(tr->slot_of);
     if (tr->lay) for (int L = 0; L < tr->n_layers; L++) {
-        for (int i = 0; i < tr->lay[L].nt; i++) free(tr->lay[L].t[i].name);
         free(tr->lay[L].t);
-        free(tr->lay[L].bind_of);
         free(tr->lay[L].bind_widen);
     }
     free(tr->lay);
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
+    tr->bfd = -1;
+}
+
+int dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w)
+{
+    if (L < 0 || L >= tr->n_layers || tr->lay[L].nt == 0) {
+        fprintf(stderr, "dsv4_trunk: layer %d is not in the trunk\n", L);
+        return -1;
+    }
+
+    unsigned char *run;
+    if (L < tr->npin) {
+        if (!tr->pin[L]) {
+            if (posix_memalign((void **)&tr->pin[L], DSV4_TRUNK_ALIGN,
+                               (size_t)tr->lay[L].nbytes
+                               + 2 * DSV4_TRUNK_ALIGN) != 0)
+                return -1;
+            if (dsv4_trunk_read_run(tr, L, tr->pin[L]) != 0) return -1;
+        }
+        run = tr->pin[L];
+    } else if (tr->slot_of[L] >= 0) {
+        run = tr->ring + (size_t)tr->slot_of[L] * (size_t)tr->slot_bytes;
+    } else {
+        if (tr->nslot <= 0) {
+            fprintf(stderr, "dsv4_trunk: layer %d is neither pinned nor has a "
+                            "ring slot\n", L);
+            return -1;
+        }
+        const int slot = tr->next_slot;
+        tr->next_slot = (tr->next_slot + 1) % tr->nslot;
+        if (tr->layer_of[slot] >= 0) tr->slot_of[tr->layer_of[slot]] = -1;
+        run = tr->ring + (size_t)slot * (size_t)tr->slot_bytes;
+        if (dsv4_trunk_read_run(tr, L, run) != 0) return -1;
+        tr->layer_of[slot] = L;
+        tr->slot_of[L] = slot;
+    }
+
+    DSV4TrunkLayer *lay = &tr->lay[L];
+    if (L < tr->npin && lay->bind_ready) {
+        *w = lay->bind_cached;
+        return 0;
+    }
+
+    if (L < tr->npin) {
+        unsigned char *wbuf = (unsigned char *)malloc(
+            lay->widen_bytes ? (size_t)lay->widen_bytes : 1);
+        if (!wbuf) return -1;
+        if (dsv4_bind_layer(c, L, lay, run, w, wbuf,
+                            (size_t)lay->widen_bytes) != 0) {
+            free(wbuf);
+            return -1;
+        }
+        lay->bind_widen = wbuf;
+        lay->bind_cached = *w;
+        lay->bind_ready = 1;
+        return 0;
+    }
+
+    return dsv4_bind_layer(c, L, lay, run, w, tr->widen, tr->widen_cap);
 }

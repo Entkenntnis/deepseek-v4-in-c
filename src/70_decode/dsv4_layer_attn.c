@@ -9,7 +9,6 @@
 #include "dsv4_kernels.h"
 #include "dsv4_matmul.h"
 #include "dsv4_layer.h"
-#include "dsv4_layer_int.h"
 
 void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
                           const DSV4Cfg *c, DSV4Scratch *s, DSV4LayerState *st,

@@ -13,9 +13,8 @@
  * pthreads can be sent to the E-cores, where they mostly sleep in pread().
  * The decode microbenchmarks that measured this were removed with the other C benchmarks.
  *
- * If this is built for another CPU, pass `--pin off` (or `--pin all`), or edit
- * DSV4_P_LO..DSV4_E_HI in dsv4_threads.c. The engine still works; it simply
- * runs with the inherited affinity.
+ * The policy is fixed at build time; edit DSV4_P_LO..DSV4_E_HI in
+ * dsv4_threads.c for different silicon.
  */
 #ifndef DSV4_THREADS_H
 #define DSV4_THREADS_H
@@ -34,9 +33,6 @@ typedef struct {
     int reader_pin;     /* DSV4Pin for the reader pthreads                 */
 } DSV4ThreadOpts;
 
-/* "off"/"none", "all", "p"/"pcores", "e"/"ecores". Returns -1 if unknown. */
-int  dsv4_threads_parse_pin(const char *s);
-
 /* Apply the policy. Must be called AFTER argument parsing and BEFORE the first
  * OpenMP region and before dsv4_cache_init(): libgomp worker threads and the
  * cache's reader pthreads inherit the calling thread's affinity mask. Returns
@@ -47,8 +43,7 @@ int  dsv4_threads_apply(const DSV4ThreadOpts *o);
  * reader thread at startup, because those threads inherited the compute mask. */
 void dsv4_threads_pin_current_reader(void);
 
-/* Reader-pool width chosen by the CLI (--readers). Returns 6 when unset. The
- * cache uses this directly; there is no environment override. */
+/* Fixed reader-pool width (6). The cache uses this directly. */
 int  dsv4_threads_readers(void);
 
 /* One-line human-readable description of what apply() did, for --help output,

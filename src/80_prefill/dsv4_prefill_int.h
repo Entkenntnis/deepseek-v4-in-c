@@ -15,9 +15,6 @@
  * can therefore be as large as the whole contested band. */
 #define DSV4_PF_CPU_ALWAYS_MAX 4
 #define DSV4_PF_GPU_ALWAYS_MIN 9
-/* Start offloading 5..8 to the CPU once at least this many 9+ buckets are
- * still pending. With 2 pending high buckets the CPU may take a 5; each
- * further high bucket moves the CPU limit up by one, until it reaches 8. */
 #define DSV4_PF_MID_BACKLOG    2
 #define DSV4_PREFILL_FILL_MAX  (DSV4_PF_GPU_ALWAYS_MIN - 1)
 
@@ -52,7 +49,7 @@ struct DSV4Prefill {
     const DSV4Cfg   *c;
     DSV4Trunk       *tr;
     DSV4LayerState  *lst;
-    const DSV4ExpertSrc *src;
+    DSV4Cache       *cache;
     const DSV4ModelW *mw;
     struct DSV4PrefillVk *vk;   /* NULL = no GPU backend, use CPU kernels */
     DSV4PrefillOpts  opt;
@@ -126,9 +123,6 @@ struct DSV4Prefill {
     float *idx_qb, *idx_wb;
 };
 
-/* Cancellation polling. The caller can distinguish a stop before any layer
- * touched model state from one that left partially written KV/compressor rows;
- * only the latter needs a context reset. */
 static inline int dsv4_prefill_cancelled(const DSV4Prefill *p)
 {
     return p->opt.is_cancelled && p->opt.is_cancelled(p->opt.cancel_ctx);
@@ -186,5 +180,19 @@ void dsv4_prefill_moe_abort(DSV4Prefill *p);
 void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
                            int tokens_done, int tokens_total,
                            double elapsed, double progress);
+
+
+typedef struct {
+    DSV4Prefill *p;
+    const DSV4ExpertW **ex;
+    const int *order;
+    int ng;
+    int *done;
+    int *remaining;
+    int *q, *qh, *qt;
+    int io_done;
+} DSV4PFillCtx;
+
+int dsv4_pf_union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f);
 
 #endif /* DSV4_PREFILL_INT_H */

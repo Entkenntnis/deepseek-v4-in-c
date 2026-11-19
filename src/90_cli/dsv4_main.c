@@ -21,12 +21,7 @@ int main(int argc, char **argv)
     const char *model = NULL, *trunkdir = NULL;
     double budget_gb = 8.0;
     int budget_auto = 0;
-    int ctx = 8192, ngen = 128, think = 0, layers = 1;
-    /* Readers sit on the E-cores by default: the prefill overlap keeps the
-     * P-cores busy with CPU fill while the GPU runs, and active OpenMP
-     * workers otherwise starve the reader pool. */
-    const char *pin = "p", *reader_pin = "e";
-    int threads = 4, readers = 6;
+    int ctx = 8192, ngen = 128;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-' && !model) { model = argv[i]; continue; }
@@ -43,17 +38,6 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) ngen = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
-            threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--pin") && i + 1 < argc) pin = argv[++i];
-        else if (!strcmp(argv[i], "--readers") && i + 1 < argc)
-            readers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--reader-pin") && i + 1 < argc)
-            reader_pin = argv[++i];
-        else if (!strcmp(argv[i], "--stream-miss") && i + 1 < argc)
-            dsv4_set_stream_miss(atoi(argv[++i]));
-        else if (!strcmp(argv[i], "--think")) think = 1;
-        else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { dsv4_usage(argv[0]); return 0; }
     }
     if (!model || !trunkdir) { dsv4_usage(argv[0]); return 2; }
@@ -67,15 +51,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "warning: cannot install cancel handler: %s\n",
                 strerror(errno));
 
-    /* Thread policy before engine_init(): that is where the expert cache
-     * creates its reader pthreads, and they inherit the calling thread's mask. */
-    const int pin_id = dsv4_threads_parse_pin(pin);
-    const int rpin_id = dsv4_threads_parse_pin(reader_pin);
-    if (pin_id < 0 || rpin_id < 0) {
-        fprintf(stderr, "invalid --pin/--reader-pin (use off|all|p|e)\n");
-        return 2;
-    }
-    const DSV4ThreadOpts topts = { pin_id, threads, readers, rpin_id };
+    /* Thread policy before engine_init(): the cache's reader pthreads inherit
+     * the calling thread's mask. This is fixed, not a command-line option. */
+    const DSV4ThreadOpts topts = { DSV4_PIN_P, 4, 6, DSV4_PIN_E };
     dsv4_threads_apply(&topts);
 
     /* Line buffering is not enough on a pipe: every event must be visible to
@@ -85,7 +63,7 @@ int main(int argc, char **argv)
 
     Engine e;
     if (dsv4_engine_init(&e, model, trunkdir, budget_gb, budget_auto,
-                         ctx, ngen, think, layers) != 0) {
+                         ctx, ngen) != 0) {
         dsv4_emit_error("engine init failed (see stderr for the loader's message)");
         dsv4_engine_free(&e);
         return 1;

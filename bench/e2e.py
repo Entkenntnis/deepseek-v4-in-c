@@ -62,11 +62,6 @@ def parse_args():
     p.add_argument("--gen", type=int, default=30)
     p.add_argument("--runs", type=int, default=3,
                    help="total generations in one process; run 1 is warm-up")
-    p.add_argument("--threads", type=int, default=4)
-    p.add_argument("--pin", default="p", choices=("off", "all", "p", "e"))
-    p.add_argument("--readers", type=int, default=6)
-    p.add_argument("--reader-pin", default="e", choices=("off", "all", "p", "e"))
-    p.add_argument("--stream-miss", type=int, default=6)
     p.add_argument("--golden", default=DEFAULT_GOLDEN)
     p.add_argument("--update-golden", action="store_true")
     return p.parse_args()
@@ -79,11 +74,6 @@ def build_command(a):
         "--trunk", str(a.trunk),
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
-        "--threads", str(a.threads),
-        "--pin", a.pin,
-        "--readers", str(a.readers),
-        "--reader-pin", a.reader_pin,
-        "--stream-miss", str(a.stream_miss),
     ]
     return cmd
 

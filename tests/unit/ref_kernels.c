@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #include "dsv4.h"
-#include "dsv4_matmul_int.h"
+#include "dsv4_matmul.h"
 #include "dsv4_matmul_fp8_int.h"
 #include "ref_kernels.h"
 

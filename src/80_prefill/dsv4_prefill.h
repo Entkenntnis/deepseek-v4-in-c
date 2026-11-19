@@ -76,7 +76,7 @@ typedef struct {
 typedef struct DSV4Prefill DSV4Prefill;
 
 int  dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
-                       DSV4LayerState *lst, const DSV4ExpertSrc *src,
+                       DSV4LayerState *lst, DSV4Cache *cache,
                        const DSV4ModelW *mw, const DSV4PrefillOpts *opt);
 void dsv4_prefill_free(DSV4Prefill *p);
 

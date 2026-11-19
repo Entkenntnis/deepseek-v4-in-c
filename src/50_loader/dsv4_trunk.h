@@ -1,106 +1,72 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_trunk.h - stream the dense trunk, so RAM becomes a dial instead of a floor.
  *
- * Ported in design from kimi-k3-in-c/src/io/k3_trunk.c (Apache-2.0).
- *
- * WHY STREAM IT
- *   Flash's trunk is several gigabytes and Pro's is much larger; trunk.json
- *   records the exact per-layer sizes. Holding it resident is the floor that
- *   decides which machine can run the model at all. Streaming turns that floor
- *   into a dial: pin as many layers as the budget allows, read the rest.
- *
- * WHY LRU WOULD BE THE WORST POSSIBLE POLICY HERE
- *   The trunk is walked 0, 1, ... N-1 on EVERY token. That cyclic scan is the
- *   classic LRU pathology: with fewer slots than layers, the next layer needed
- *   is always the one just evicted, and the hit rate is zero however much
- *   memory is added. So this PINS a prefix and streams the rest through a small
- *   ring. Pin K layers and the hit rate is exactly K/N, deterministically, and
- *   every extra gigabyte buys its fair share.
- *
- *   The routed-expert cache is the opposite case and does use LRU: which six of
- *   256 experts fire is data dependent, so recency genuinely predicts reuse.
- *
- * WHY THE READ IS AFFORDABLE
- *   Unlike expert routing, the trunk's access order is FIXED, so the next read
- *   is always known before it is needed. The layer runs are large enough that
- *   one pread per layer with O_DIRECT is efficient; `make e2e` exercises the
- *   observed trunk path end to end.
- *
- * LAYOUT
- *   tools/pack_trunk.py writes trunk.bin, where each layer is ONE contiguous
- *   run at a 4096-aligned offset, and trunk.idx, which records every tensor's
- *   offset WITHIN its run. The offsets are recorded rather than derived because
- *   the source checkpoint splits a layer's trunk across two runs with the
- *   routed experts in between -- see the packer for the layout. trunk.idx is a
- *   line-based format so the reader needs no JSON parser.
+ * The packer lays each layer out as ONE contiguous run in trunk.bin and writes
+ * trunk.idx with a slot id for every tensor. The reader pins a prefix and
+ * streams the rest through a round-robin ring; a cyclic layer walk makes LRU
+ * useless here, so the ring is deliberate.
  */
 #ifndef DSV4_TRUNK_H
 #define DSV4_TRUNK_H
 
 #include "dsv4.h"
-#include "dsv4_bind.h"
 
-#define DSV4_TRUNK_ALIGN 4096   /* pack_trunk.py pads runs so O_DIRECT works */
+#define DSV4_TRUNK_ALIGN 4096
+
+/* Layer slot ids used outside the binder. Keep in step with the packer. */
+#define DSV4_TRUNK_SLOT_TID2EID 41
 
 typedef struct {
-    char    *name;
-    int64_t  off;          /* byte offset WITHIN the layer run */
-    int64_t  nbytes;
-    int      dtype;        /* DSV4Dtype */
+    int32_t slot;
+    int32_t dtype;
+    int32_t rows, cols;
+    int32_t wdt, blk_r, blk_c;
+    int64_t off;              /* byte offset WITHIN the layer run */
+    int64_t nbytes;
 } DSV4TrunkTensor;
 
-typedef struct {
+typedef struct DSV4TrunkLayer {
     int64_t          file_off;   /* offset in trunk.bin */
     int64_t          nbytes;
+    int64_t          widen_bytes;
     DSV4TrunkTensor *t;
     int              nt;
-    /* plan_layer() order -> index into t[], resolved once at open. Name lookup
-     * is on the per-token path (43 layers x ~46 tensors), so the hot bind loop
-     * indexes this instead of scanning the manifest with strcmp. -1 means the
-     * plan named a tensor this layer does not carry; bind reports it. */
-    int32_t         *bind_of;
-    int              nbind;
-    /* A pinned layer's run never moves, and its widened vectors are
-     * independent of the token, so its binding can be built once. Rebuilding
-     * it per token re-widens the mHC/compressor vectors every pass, which
-     * cost more than it saved. */
+    /* A pinned layer's run never moves, so its binding can be built once. */
     DSV4LayerW       bind_cached;
-    unsigned char   *bind_widen;  /* owned; backs bind_cached's wide pointers */
+    unsigned char   *bind_widen;
     int              bind_ready;
 } DSV4TrunkLayer;
 
-typedef struct {
+typedef struct DSV4Trunk {
     int              fd;
-    int              direct;     /* 1 when opened O_DIRECT */
+    int              bfd;       /* buffered, for small unaligned reads */
+    int              direct;
     int              n_layers;
     DSV4TrunkLayer  *lay;
 
-    unsigned char  **pin;        /* [npin] one exact allocation per pinned layer */
-    unsigned char   *ring;       /* [nslot] uniform slots                        */
+    unsigned char  **pin;
+    unsigned char   *ring;
     int64_t          slot_bytes;
     int              nslot, npin;
-    int             *layer_of;   /* [nslot] which layer occupies each slot       */
-    int32_t         *slot_of;    /* [n_layers], -1 when not resident             */
+    int             *layer_of;
+    int32_t         *slot_of;
     int              next_slot;
 
-    unsigned char   *widen;      /* one widen area, reused per bind              */
+    unsigned char   *widen;
     size_t           widen_cap;
 } DSV4Trunk;
 
-/* budget_bytes sizes the pinned prefix and the ring. Returns 0 on success. */
 int  dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
                      int64_t budget_bytes);
 void dsv4_trunk_close(DSV4Trunk *tr);
-
-/* How much RAM the trunk actually took. It self-limits: once every layer is
- * pinned there is nothing left to put in a ring slot, so handing it a larger
- * budget buys nothing. A caller splitting one budget between the trunk and the
- * expert cache should therefore give the trunk what it asks for and hand the
- * REMAINDER to the cache, rather than dividing by a fixed ratio -- see the note
- * in dsv4_serve.c. */
 int64_t dsv4_trunk_resident_bytes(const DSV4Trunk *tr);
-
-/* Make layer L resident and point b's weight pointers at it. */
 int  dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w);
+
+/* One tensor of a layer by slot, or NULL. */
+const DSV4TrunkTensor *dsv4_trunk_slot(const DSV4Trunk *tr, int L, int slot);
+
+/* Reader used by bind; exposed for the trunk implementation files. */
+int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst);
+int dsv4_trunk_load_manifest(DSV4Trunk *tr, const char *dir);
 
 #endif /* DSV4_TRUNK_H */

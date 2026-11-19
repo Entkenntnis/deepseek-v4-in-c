@@ -10,11 +10,11 @@
 #include "dsv4_cache_int.h"
 #include "dsv4_threads.h"
 
-int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
-                    int64_t budget_bytes)
+int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
+                    const DSV4Cfg *cfg, int64_t budget_bytes)
 {
     memset(c, 0, sizeof *c);
-    c->st = st; c->cfg = cfg;
+    c->st = st; c->tr = tr; c->cfg = cfg;
     dsv4_cache_expert_geometry(c, cfg);
 
     /* A cache smaller than topk cannot serve begin(), which will not evict a
@@ -126,6 +126,9 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, const DSV4Cfg *cfg,
     if (!c->rq) { dsv4_cache_free(c); return -1; }
     c->rq_head = c->rq_tail = c->rq_n = 0;
 
+    c->batch = (DSV4CacheBatch *)calloc(1, sizeof *c->batch);
+    if (!c->batch) { dsv4_cache_free(c); return -1; }
+
     dsv4_cache_pool_start(c);
     /* Hash prefetch is automatic; pf_has_room still decides whether this cache
      * is large enough. */
@@ -150,5 +153,6 @@ void dsv4_cache_free(DSV4Cache *c)
     }
     free(c->rq);
     free(c->pf_batch);
+    free(c->batch);
     memset(c, 0, sizeof *c);
 }

@@ -95,9 +95,8 @@ int dsv4_handle_command(Engine *e, char *line)
         }
         const int eos = field_int(&f, "eos", -1);
         const int ngen = field_int(&f, "gen", e->gen_default);
-        const int think = field_int(&f, "think", e->think_default);
-        const int layers = field_int(&f, "layers", e->emit_layers_default);
-        dsv4_engine_generate(e, e->in_ids, nt, ngen, eos, think, layers);
+        const int layers = field_int(&f, "layers", 1);
+        dsv4_engine_generate(e, e->in_ids, nt, ngen, eos, layers);
     } else if (!strcmp(cmd, "reset")) {
         if (dsv4_engine_reset_context(e) != 0)
             dsv4_emit_error("context reset failed");

@@ -25,17 +25,12 @@ static void tok_free(DSV4PrefillTok *s)
 }
 
 int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
-                      DSV4LayerState *lst, const DSV4ExpertSrc *src,
+                      DSV4LayerState *lst, DSV4Cache *cache,
                       const DSV4ModelW *mw, const DSV4PrefillOpts *opt)
 {
-    if (!src || !src->begin || !src->end) {
-        fprintf(stderr, "prefill: the expert source must provide begin/end; "
-                        "the block path has no per-token fallback\n");
-        return -1;
-    }
     DSV4Prefill *p = (DSV4Prefill *)xcalloc(sizeof *p);
     if (!p) return -1;
-    p->c = c; p->tr = tr; p->lst = lst; p->src = src; p->mw = mw;
+    p->c = c; p->tr = tr; p->lst = lst; p->cache = cache; p->mw = mw;
     p->opt = *opt;
 
     /* Only the block-independent buffers live here. Everything scaled by the
@@ -74,7 +69,7 @@ int dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
     fprintf(stderr, "prefill: whole-prompt block; kernels tile at <=%d rows\n",
             DSV4_MAX_BATCH);
 
-    if (dsv4_prefill_vk_init(&p->vk, c, tr, (DSV4Cache *)src->ctx) != 0)
+    if (dsv4_prefill_vk_init(&p->vk, c, tr, cache) != 0)
         p->vk = NULL;   /* dsv4_prefill_vk_init already logged */
 
     *out = p;
@@ -133,4 +128,20 @@ void dsv4_prefill_free(DSV4Prefill *p)
     free(p->sm_x); free(p->sm_gate); free(p->sm_up);
     free(p->sm_mid); free(p->sm_out);
     free(p);
+}
+
+void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
+                           int tokens_done, int tokens_total,
+                           double elapsed, double progress)
+{
+    if (!p->opt.on_progress) return;
+    DSV4PrefillProgress pr;
+    pr.stage = stage;
+    pr.layer = layer;
+    pr.layers = p->c->n_layers;
+    pr.tokens_done = tokens_done;
+    pr.tokens_total = tokens_total;
+    pr.elapsed = elapsed;
+    pr.progress = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
+    p->opt.on_progress(p->opt.progress_ctx, &pr);
 }

@@ -4,9 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dsv4_cfg.h"
 #include "dsv4_kernels.h"
-#include "dsv4_mem.h"
+#include "dsv4_util.h"
 #include "dsv4_serve_int.h"
 
 static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
@@ -22,13 +21,11 @@ static int prefill_cancel_cb(void *ctx)
 
 int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                      double budget_gb, int budget_auto, int ctx,
-                     int gen_default, int think_default, int layers_default)
+                     int gen_default)
 {
     memset(e, 0, sizeof *e);
     e->model_dir = model;
     e->gen_default = gen_default;
-    e->think_default = think_default;
-    e->emit_layers_default = layers_default;
 
     if (ctx < 512) ctx = 512;
     e->maxpos = ctx;
@@ -39,7 +36,7 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                     "layers=%d vocab=%d\n",
             e->c.hidden, e->c.n_layers, e->c.vocab);
 
-    if (dsv4_st_open(&e->st, model) != 0) return -1;
+    if (dsv4_st_open(&e->st, model, trunkdir) != 0) return -1;
 
     int64_t budget = (int64_t)(budget_gb * 1073741824.0);
     if (budget_auto) {
@@ -89,14 +86,8 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     if (dsv4_trunk_open(&e->tr, trunkdir, &e->c, budget - efloor) != 0)
         return -1;
     const int64_t left = budget - dsv4_trunk_resident_bytes(&e->tr);
-    if (dsv4_cache_init(&e->cache, &e->st, &e->c, left) != 0) return -1;
-    const int stream_miss = dsv4_stream_miss();
-    if (stream_miss > 0) {
-        dsv4_cache_set_stream_cap(&e->cache, stream_miss);
-        fprintf(stderr, "stream-miss: up to %d miss reads in flight; experts "
-                        "are consumed as they land\n", e->cache.stream_cap);
-    }
-    dsv4_make_expert_src(&e->src, &e->cache);
+    if (dsv4_cache_init(&e->cache, &e->st, &e->tr, &e->c, left) != 0) return -1;
+    dsv4_cache_set_stream_cap(&e->cache, 6);
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));
@@ -124,8 +115,7 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
      * still works, but falls back to a context reset. */
     e->snap = dsv4_state_snapshot_new(&e->c, e->lst);
     if (!e->snap)
-        fprintf(stderr, "serve: cannot allocate prefill rollback snapshot; "
-                        "a cancelled prefill will reset the context\n");
+        fprintf(stderr, "serve: no prefill rollback snapshot\n");
 
     {
         const DSV4PrefillOpts po = {
@@ -133,10 +123,9 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
             .on_progress = prefill_progress_cb, .progress_ctx = e,
             .is_cancelled = prefill_cancel_cb, .cancel_ctx = NULL,
         };
-        if (dsv4_prefill_init(&e->pf, &e->c, &e->tr, e->lst, &e->src,
+        if (dsv4_prefill_init(&e->pf, &e->c, &e->tr, e->lst, &e->cache,
                               &e->mb.w, &po) != 0) {
-            fprintf(stderr, "serve: block prefill init failed; falling back "
-                            "to the per-token path\n");
+            fprintf(stderr, "serve: block prefill init failed\n");
             e->pf = NULL;
         } else {
             fprintf(stderr, "serve: whole-prompt block prefill ready\n");
@@ -154,4 +143,46 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     e->in_ids = malloc((size_t)e->in_cap * sizeof(int32_t));
     if (!e->in_ids) return -1;
     return 0;
+}
+
+void dsv4_engine_free(Engine *e)
+{
+    dsv4_prefill_free(e->pf);
+    dsv4_state_snapshot_free(e->snap);
+    for (int L = 0; L < e->c.n_layers && e->lst; L++) dsv4_state_free(&e->lst[L]);
+    free(e->lst);
+    free(e->h); free(e->xh); free(e->logits); free(e->ids);
+    free(e->cs_d); free(e->sn_d); free(e->cs_c); free(e->sn_c);
+    free(e->in_ids);
+    dsv4_scratch_free(&e->scratch);
+    dsv4_bind_model_free(&e->mb);
+    dsv4_cache_free(&e->cache);
+    dsv4_trunk_close(&e->tr);
+    dsv4_st_close(&e->st);
+    memset(e, 0, sizeof *e);
+}
+
+int dsv4_engine_reset_context(Engine *e)
+{
+    dsv4_prefill_release(e->pf);
+    for (int L = 0; L < e->c.n_layers; L++) {
+        dsv4_state_free(&e->lst[L]);
+        if (dsv4_state_init(&e->lst[L], &e->c, L, e->maxpos) != 0) return -1;
+    }
+    e->n_ids = 0;
+    e->pending_forward = 0;
+    e->kv_prefix = 0;
+    return 0;
+}
+
+/* Range-check before appending so a bad command cannot leave half a turn. */
+int dsv4_append_ids(Engine *e, const int32_t *ids, int n)
+{
+    if (n < 0) return -1;
+    for (int i = 0; i < n; i++)
+        if (ids[i] < 0 || ids[i] >= e->c.vocab) return -1;
+    if (n > e->cap_ids - e->n_ids) return -2;
+    memcpy(e->ids + e->n_ids, ids, (size_t)n * sizeof(int32_t));
+    e->n_ids += n;
+    return n;
 }

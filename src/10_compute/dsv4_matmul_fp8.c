@@ -3,7 +3,6 @@
 #include <stdint.h>
 
 #include "dsv4_matmul.h"
-#include "dsv4_matmul_int.h"
 #include "dsv4_matmul_fp8_int.h"
 
 /* Decode one 128-byte block once, into exact f32 values. */

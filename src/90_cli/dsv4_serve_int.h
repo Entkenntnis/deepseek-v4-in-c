@@ -24,7 +24,6 @@ typedef struct {
     DSV4ModelBind    mb;
     DSV4Scratch      scratch;
     DSV4LayerState  *lst;
-    DSV4ExpertSrc    src;      /* one source, shared by decode and prefill */
     DSV4Prefill     *pf;       /* NULL when block prefill could not initialise */
     DSV4StateSnapshot *snap;   /* rollback point for an in-flight prefill */
 
@@ -49,9 +48,7 @@ typedef struct {
      * table subtracts it from TTFT to show where the time went. */
     double           head_s;
 
-    int              think_default;
     int              gen_default;
-    int              emit_layers_default;
 
     /* Scratch buffer for token ids parsed out of one command line. */
     int32_t         *in_ids;
@@ -97,10 +94,7 @@ int  dsv4_handle_command(Engine *e, char *line);
 /* ---- engine ---- */
 int  dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                       double budget_gb, int budget_auto, int ctx,
-                      int gen_default, int think_default, int layers_default);
-void dsv4_set_stream_miss(int n);
-int  dsv4_stream_miss(void);
-int  dsv4_make_expert_src(DSV4ExpertSrc *src, DSV4Cache *cache);
+                      int gen_default);
 void dsv4_engine_free(Engine *e);
 int  dsv4_engine_reset_context(Engine *e);
 int  dsv4_append_ids(Engine *e, const int32_t *ids, int n);
@@ -114,7 +108,7 @@ void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
                       int ngen, int eos, int emit_layers, double t0,
                       double tp0, int32_t best);
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
-                          int ngen, int eos, int think, int emit_layers);
+                          int ngen, int eos, int emit_layers);
 void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
                           const char *path);
 void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,

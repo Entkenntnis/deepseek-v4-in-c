@@ -80,11 +80,6 @@ def parse_args():
     p.add_argument("--ctx", type=int, default=8192)
     p.add_argument("--runs", type=int, default=3,
                    help="total turns in one process; run 1 is warm-up")
-    p.add_argument("--threads", type=int, default=4)
-    p.add_argument("--pin", default="p", choices=("off", "all", "p", "e"))
-    p.add_argument("--readers", type=int, default=6)
-    p.add_argument("--reader-pin", default="e", choices=("off", "all", "p", "e"))
-    p.add_argument("--stream-miss", type=int, default=6)
     p.add_argument("--prompt", default=USER_PROMPT,
                    help="user text after the tool preamble")
     p.add_argument("--preamble-file", default=None, metavar="FILE",
@@ -104,11 +99,6 @@ def build_command(a):
         "--trunk", str(a.trunk),
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
-        "--threads", str(a.threads),
-        "--pin", a.pin,
-        "--readers", str(a.readers),
-        "--reader-pin", a.reader_pin,
-        "--stream-miss", str(a.stream_miss),
     ]
     return cmd
 

@@ -5,7 +5,6 @@
 #include "dsv4.h"
 #include "dsv4_prefill.h"
 #include "dsv4_prefill_int.h"
-#include "dsv4_prefill_union_int.h"
 
 static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
                            const int *order, int ng)
@@ -26,9 +25,9 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
      * published. This is non-blocking and gives a GPU bucket's first fill
      * window real CPU work immediately; wait_any() is only needed when the
      * queue runs dry. */
-    if (p->src->try_any) {
+    {
         int k;
-        while (p->src->try_any(p->src->ctx, &k)) {
+        while (dsv4_cache_try(p->cache, &k)) {
             if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
         }
     }
@@ -44,19 +43,16 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         if (dsv4_pf_union_run_one_ready(p, &fill)) continue;
 
         /* 2. Nothing ready: take the next published bucket from the source. */
-        if (!p->src->wait_any) break;
         int k = -1;
-        const int got = p->src->wait_any(p->src->ctx, &k);
+        const int got = dsv4_cache_wait(p->cache, &k);
         if (!got) break;
         if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
-        if (p->src->try_any) {
-            while (p->src->try_any(p->src->ctx, &k)) {
-                if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
-            }
+        while (dsv4_cache_try(p->cache, &k)) {
+            if (k >= 0 && k < ng && !done[k] && ex[k]) q[qt++] = k;
         }
     }
 
-    p->src->end(p->src->ctx, ex);
+    dsv4_cache_end(p->cache, ex);
 
     if (cancelled) return dsv4_prefill_cancel_code(p);
 
@@ -122,10 +118,10 @@ int dsv4_prefill_moe_union(DSV4Prefill *p, int L, int n)
             const DSV4ExpertW *ex[DSV4_MAX_PREFETCH];
             for (int j = 0; j < ng; j++) ex[j] = NULL;
 
-            const int brc = p->src->begin(p->src->ctx, L,
+            const int brc = dsv4_cache_begin(p->cache, L,
                                           p->ex_order + base, ng, ex);
             if (brc != 0) {
-                p->src->end(p->src->ctx, ex);
+                dsv4_cache_end(p->cache, ex);
                 rc = -1;
                 break;
             }

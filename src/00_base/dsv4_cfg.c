@@ -6,9 +6,10 @@
  * for why a runtime reader was removed rather than simplified.
  */
 #include <string.h>
+#include <time.h>
 
 #include "dsv4.h"
-#include "dsv4_cfg.h"
+#include "dsv4_util.h"
 
 /* 43 decoder layers + 3 trailing MTP entries. Only the first 43 are decoder
  * layers; the zeros after them are load-bearing in the file format and are
@@ -84,4 +85,11 @@ void dsv4_cfg_init(DSV4Cfg *c)
 
     c->num_hash_layers   = 3;
     c->num_nextn_predict = 1;
+}
+
+double dsv4_now_s(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
