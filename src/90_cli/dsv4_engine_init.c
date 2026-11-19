@@ -1,10 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_engine_init.c - load the model once and keep it resident. */
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "dsv4_cfg.h"
 #include "dsv4_kernels.h"
@@ -40,21 +38,10 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     e->maxpos = ctx;
     e->cap_ids = ctx;
 
-    char path[1024];
-    snprintf(path, sizeof path, "%s/config.json", model);
-    /* dsv4_cfg_load_file() prints a human-readable banner on stdout, which a
-     * JSON-lines reader cannot tolerate. Send that one call's stdout to stderr,
-     * then restore. */
-    fflush(stdout);
-    const int saved_out = dup(STDOUT_FILENO);
-    if (saved_out >= 0) dup2(STDERR_FILENO, STDOUT_FILENO);
-    const int cfg_ok = dsv4_cfg_load_file(&e->c, e->cr, DSV4_MAX_LAYERS, path);
-    fflush(stdout);
-    if (saved_out >= 0) {
-        dup2(saved_out, STDOUT_FILENO);
-        close(saved_out);
-    }
-    if (!cfg_ok) return -1;
+    dsv4_cfg_init(&e->c);
+    fprintf(stderr, "config: DeepSeek-V4-Flash (compiled in) | hidden=%d "
+                    "layers=%d vocab=%d\n",
+            e->c.hidden, e->c.n_layers, e->c.vocab);
 
     if (dsv4_st_open(&e->st, model) != 0) return -1;
     if (dsv4_tok_load(&e->tok, tokfile) != 0) return -1;

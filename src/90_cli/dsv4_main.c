@@ -7,7 +7,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "dsv4_cfg.h"
 #include "dsv4_serve_int.h"
 #include "dsv4_trace.h"
 #include "json.h"

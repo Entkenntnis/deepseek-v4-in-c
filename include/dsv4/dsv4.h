@@ -109,7 +109,7 @@ typedef struct {
 
     /* ---- HCA: per-layer KV compression. See invariant 1. ---- */
     int   n_compress;         /* MUST equal n_layers                            */
-    int  *compress_ratios;    /* 0 | 4 | 128, one per layer                     */
+    const int *compress_ratios; /* 0 | 4 | 128, one per layer                   */
     float compress_rope_theta;/* 160000                                         */
 
     /* ---- mHC: manifold-constrained hyper-connections ---- */

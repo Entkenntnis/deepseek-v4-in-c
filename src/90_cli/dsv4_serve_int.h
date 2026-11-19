@@ -19,7 +19,6 @@
 typedef struct {
     const char      *model_dir;
     DSV4Cfg          c;
-    int              cr[DSV4_MAX_LAYERS];
 
     DSV4St           st;
     DSV4Tok          tok;
