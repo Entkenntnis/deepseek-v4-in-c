@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""DeepSeek-V4's DSML tool-call format and the one tool the TUI offers.
+"""DeepSeek-V4's DSML tool-call format and the tools the TUI offers.
 
 The format is the checkpoint's own (see encoding/README.md next to the
 weights), not an invention of this TUI: the model was trained to emit
@@ -17,6 +17,7 @@ from .defaults import BOS
 
 DSML = "｜DSML｜"
 TOOL_NAME = "run_python"
+WEB_SEARCH_NAME = "web_search"
 
 TOOL_SCHEMA = {
     "name": TOOL_NAME,
@@ -32,6 +33,31 @@ TOOL_SCHEMA = {
         "required": ["code"],
     },
 }
+
+WEB_SEARCH_SCHEMA = {
+    "name": WEB_SEARCH_NAME,
+    "description": ("Search the live web through the DeepSeek Search API. "
+                    "Use it for current events, facts that may have changed, "
+                    "or anything you cannot verify from the conversation. "
+                    "Returns titles, URLs and summaries of matching pages."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": ("Search query (1-128 characters). Supports "
+                                "site:, lang:, after: and before: operators."),
+            },
+            "count": {
+                "type": "integer",
+                "description": "Number of results, 1-50 (default 5).",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+TOOL_SCHEMAS = (TOOL_SCHEMA, WEB_SEARCH_SCHEMA)
 
 # Compact rendering of the checkpoint's tools preamble. The tag syntax is the
 # part that must match training exactly; the prose around it is instructions
@@ -58,12 +84,13 @@ You MUST strictly follow the above tool name and parameter schema.
 
 def system_prompt() -> str:
     """The tools preamble, sent once while the engine context is empty."""
-    schema = json.dumps(TOOL_SCHEMA, ensure_ascii=False,
-                        separators=(",", ":"))
-    return _TOOLS_TEMPLATE.format(dsml=DSML, schemas=schema)
+    schemas = "\n".join(json.dumps(schema, ensure_ascii=False,
+                                   separators=(",", ":"))
+                        for schema in TOOL_SCHEMAS)
+    return _TOOLS_TEMPLATE.format(dsml=DSML, schemas=schemas)
 
 
-def py_prefix_text() -> str:
+def tools_prefix_text() -> str:
     """Exactly the prefix the engine puts in front of the first user turn.
 
     `dsv4_engine_generate()` builds BOS + system prompt + newline when the
@@ -156,3 +183,30 @@ def render_tool_text(code: str, result: dict) -> str:
     meta += "_"
     return (code_fence(code) + f"\n\n{fence}text\n{body.rstrip()}\n{fence}"
             + "\n\n" + meta)
+
+
+def render_web_text(query: str, result: dict) -> str:
+    """The transcript bubble for a web search."""
+    lines = [f"**Search** `{query}`", ""]
+    results = result.get("results") or []
+    if results:
+        for i, item in enumerate(results, 1):
+            title = str(item.get("title") or item.get("url") or "(untitled)")
+            url = str(item.get("url") or "")
+            summary = str(item.get("summary") or item.get("snippet") or "")
+            site = str(item.get("site_name") or "")
+            date = str(item.get("date") or "")
+            lines.append(f"{i}. [{title}]({url})")
+            extra = " · ".join(part for part in (site, date) if part)
+            if extra:
+                lines.append(f"   _{extra}_")
+            if summary:
+                lines.append(f"   {summary}")
+    else:
+        lines.append(str(result.get("stderr") or "(no results)"))
+    meta = ("_ok" if result.get("ok") else "_error")
+    meta += f" · {float(result.get('seconds') or 0):.2f}s"
+    if results:
+        meta += f" · {len(results)} result{'s' if len(results) != 1 else ''}"
+    meta += "_"
+    return "\n".join(lines) + "\n\n" + meta

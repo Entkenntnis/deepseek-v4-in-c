@@ -11,11 +11,13 @@ from typing import Any, Optional
 from .backend import EventSink, RealBackend
 from .defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX, DEFAULT_GEN,
                        DEFAULT_MODEL, DEFAULT_TOK, DEFAULT_TRUNK,
-                       TOOL_MAX_OUTPUT, TOOL_TIMEOUT_S)
+                       SEARCH_MAX_RESULTS, SEARCH_TIMEOUT_S, TOOL_MAX_OUTPUT,
+                       TOOL_TIMEOUT_S)
 from .demo import DemoBackend
 from .messages import Message
 from .pytool import PySession
 from .tokenizer import Tokenizer
+from .websearch import WebSearch
 
 
 class AppBase:
@@ -84,13 +86,15 @@ class AppBase:
 
         self.gen_limit = DEFAULT_GEN
 
-        # Tool calls are opt-in: the model runs arbitrary code, so the user
-        # has to ask for it with /py.
+        # Tool calls are opt-in: they can run arbitrary code and spend API
+        # credit, so the user has to ask for them with /tools.
         self.tool_enabled = False
         self.py = PySession(timeout=TOOL_TIMEOUT_S,
                             max_output=TOOL_MAX_OUTPUT)
+        self.web = WebSearch(timeout=SEARCH_TIMEOUT_S,
+                             max_results=SEARCH_MAX_RESULTS)
         self.system_armed = True      # send the tools preamble when ctx is empty
-        # `/py` can restore a precomputed tools-preamble KV cache instead of
+        # `/tools` can restore a precomputed tools-preamble KV cache instead of
         # pre-filling it. `kv_pending` keeps the input line from starting a turn
         # before the kv_loaded event (or a "KV:" error) arrives.
         self.kv_loaded = False
@@ -100,7 +104,10 @@ class AppBase:
         self.tool_running = False
         self.tool_cancelled = False
         self.pending_tool: Optional[Message] = None
+        self.pending_tool_name = ""
         self.pending_code = ""
+        self.pending_query = ""
+        self.pending_count = SEARCH_MAX_RESULTS
 
         self.input = ""
         self.input_cursor = 0
@@ -148,3 +155,4 @@ class AppBase:
         if self.backend:
             self.backend.close()
         self.py.stop()
+        self.web.stop()

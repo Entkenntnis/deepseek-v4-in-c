@@ -70,7 +70,7 @@ class EventMixin:
             self.context_cap = int(ev.get("context_cap") or self.context_cap)
             secs = float(ev.get("seconds") or 0.0)
             self.add_system(
-                f"python on; cached tools preamble restored "
+                f"tools on; cached preamble restored "
                 f"({used} tokens, {secs:.3f}s)")
             self.stats_force = True
             self.dirty = True
@@ -219,7 +219,9 @@ class EventMixin:
             self.tool_running = False
             self.tool_cancelled = False
             self.pending_tool = None
+            self.pending_tool_name = ""
             self.py.reset()
+            self.web.reset()
             self.decode_spt.clear()
             self.prefill_active = False
             self.prefill_progress = {}

@@ -23,6 +23,7 @@ class IngestMixin:
                 self.chain_id += 1
                 self.tool_running = False
                 self.py.cancel()
+                self.web.cancel()
                 if self.running:
                     self.status = "failed"
                     tail = ""

@@ -25,7 +25,7 @@ int dsv4_cache_enable_prefetch(DSV4Cache *c)
 static int pf_has_room(const DSV4Cache *c, int n)
 {
     return c->pf_enabled && c->nrth > 0 && n > 0 &&
-           c->nslot > n + c->cfg->topk;
+           c->limit > n + c->cfg->topk;
 }
 
 static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
@@ -46,7 +46,7 @@ static int pf_queue(DSV4Cache *c, const int *layers, const int *experts,
         const int layer = layers[i], expert = experts[i];
 
         int resident = -1;
-        for (int j = 0; j < c->nslot; j++)
+        for (int j = 0; j < c->limit; j++)
             if (c->slot[j].layer == layer && c->slot[j].expert == expert) {
                 resident = j; break;
             }

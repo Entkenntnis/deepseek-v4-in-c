@@ -69,6 +69,7 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
     /* Charged against slot_bytes, not expert_bytes: alignment slack is real
      * memory and the budget is a promise about peak RSS. */
     c->nslot = (int)(budget_bytes / c->slot_bytes);
+    c->limit = c->nslot;
 
     /* SAY SO WHEN THE CACHE CANNOT POSSIBLY WORK. Under LRU a hit needs the
      * entry to survive until the next layer visit; below a full pass's working

@@ -30,6 +30,10 @@ typedef struct DSV4Cache {
     struct DSV4CacheBatch *batch;
     struct DSV4Slot *slot;
     int            nslot;
+    /* Active window for claims. A prefill guard lowers this so the block
+     * buffers fit next to the resident expert slots; the slots above the
+     * window are empty and their pages were returned to the kernel. */
+    int            limit;
     unsigned char *slot_arena;   /* one allocation for every slot, or NULL */
     int64_t        expert_bytes;
     uint64_t       clock;
@@ -86,6 +90,22 @@ int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg);
 int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
                      const DSV4Cfg *cfg, int64_t budget_bytes);
 void dsv4_cache_free(DSV4Cache *c);
+
+/* ---- prefill memory guard ------------------------------------------------
+ * Before a block prefill, drop enough LRU slots to make `reserve_bytes` of
+ * resident memory available and cap claims to the remaining slots. The slots
+ * above the new limit are invalidated and their pages are advised away with
+ * MADV_DONTNEED; clearing keys alone would not lower RSS because the arena is
+ * allocated up front. end() restores the full window after the block buffers
+ * have been released. The guard must be taken between turns, when no batch is
+ * in flight; it drains an in-flight hash prefetch itself. */
+typedef struct {
+    int old_limit;
+} DSV4CacheGuard;
+
+void dsv4_cache_guard_begin(DSV4Cache *c, int64_t reserve_bytes,
+                            DSV4CacheGuard *g);
+void dsv4_cache_guard_end(DSV4Cache *c, DSV4CacheGuard *g);
 
 /* ---- hash-layer prefetch (automatic; init enables it) -------------------- */
 int dsv4_cache_prefetch_hash_layers(DSV4Cache *c, int token_id);

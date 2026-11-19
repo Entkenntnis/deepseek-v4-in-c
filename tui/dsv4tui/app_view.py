@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .defaults import DEFAULT_MODEL
+from .dsml import WEB_SEARCH_NAME
 
 
 class ViewMixin:
@@ -47,7 +48,9 @@ class ViewMixin:
         progress = ""
         if self.tool_running:
             spin = "|/-\\"[self.spinner]
-            progress = (f"  {spin} python  round {self.chain_round}"
+            tool = ("web search"
+                    if self.pending_tool_name == WEB_SEARCH_NAME else "python")
+            progress = (f"  {spin} {tool}  round {self.chain_round}"
                         f"  ctx {self.context_used}/{self.context_cap}"
                         f"  Ctrl-C cancel")
         elif status == "generating":
@@ -90,6 +93,6 @@ class ViewMixin:
         else:
             text = (f"context {self.context_used}/{self.context_cap}  "
                     f"gen limit {self.gen_limit}  "
-                    f"python {'on' if self.tool_enabled else 'off'}")
+                    f"tools {'on' if self.tool_enabled else 'off'}")
             color = "status"
         self._add(scr, row, 0, text, w - 1, self.attr(color))

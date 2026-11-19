@@ -19,20 +19,26 @@ DEFAULT_BUDGET = "auto"
 DEFAULT_CTX = 8192
 DEFAULT_GEN = 1024
 
-# The precomputed /py tools-preamble KV state. `make kv` writes this file and
-# the TUI loads it when /py is used with an empty context. The model directory
-# is part of the name because the cache is model-specific.
+# The precomputed /tools preamble KV state. `make kv` writes this file and
+# the TUI loads it when /tools is used with an empty context. The model
+# directory is part of the name because the cache is model-specific.
 _KV_DIR = Path(os.path.expanduser(
     os.environ.get("DSV4_KV_DIR", str(HOME / ".cache" / "dsv4" / "kv"))))
 DEFAULT_KV = Path(os.path.expanduser(
     os.environ.get("DSV4_KV",
-                   str(_KV_DIR / f"{DEFAULT_MODEL.name}-py-prefix.bin"))))
+                   str(_KV_DIR / f"{DEFAULT_MODEL.name}-tools-prefix.bin"))))
 
-# The Python tool: rounds per user turn, wall-clock limit per call, and how
-# much stdout/stderr is handed back to the model before truncation.
+# The tools: rounds per user turn, wall-clock limits per call, and how much
+# output is handed back to the model before truncation.
 TOOL_MAX_ROUNDS = 6
 TOOL_TIMEOUT_S = 10.0
 TOOL_MAX_OUTPUT = 800
+
+# Web search calls the DeepSeek Search API. The key comes from the
+# DEEPSEEK_API_KEY environment variable or the repo's gitignored .env file.
+DEFAULT_ENV = REPO / ".env"
+SEARCH_TIMEOUT_S = 20.0
+SEARCH_MAX_RESULTS = 5
 
 # These are spelled as they are in the checkpoint's own encoding/README.md.
 BOS = "<｜begin▁of▁sentence｜>"

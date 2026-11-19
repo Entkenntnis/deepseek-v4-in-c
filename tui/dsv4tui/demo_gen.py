@@ -7,7 +7,7 @@ import re
 import time
 
 from .defaults import DEFAULT_CTX, DEFAULT_GEN
-from .dsml import DSML, TOOL_NAME
+from .dsml import DSML, TOOL_NAME, WEB_SEARCH_NAME
 
 
 class DemoGenerateMixin:
@@ -21,6 +21,20 @@ class DemoGenerateMixin:
                 "That is the full round trip: model -> tool call -> Python -> "
                 "tool result -> model. In a real session the next paragraph "
                 "would use those numbers to answer your question.\n"
+            )
+        if ("search" in low or "web" in low or "latest news" in low
+                or "current" in low):
+            return (
+                "I will search the web for that.\n\n"
+                f"<{DSML}tool_calls>\n"
+                f"<{DSML}invoke name=\"{WEB_SEARCH_NAME}\">\n"
+                f"<{DSML}parameter name=\"query\" string=\"true\">"
+                "DeepSeek V4.1 release notes"
+                f"</{DSML}parameter>\n"
+                f"<{DSML}parameter name=\"count\" string=\"false\">3"
+                f"</{DSML}parameter>\n"
+                f"</{DSML}invoke>\n"
+                f"</{DSML}tool_calls>"
             )
         if "python" in low or "calculate" in low or "compute" in low:
             return (

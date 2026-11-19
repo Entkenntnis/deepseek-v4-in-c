@@ -52,6 +52,35 @@ static int tok_init(DSV4PrefillTok *s, const DSV4Cfg *c)
     return 0;
 }
 
+DSV4PrefillBytes dsv4_prefill_bytes(const DSV4Cfg *c, int n)
+{
+    DSV4PrefillBytes out = { 0, 0 };
+    if (!c || n <= 0) return out;
+
+    const int hc = c->hc_mult, d = c->hidden;
+    const size_t hcd = (size_t)hc * d;
+    const int mix_hc = (2 + hc) * hc;
+    const size_t qr_n = (size_t)(d > c->q_lora ? d : c->q_lora);
+    const size_t hdall = (size_t)c->n_heads * c->head_dim;
+    const size_t inter = (size_t)c->moe_inter * c->n_shared;
+    const size_t rinter = (size_t)c->moe_inter;
+    const size_t og = (size_t)c->o_groups * c->o_lora;
+
+    const size_t per_tok = 2 * hcd + 5 * (size_t)d + (size_t)hc +
+        (size_t)hc * hc + (size_t)mix_hc + qr_n + 3 * hdall +
+        (size_t)c->head_dim + 2 * og + 2 * (size_t)c->n_experts +
+        4 * (size_t)c->topk + 3 * inter + 3 * rinter +
+        4 * (size_t)c->head_dim +
+        (size_t)c->index_n_heads * (size_t)c->index_head_dim +
+        (size_t)c->index_n_heads;
+    const size_t tok_f = (size_t)c->topk * (size_t)d;
+    const size_t tok_bytes = sizeof(DSV4PrefillTok) + tok_f * sizeof(float);
+
+    out.block_bytes = (int64_t)n * (int64_t)per_tok * (int64_t)sizeof(float);
+    out.token_bytes = (int64_t)n * (int64_t)tok_bytes;
+    return out;
+}
+
 int dsv4_prefill_reserve(DSV4Prefill *p, int n)
 {
     if (!p || n <= 0) return -1;
@@ -126,19 +155,11 @@ int dsv4_prefill_reserve(DSV4Prefill *p, int n)
     }
 
     p->cap = cap;
-    const size_t per_tok = 2 * hcd + 5 * (size_t)d + (size_t)hc +
-        (size_t)hc * hc + (size_t)mix_hc + qr_n + 3 * hdall +
-        (size_t)c->head_dim + 2 * og + 2 * (size_t)c->n_experts +
-        4 * (size_t)c->topk + 3 * inter + 3 * rinter +
-        4 * (size_t)c->head_dim +
-        (size_t)c->index_n_heads * (size_t)c->index_head_dim +
-        (size_t)c->index_n_heads;
-    const size_t tok_f = (size_t)c->topk * (size_t)d;
-    const size_t tok_bytes = sizeof(DSV4PrefillTok) + tok_f * sizeof(float);
+    const DSV4PrefillBytes pb = dsv4_prefill_bytes(c, cap);
     fprintf(stderr, "prefill: whole-prompt block, %d token(s), %.1f MB block + "
                     "%.1f MB token state (%.1f KB/token); matmul tile <=%d rows\n",
-            cap, (double)cap * (double)per_tok * sizeof(float) / 1048576.0,
-            (double)cap * (double)tok_bytes / 1048576.0,
-            (double)tok_bytes / 1024.0, DSV4_MAX_BATCH);
+            cap, (double)pb.block_bytes / 1048576.0,
+            (double)pb.token_bytes / 1048576.0,
+            (double)pb.token_bytes / cap / 1024.0, DSV4_MAX_BATCH);
     return 0;
 }

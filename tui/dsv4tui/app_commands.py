@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from .defaults import DEFAULT_KV
-from .dsml import py_prefix_text
+from .defaults import DEFAULT_ENV, DEFAULT_KV
+from .dsml import tools_prefix_text
 from .messages import Message
 
 
@@ -12,6 +12,13 @@ class CommandMixin:
     def add_system(self, text: str) -> None:
         self.messages.append(Message("system", text))
         self.dirty = True
+
+    def _tools_note(self, text: str) -> str:
+        """Append the one-time hint when web search has no key yet."""
+        if not self.web.key_configured():
+            return (f"{text}; web search needs DEEPSEEK_API_KEY in "
+                    f"{DEFAULT_ENV}")
+        return text
 
     def submit(self) -> None:
         text = self.input.strip()
@@ -78,18 +85,19 @@ class CommandMixin:
                 "  /help                 this list\n"
                 "  /reset                clear model context\n"
                 "  /gen N                max tokens per turn\n"
-                "  /py                   allow run_python; loads the cached\n"
-                "                        tools preamble when the context is empty\n"
+                "  /tools                allow run_python and web_search; loads\n"
+                "                        the cached tools preamble when empty\n"
                 "  /exit                 quit")
         elif cmd == "/reset":
             if self.tool_running:
-                self.tool_abort("python cancelled for /reset")
+                self.tool_abort("tool cancelled for /reset")
             elif self.generating:
                 self.add_system("finish the current turn before resetting")
                 return
             if self.backend_alive:
                 self.backend.send({"cmd": "reset"})
             self.py.reset()
+            self.web.reset()
             self.chain_id += 1
             self.tool_cancelled = False
             self.system_armed = True
@@ -104,18 +112,19 @@ class CommandMixin:
             self.decode_spt.clear()
             self.stats_force = True
             self.add_system("context reset; cache stays warm")
-        elif cmd == "/py":
+        elif cmd == "/tools":
             if arg:
                 state = "on" if self.tool_enabled else "off"
-                self.add_system(f"python is {state}; usage: /py")
+                self.add_system(f"tools are {state}; usage: /tools")
             elif self.kv_pending:
                 self.add_system("cached tools preamble is still loading")
             elif self.generating and not self.tool_running:
                 self.add_system(
-                    "finish the current turn before changing python")
+                    "finish the current turn before changing tools")
                 return
             elif self.tool_enabled and self.kv_loaded:
-                self.add_system("python is already on; cached preamble loaded")
+                self.add_system(self._tools_note(
+                    "tools are already on; cached preamble loaded"))
             elif self.context_used == 0 and \
                     (not self.tool_enabled or not self.kv_loaded):
                 # Empty context and no restored preamble yet: try the cache.
@@ -124,31 +133,32 @@ class CommandMixin:
                 self.tool_enabled = True
                 if DEFAULT_KV.exists() and self.backend_alive and self.backend.send(
                         {"cmd": "kv_load", "path": str(DEFAULT_KV),
-                         "text": py_prefix_text()}):
+                         "text": tools_prefix_text()}):
                     self.kv_pending = True
-                    self.add_system(
-                        f"python on; loading cached tools preamble from "
-                        f"{DEFAULT_KV}…")
+                    self.add_system(self._tools_note(
+                        f"tools on; loading cached preamble from "
+                        f"{DEFAULT_KV}…"))
                 else:
                     self.system_armed = True
                     if DEFAULT_KV.exists():
-                        self.add_system(
-                            "python on; could not request the cached preamble")
+                        self.add_system(self._tools_note(
+                            "tools on; could not request the cached preamble"))
                     else:
-                        self.add_system(
-                            "python on; no cached preamble yet (run `make kv`); "
-                            "the model may call run_python")
+                        self.add_system(self._tools_note(
+                            "tools on; no cached preamble yet (run `make kv`); "
+                            "the model may call run_python and web_search"))
             elif self.tool_enabled:
-                self.add_system("python is already on")
+                self.add_system(self._tools_note("tools are already on"))
             else:
                 self.tool_enabled = True
                 if self.context_used == 0:
                     self.system_armed = True
-                    self.add_system("python on; the model may call run_python")
+                    self.add_system(self._tools_note(
+                        "tools on; the model may call run_python and web_search"))
                 else:
-                    self.add_system(
-                        "python on, but the tools preamble needs an empty "
-                        "context; /reset before the model can see it")
+                    self.add_system(self._tools_note(
+                        "tools on, but the tools preamble needs an empty "
+                        "context; /reset before the model can see it"))
         elif cmd == "/gen":
             try:
                 n = int(arg)

@@ -94,10 +94,18 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
         return;
     }
 
-    /* The whole new turn is one prefill block. Reserve its buffers before any
-     * state moves; a failure here can still take the per-token fallback. */
+    /* The whole new turn is one prefill block. Its buffers scale with the
+     * prompt and sit next to an already-resident expert cache; make room in
+     * the cache before reserving them, and keep claims capped until the block
+     * is released. */
+    DSV4CacheGuard guard;
+    const DSV4PrefillBytes pb = dsv4_prefill_bytes(&e->c, n_added);
+    dsv4_cache_guard_begin(&e->cache, pb.block_bytes + pb.token_bytes, &guard);
+
     int use_batched = 0;
     dsv4_prefill_prepare(e, n_added, &use_batched);
+    if (!use_batched)
+        dsv4_cache_guard_end(&e->cache, &guard);
     dsv4_emit_start(e, start_pos, n_added, ngen,
                     use_batched ? n_added : 0);
 
@@ -114,6 +122,10 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     const double tp0 = dsv4_now_s();
     const int prc = dsv4_prefill_run(e, e->ids + start_pos, n_added, start_pos,
                                      use_batched, emit_layers, "prompt", t0);
+    /* run() released the block buffers, so the full cache window can return
+     * before the decode loop starts refilling it. */
+    if (use_batched)
+        dsv4_cache_guard_end(&e->cache, &guard);
     if (prc == DSV4_PREFILL_CANCELLED || prc == DSV4_PREFILL_ABORTED) {
         dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;

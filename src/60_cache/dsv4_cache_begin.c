@@ -48,7 +48,7 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
         }
 
         int found = -1;
-        for (int i = 0; i < c->nslot; i++)
+        for (int i = 0; i < c->limit; i++)
             if (c->slot[i].layer == layer && c->slot[i].expert == e) {
                 found = i; break;
             }

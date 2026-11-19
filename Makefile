@@ -53,7 +53,7 @@ e2e: $(BIN)/dsv4-serve
 prefill: $(BIN)/dsv4-serve
 	python3 bench/prefill.py
 
-# Precompute the KV state for the /py tools preamble. Always rebuild: the
+# Precompute the KV state for the /tools preamble. Always rebuild: the
 # preamble or model may have changed, and a stale file is cheap to replace.
 kv: $(BIN)/dsv4-serve
 	python3 tools/build_kv_prefix.py

@@ -86,6 +86,15 @@ void dsv4_prefill_free(DSV4Prefill *p);
  * range starts writing KV/compressor state there is no way back. */
 int  dsv4_prefill_reserve(DSV4Prefill *p, int n_tokens);
 
+/* Bytes dsv4_prefill_reserve() will allocate for `n_tokens`. The cache guard
+ * uses this before the allocation so it can make room for the block. */
+typedef struct {
+    int64_t block_bytes;   /* block-wide buffers */
+    int64_t token_bytes;   /* per-token scratch and expert accumulators */
+} DSV4PrefillBytes;
+
+DSV4PrefillBytes dsv4_prefill_bytes(const DSV4Cfg *c, int n_tokens);
+
 /* Release the block-sized buffers but keep the prefill engine usable. Call once
  * a range has finished: keeping them pinned turns the longest prompt ever seen
  * into a permanent memory high-water mark. */

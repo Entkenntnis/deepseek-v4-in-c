@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Build the precomputed KV cache for the `/py` tools preamble.
+"""Build the precomputed KV cache for the `/tools` preamble.
 
 The TUI sends exactly `BOS + system_prompt() + newline` in front of the first
-user turn when python tools are enabled. This script runs that same prefix
-through the normal prefill path once and writes the resulting layer state to
+user turn when tools are enabled. This script runs that same prefix through
+the normal prefill path once and writes the resulting layer state to
 `DEFAULT_KV` (or `--output`).
 
 Examples:
     make kv
     python3 tools/build_kv_prefix.py
-    python3 tools/build_kv_prefix.py --output /tmp/py-prefix.bin
+    python3 tools/build_kv_prefix.py --output /tmp/tools-prefix.bin
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from dsv4tui import proto  # noqa: E402
 from dsv4tui.defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX,
                               DEFAULT_KV, DEFAULT_MODEL, DEFAULT_TOK,
                               DEFAULT_TRUNK)  # noqa: E402
-from dsv4tui.dsml import py_prefix_text  # noqa: E402
+from dsv4tui.dsml import tools_prefix_text  # noqa: E402
 from dsv4tui.tokenizer import Tokenizer  # noqa: E402
 
 
@@ -103,7 +103,7 @@ def resolve_output(a: argparse.Namespace) -> Path:
     if env:
         return Path(os.path.expanduser(env))
     name = Path(str(a.model).rstrip("/")).name or DEFAULT_MODEL.name
-    return DEFAULT_KV.parent / f"{name}-py-prefix.bin"
+    return DEFAULT_KV.parent / f"{name}-tools-prefix.bin"
 
 
 def main() -> int:
@@ -122,7 +122,7 @@ def main() -> int:
         print(f"build_kv: cannot load tokenizer {a.tok}: {exc}",
               file=sys.stderr)
         return 2
-    prefix = py_prefix_text()
+    prefix = tools_prefix_text()
     prefix_tokens = tok.encode(prefix)
     proc = subprocess.Popen(
         build_command(a),

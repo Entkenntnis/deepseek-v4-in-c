@@ -3,15 +3,19 @@
 
 The engine's KV cache is the conversation, so a round is just another
 `generate` whose prompt is a <tool_result> block. This mixin owns that state
-machine and nothing else: parsing lives in dsml.py, execution in pytool.py.
+machine and nothing else: parsing lives in dsml.py, Python execution in
+pytool.py, and web search in websearch.py.
 """
 
 from __future__ import annotations
 
-from .defaults import TOOL_MAX_ROUNDS
-from .dsml import (DSML, TOOL_NAME, code_fence, format_result,
-                   parse_tool_calls, render_tool_text, system_prompt)
+from .defaults import SEARCH_MAX_RESULTS, TOOL_MAX_ROUNDS
+from .dsml import (DSML, TOOL_NAME, WEB_SEARCH_NAME, code_fence,
+                   format_result, parse_tool_calls, render_tool_text,
+                   render_web_text, system_prompt)
 from .messages import Message
+
+TOOL_NAMES = (TOOL_NAME, WEB_SEARCH_NAME)
 
 
 class ToolMixin:
@@ -24,7 +28,9 @@ class ToolMixin:
         self.tool_cancelled = False
         self.tool_running = False
         self.pending_tool = None
+        self.pending_tool_name = ""
         self.pending_code = ""
+        self.pending_query = ""
         self.current_user_msg = Message("user", text)
         self.messages.append(self.current_user_msg)
         self._open_assistant()
@@ -78,8 +84,8 @@ class ToolMixin:
             # The tools preamble may still be in the KV cache after startup.
             if calls or f"<{DSML}" in raw or "<|DSML|" in raw:
                 self._settle_content(msg, content)
-                self.add_system("python is off; the call was ignored "
-                                "(/py to allow it)")
+                self.add_system("tools are off; the call was ignored "
+                                "(/tools to allow them)")
             return False
         if not calls:
             if raw != content:
@@ -91,15 +97,37 @@ class ToolMixin:
 
         self._settle_content(msg, content)
 
-        call = next((c for c in calls if c.get("name") == TOOL_NAME), None)
+        call = next((c for c in calls if c.get("name") in TOOL_NAMES), None)
         if call is None:
             names = ", ".join(str(c.get("name")) for c in calls)
             self.add_system(f"unknown tool call: {names}")
             return False
-        code = call.get("arguments", {}).get("code", "")
-        if not isinstance(code, str) or not code.strip():
-            self.add_system("tool call had no code; ignored")
-            return False
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+        name = str(call.get("name"))
+
+        if name == TOOL_NAME:
+            code = args.get("code", "")
+            if not isinstance(code, str) or not code.strip():
+                self.add_system("run_python call had no code; ignored")
+                return False
+            self.pending_code = code
+            pending_text = code_fence(code) + "\n\n_running…_"
+        else:
+            query = args.get("query", "")
+            if not isinstance(query, str) or not query.strip():
+                self.add_system("web_search call had no query; ignored")
+                return False
+            try:
+                count = int(args.get("count", SEARCH_MAX_RESULTS))
+            except (TypeError, ValueError):
+                count = SEARCH_MAX_RESULTS
+            self.pending_query = query.strip()
+            self.pending_count = max(1, min(50, count))
+            pending_text = (f"**Search** `{self.pending_query}`\n\n"
+                            "_running…_")
+
         if len(calls) > 1:
             self.add_system(f"{len(calls) - 1} extra tool call(s) skipped")
 
@@ -111,11 +139,11 @@ class ToolMixin:
             self.add_system("stopped: context is nearly full; /reset to continue")
             return False
 
-        self.pending_code = code
-        self.pending_tool = Message("tool", code_fence(code) + "\n\n_running…_")
+        self.pending_tool_name = name
+        self.pending_tool = Message("tool", pending_text)
         self.messages.append(self.pending_tool)
         self.tool_running = True
-        # Keep the turn "live" while the child runs: the input line refuses new
+        # Keep the turn "live" while the tool runs: the input line refuses new
         # turns, the header repaints, and Ctrl-C routes to tool_abort().
         self.generating = True
         self.status = "generating"
@@ -125,15 +153,22 @@ class ToolMixin:
             self.sink.event({"event": "tool_done", "chain": chain,
                              "result": result})
 
-        if not self.py.run_async(code, done):
+        if name == TOOL_NAME:
+            started = self.py.run_async(self.pending_code, done)
+            busy = "interpreter is busy; try again"
+        else:
+            started = self.web.run_async(self.pending_query,
+                                         self.pending_count, done)
+            busy = "web search is busy; try again"
+        if not started:
             self.tool_running = False
             self.pending_tool = None
-            self.add_system("interpreter is busy; try again")
+            self.add_system(busy)
             return False
         self.dirty = True
         return True
 
-    # -- interpreter result arrives ---------------------------------------
+    # -- tool result arrives ----------------------------------------------
 
     def tool_event(self, ev: dict) -> None:
         if ev.get("chain") != self.chain_id or self.tool_cancelled:
@@ -141,8 +176,14 @@ class ToolMixin:
         self.tool_running = False
         result = ev.get("result") or {}
         if self.pending_tool is not None:
-            self.pending_tool.text = render_tool_text(self.pending_code, result)
+            if self.pending_tool_name == WEB_SEARCH_NAME:
+                self.pending_tool.text = render_web_text(
+                    self.pending_query, result)
+            else:
+                self.pending_tool.text = render_tool_text(
+                    self.pending_code, result)
         self.pending_tool = None
+        self.pending_tool_name = ""
         self.dirty = True
 
         self._open_assistant()
@@ -157,17 +198,23 @@ class ToolMixin:
 
     # -- cancellation ------------------------------------------------------
 
-    def tool_abort(self, note: str = "python cancelled; chain stopped") -> None:
-        """Kill a running script and invalidate its late completion."""
+    def tool_abort(self, note: str = "tool cancelled; chain stopped") -> None:
+        """Kill a running tool and invalidate its late completion."""
         if not self.tool_running and not self.tool_cancelled:
             return
         self.tool_cancelled = True
         self.tool_running = False
         self.py.cancel()
+        self.web.cancel()
         if self.pending_tool is not None:
-            self.pending_tool.text = (
-                code_fence(self.pending_code) + "\n\n_cancelled_")
+            if self.pending_tool_name == WEB_SEARCH_NAME:
+                text = (f"**Search** `{self.pending_query}`\n\n"
+                        "_cancelled_")
+            else:
+                text = code_fence(self.pending_code) + "\n\n_cancelled_"
+            self.pending_tool.text = text
         self.pending_tool = None
+        self.pending_tool_name = ""
         self.chain_id += 1
         self.generating = False
         self.current_msg = None

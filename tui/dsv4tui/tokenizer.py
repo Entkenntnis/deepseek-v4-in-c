@@ -433,5 +433,5 @@ class Tokenizer:
         return self.encode("".join(parts))
 
     def prefix_tokens(self, system: str) -> list[int]:
-        """BOS + system + newline, used by the /py KV prefix cache."""
+        """BOS + system + newline, used by the /tools KV prefix cache."""
         return self.encode(BOS + system + "\n")

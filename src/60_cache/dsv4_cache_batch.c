@@ -14,7 +14,7 @@ int dsv4_cache_claim_slot(DSV4Cache *c, int layer, int expert,
 {
     int victim = -1;
     uint64_t oldest = UINT64_MAX;
-    for (int i = 0; i < c->nslot; i++) {
+    for (int i = 0; i < c->limit; i++) {
         DSV4Slot *s = &c->slot[i];
         if (s->pending) continue;
         int taken = 0;
