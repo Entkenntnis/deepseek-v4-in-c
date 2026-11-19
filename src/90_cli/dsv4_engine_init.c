@@ -87,7 +87,6 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
         return -1;
     const int64_t left = budget - dsv4_trunk_resident_bytes(&e->tr);
     if (dsv4_cache_init(&e->cache, &e->st, &e->tr, &e->c, left) != 0) return -1;
-    dsv4_cache_set_stream_cap(&e->cache, 6);
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 
     e->cs_d = malloc((size_t)e->maxpos * (e->c.qk_rope / 2) * sizeof(float));

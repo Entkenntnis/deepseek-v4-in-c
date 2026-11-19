@@ -67,9 +67,9 @@ typedef struct DSV4Cache {
     uint64_t bytes_read;
     uint64_t pf_bytes;      /* prefetch bytes are part of displayed read GB */
 
-    /* Publish each miss as its read lands and queue at most this many reads at
-     * once. 0 keeps the historical end() barrier. This changes WHEN a finished
-     * expert becomes usable, never WHICH slot was chosen. */
+    /* Publish each miss as its read lands, keeping this many reads in flight.
+     * Fixed at 6; this changes WHEN a finished expert becomes usable, never
+     * WHICH slot was chosen. */
     int             stream_cap;
 
     /* HASH-LAYER PREFETCH: uses the same slots and reader pool. */
@@ -148,9 +148,6 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
  * stream instead of first-use order. Numerically neutral: the caller still
  * accumulates each request in k order. */
 void dsv4_cache_sort_experts(const DSV4Cache *c, int layer, int *experts, int n);
-
-/* Set how many miss reads one batch keeps in flight. 0 restores the barrier. */
-void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap);
 
 /* Block until one miss has landed; *k indexes the caller's out array. Returns 1
  * when one was handed out, 0 when every miss has been consumed. A prefetch

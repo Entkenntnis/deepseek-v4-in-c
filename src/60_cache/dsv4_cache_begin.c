@@ -111,14 +111,6 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     return b->rc;
 }
 
-void dsv4_cache_set_stream_cap(DSV4Cache *c, int cap)
-{
-    if (!c) return;
-    if (cap < 0) cap = 0;
-    if (cap > DSV4_MAX_TOPK) cap = DSV4_MAX_TOPK;
-    c->stream_cap = cap;
-}
-
 int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
 {
     if (!c || !b || !k || !b->streaming) return 0;

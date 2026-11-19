@@ -15,6 +15,7 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
 {
     memset(c, 0, sizeof *c);
     c->st = st; c->tr = tr; c->cfg = cfg;
+    c->stream_cap = 6;   /* fixed: miss reads in flight per layer */
     dsv4_cache_expert_geometry(c, cfg);
 
     /* A cache smaller than topk cannot serve begin(), which will not evict a
