@@ -76,6 +76,9 @@ typedef struct {
     float    limit;
 } DSV4VkSwigluPC;
 
+size_t dsv4_vk_qmat_wbytes(const DSV4QMat *m);
+size_t dsv4_vk_qmat_sbytes(const DSV4QMat *m);
+
 uint32_t dsv4_prefill_vk_pick_mem_type(
     const VkPhysicalDeviceMemoryProperties *mp, uint32_t allowed);
 int  dsv4_prefill_vk_open(DSV4PrefillVk *v);

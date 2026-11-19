@@ -91,6 +91,9 @@ void dsv4_emit_kv_built(int tokens, double seconds, long long bytes);
 void dsv4_emit_kv_loaded(int tokens, int context_cap, double seconds);
 void dsv4_emit_kv_error(const char *message);
 
+/* ---- commands ---- */
+int  dsv4_handle_command(Engine *e, char *line);
+
 /* ---- engine ---- */
 int  dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                       double budget_gb, int budget_auto, int ctx,
@@ -105,6 +108,11 @@ int  dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
                   int emit_layers, const char *phase, double t_turn,
                   int32_t *best);
 void dsv4_head_from_h(Engine *e, int32_t *best);
+void dsv4_cancel_prefill_turn(Engine *e, int rollback, int start_pos,
+                              int prompt_tokens, double t0, double tp0);
+void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
+                      int ngen, int eos, int emit_layers, double t0,
+                      double tp0, int32_t best);
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                           int ngen, int eos, int think, int emit_layers);
 void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,

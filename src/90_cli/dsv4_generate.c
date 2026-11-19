@@ -1,35 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_generate.c - one turn: prompt prefill, then decode until stop. */
 #include <stdio.h>
-#include <string.h>
 
 #include "dsv4_serve_int.h"
 #include "dsv4_time.h"
-
-/* Stop a turn before its first token. With a snapshot the layer state and the
- * token array roll back to the end of the previous turn, so the conversation
- * survives and only this new message is dropped. Without one, the partial
- * prefill cannot be resumed and the whole context has to go. */
-static void cancel_prefill_turn(Engine *e, int rollback, int start_pos,
-                                int prompt_tokens, double t0, double tp0)
-{
-    e->prefill_s = dsv4_now_s() - tp0;
-    e->prefill_tokens = 0;   /* nothing from this turn is in the context */
-    if (rollback) {
-        dsv4_state_snapshot_restore(e->snap);
-        e->n_ids = start_pos;
-        e->pending_forward = 0;
-    } else {
-        if (dsv4_engine_reset_context(e) != 0) {
-            dsv4_emit_error("prefill cancelled; context reset failed");
-            dsv4_cancel = 0;
-            return;
-        }
-        dsv4_emit_reset(e, "cancel");
-    }
-    dsv4_emit_done(e, prompt_tokens, 0, dsv4_now_s() - t0, 0.0, "cancel");
-    dsv4_cancel = 0;
-}
 
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                           int ngen, int eos, int think, int emit_layers)
@@ -115,7 +89,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
          * high-water mark for the resident engine. */
         dsv4_prefill_release(e->pf);
         if (rc == DSV4_PREFILL_CANCELLED || rc == DSV4_PREFILL_ABORTED) {
-            cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+            dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
             return;
         }
         if (rc != 0) {
@@ -126,7 +100,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     } else {
         for (int i = start_pos; i < e->n_ids; i++) {
             if (dsv4_cancel) {
-                cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+                dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
                 return;
             }
             if (dsv4_forward(e, e->ids[i], i, 0, emit_layers, "prompt",
@@ -138,7 +112,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     /* No token has been emitted yet, so a stop here still drops this turn and
      * restores the context from before it. */
     if (dsv4_cancel) {
-        cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+        dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;
     }
     if (use_batched) {
@@ -156,70 +130,10 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     int32_t best = 0;
     dsv4_head_from_h(e, &best);
     if (dsv4_cancel) {
-        cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
+        dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;
     }
 
-    int generated = 0;
-    double ttft = 0.0;
-    const char *stop = "max";
-
-    while (generated < ngen) {
-        if (dsv4_cancel) {
-            /* Before the first token there is nothing to keep from this turn,
-             * so a stop rolls the context back rather than leaving a prompt
-             * with no answer in it. */
-            if (generated == 0) {
-                cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
-                return;
-            }
-            stop = "cancel";
-            break;
-        }
-        if (e->n_ids >= e->cap_ids) {
-            dsv4_emit_error("context full (%d tokens) while generating",
-                            e->cap_ids);
-            stop = "context";
-            break;
-        }
-        const int32_t id = best;
-        const int pos = e->n_ids;
-        e->ids[e->n_ids++] = id;
-
-        const double el = dsv4_now_s() - t0;
-        if (generated == 0) ttft = el;
-        dsv4_emit_token(e, id, generated, el, ttft);
-        generated++;
-        /* The prefix-only context has now become a real completed-prefix turn;
-         * the next generate may need the normal EOS handling again. */
-        e->kv_prefix = 0;
-
-        if (id == eos) {
-            stop = "eos";
-            e->pending_forward = 1;   /* forwarded at the start of next turn */
-            break;
-        }
-        if (generated >= ngen) {
-            stop = "max";
-            e->pending_forward = 1;
-            break;
-        }
-
-        const int frc = dsv4_forward(e, id, pos, 1, emit_layers, "gen",
-                                     dsv4_now_s() - t0, &best);
-        if (frc != 0) {
-            e->pending_forward = 1;   /* the emitted token is not in the KV yet */
-            stop = "error";
-            break;
-        }
-        e->pending_forward = 0;
-    }
-
-    const double dt = dsv4_now_s() - t0;
-    /* A zero-token turn that still committed its user message (ngen=0) has
-     * moved past the bare prefix, so the next turn must close it normally. */
-    if (generated == 0 && strcmp(stop, "cancel") != 0 &&
-        strcmp(stop, "error") != 0)
-        e->kv_prefix = 0;
-    dsv4_emit_done(e, n_added, generated, dt, ttft, stop);
+    dsv4_decode_loop(e, n_added, start_pos, snap_ok, ngen, eos,
+                      emit_layers, t0, tp0, best);
 }
