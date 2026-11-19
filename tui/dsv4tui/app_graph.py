@@ -48,9 +48,14 @@ class GraphMixin:
         spt_txt = self._short_spt(cur_spt) if cur_spt else "-"
 
         def emit_memory() -> None:
-            sysd = self.last.get("sys") or self.ready.get("sys") or {}
-            cache = self.last.get("cache") or self.ready.get("cache") or {}
-            trunk = self.last.get("trunk") or self.ready.get("trunk") or {}
+            # ready carries the static cache/trunk fields; later events carry
+            # only the dynamic counters, so merge them per field.
+            sysd = {**(self.ready.get("sys") or {}),
+                    **(self.last.get("sys") or {})}
+            cache = {**(self.ready.get("cache") or {}),
+                     **(self.last.get("cache") or {})}
+            trunk = {**(self.ready.get("trunk") or {}),
+                     **(self.last.get("trunk") or {})}
             cfg = self.ready.get("config") or {}
             rss = float(sysd.get("rss_mb") or 0.0) / 1024.0
             hit = float(cache.get("hit_rate") or 0.0) * 100.0

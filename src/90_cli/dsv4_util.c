@@ -90,7 +90,7 @@ void dsv4_emit_error(const char *fmt, ...)
 void dsv4_usage(const char *me)
 {
     fprintf(stderr,
-            "usage: %s <model_dir> --trunk <dir> "
+            "usage: %s --model <dir> --trunk <dir> "
             "[--budget GB|auto] [--ctx N] [--gen N]\n"
             "\n"
             "Speaks a line protocol on stdin/stdout: one command or event per\n"

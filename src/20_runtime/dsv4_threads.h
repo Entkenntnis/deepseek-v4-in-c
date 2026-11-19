@@ -13,34 +13,21 @@
  * pthreads can be sent to the E-cores, where they mostly sleep in pread().
  * The decode microbenchmarks that measured this were removed with the other C benchmarks.
  *
- * The policy is fixed at build time; edit DSV4_P_LO..DSV4_E_HI in
- * dsv4_threads.c for different silicon.
+ * The policy is fixed at build time; edit the constants in dsv4_threads.c for
+ * different silicon.
  */
 #ifndef DSV4_THREADS_H
 #define DSV4_THREADS_H
 
-typedef enum {
-    DSV4_PIN_OFF = 0,   /* do not call sched_setaffinity at all            */
-    DSV4_PIN_ALL,       /* every CPU in the process's inherited mask       */
-    DSV4_PIN_P,         /* P-core group (0-3 on the 258V)                  */
-    DSV4_PIN_E          /* E-core group (4-7 on the 258V)                  */
-} DSV4Pin;
-
-typedef struct {
-    int pin;            /* DSV4Pin for the compute/OpenMP team             */
-    int threads;        /* omp_set_num_threads; 0 = leave the runtime alone */
-    int readers;        /* expert-reader pool width; 0 = default (6)        */
-    int reader_pin;     /* DSV4Pin for the reader pthreads                 */
-} DSV4ThreadOpts;
-
-/* Apply the policy. Must be called AFTER argument parsing and BEFORE the first
+/* Apply the fixed policy in dsv4_threads.c. Must be called BEFORE the first
  * OpenMP region and before dsv4_cache_init(): libgomp worker threads and the
  * cache's reader pthreads inherit the calling thread's affinity mask. Returns
  * 0 on success; an empty requested group falls back to the inherited mask. */
-int  dsv4_threads_apply(const DSV4ThreadOpts *o);
+int  dsv4_threads_apply(void);
 
-/* Re-pin the CALLING thread according to opts.reader_pin. Called by each cache
- * reader thread at startup, because those threads inherited the compute mask. */
+/* Re-pin the CALLING thread according to the fixed reader policy. Called by
+ * each cache reader thread at startup, because those threads inherited the
+ * compute mask. */
 void dsv4_threads_pin_current_reader(void);
 
 /* Fixed reader-pool width (6). The cache uses this directly. */

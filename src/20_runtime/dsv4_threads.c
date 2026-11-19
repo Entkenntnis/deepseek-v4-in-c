@@ -3,16 +3,14 @@
  *
  * The CPU groups are compiled in, not discovered. This engine is tuned for one
  * machine (Intel Core Ultra 7 258V) and a sysfs probe would be a portability
- * claim the rest of the file does not make. The two constants below are the
- * whole CPU policy; change them for different silicon.
+ * claim the rest of the file does not make. The constants below are the whole
+ * CPU policy; change them for different silicon.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include <omp.h>
 
@@ -26,20 +24,12 @@
 #define DSV4_E_LO 4
 #define DSV4_E_HI 7
 
-static DSV4ThreadOpts g_opt;
+/* The fixed policy. Change these for different silicon. */
+#define DSV4_COMPUTE_THREADS 4
+#define DSV4_READERS         6
 
 static cpu_set_t g_orig;
 static int       g_have_orig;
-
-static const char *pin_name(int p)
-{
-    switch (p) {
-    case DSV4_PIN_ALL: return "all";
-    case DSV4_PIN_P:   return "P-cores";
-    case DSV4_PIN_E:   return "E-cores";
-    default:           return "off";
-    }
-}
 
 static void all_cpus(cpu_set_t *s)
 {
@@ -70,64 +60,41 @@ static void mask_str(const cpu_set_t *m, char *out, size_t cap)
             n += (size_t)snprintf(out + n, cap - n, "%s%d", n ? "," : "", c);
 }
 
-int dsv4_threads_apply(const DSV4ThreadOpts *o)
+int dsv4_threads_apply(void)
 {
-    g_opt = *o;
-    if (o->threads > 0) omp_set_num_threads(o->threads);
+    omp_set_num_threads(DSV4_COMPUTE_THREADS);
 
     inherited_mask(&g_orig);
     g_have_orig = 1;
 
-    int pinned = 0;
+    cpu_set_t want;
+    group_mask(&want, DSV4_P_LO, DSV4_P_HI, &g_orig);
+
     char cpus[96];
     mask_str(&g_orig, cpus, sizeof cpus);
-
-    if (o->pin != DSV4_PIN_OFF) {
-        cpu_set_t want;
-        switch (o->pin) {
-        case DSV4_PIN_ALL: want = g_orig; break;
-        case DSV4_PIN_P:   group_mask(&want, DSV4_P_LO, DSV4_P_HI, &g_orig); break;
-        case DSV4_PIN_E:   group_mask(&want, DSV4_E_LO, DSV4_E_HI, &g_orig); break;
-        default:           CPU_ZERO(&want); break;
-        }
-        if (CPU_COUNT(&want) == 0) {
-            fprintf(stderr, "dsv4_threads: %s is empty in this process's CPU "
-                            "mask (%s); leaving affinity alone\n",
-                    pin_name(o->pin), cpus);
-        } else {
-            if (sched_setaffinity(0, sizeof want, &want) != 0) {
-                perror("dsv4_threads: sched_setaffinity");
-            } else {
-                pinned = 1;
-                mask_str(&want, cpus, sizeof cpus);
-            }
-        }
+    int pinned = 0;
+    if (CPU_COUNT(&want) == 0) {
+        fprintf(stderr, "dsv4_threads: P-cores are empty in this process's "
+                        "CPU mask (%s); leaving affinity alone\n", cpus);
+    } else if (sched_setaffinity(0, sizeof want, &want) != 0) {
+        perror("dsv4_threads: sched_setaffinity");
+    } else {
+        pinned = 1;
+        mask_str(&want, cpus, sizeof cpus);
     }
 
-    int nth = o->threads;
-    if (nth <= 0) nth = omp_get_max_threads();
-
     fprintf(stderr,
-            "threads: compute %d on CPUs %s%s, readers %d%s\n",
-            nth, cpus, pinned ? "" : " (no affinity)",
-            o->readers > 0 ? o->readers : 6,
-            o->reader_pin == DSV4_PIN_OFF ? ""
-                : (o->reader_pin == DSV4_PIN_E ? " on E-cores"
-                                               : " on their own group"));
+            "threads: compute %d on CPUs %s%s, readers %d on E-cores\n",
+            DSV4_COMPUTE_THREADS, cpus, pinned ? "" : " (no affinity)",
+            DSV4_READERS);
     return 0;
 }
 
 void dsv4_threads_pin_current_reader(void)
 {
-    if (!g_have_orig || g_opt.reader_pin == DSV4_PIN_OFF) return;
-
+    if (!g_have_orig) return;
     cpu_set_t want;
-    switch (g_opt.reader_pin) {
-    case DSV4_PIN_ALL: want = g_orig; break;
-    case DSV4_PIN_P:   group_mask(&want, DSV4_P_LO, DSV4_P_HI, &g_orig); break;
-    case DSV4_PIN_E:   group_mask(&want, DSV4_E_LO, DSV4_E_HI, &g_orig); break;
-    default: return;
-    }
+    group_mask(&want, DSV4_E_LO, DSV4_E_HI, &g_orig);
     if (CPU_COUNT(&want) == 0) return;
     if (sched_setaffinity(0, sizeof want, &want) != 0)
         perror("dsv4_threads: reader sched_setaffinity");
@@ -135,5 +102,5 @@ void dsv4_threads_pin_current_reader(void)
 
 int dsv4_threads_readers(void)
 {
-    return g_opt.readers > 0 ? g_opt.readers : 6;
+    return DSV4_READERS;
 }

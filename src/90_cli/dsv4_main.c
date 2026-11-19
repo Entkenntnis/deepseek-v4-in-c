@@ -20,27 +20,32 @@ int main(int argc, char **argv)
 {
     const char *model = NULL, *trunkdir = NULL;
     double budget_gb = 8.0;
-    int budget_auto = 0;
     int ctx = 8192, ngen = 128;
 
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] != '-' && !model) { model = argv[i]; continue; }
-        else if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
-        else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunkdir = argv[++i];
-        /* Kept as an ignored option so old launch lines do not mistake the
-         * tokenizer path for the model argument. The engine no longer sees
-         * text, so it does not load a tokenizer. */
-        else if (!strcmp(argv[i], "--tok") && i + 1 < argc) ++i;
+        if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(argv[i], "--trunk") && i + 1 < argc)
+            trunkdir = argv[++i];
         else if (!strcmp(argv[i], "--budget") && i + 1 < argc) {
             const char *v = argv[++i];
-            if (!strcmp(v, "auto")) budget_auto = 1;
-            else { budget_auto = 0; budget_gb = atof(v); }
+            budget_gb = strcmp(v, "auto") ? atof(v) : -1.0;
         }
-        else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--gen") && i + 1 < argc) ngen = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--help")) { dsv4_usage(argv[0]); return 0; }
+        else if (!strcmp(argv[i], "--ctx") && i + 1 < argc)
+            ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gen") && i + 1 < argc)
+            ngen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--help")) {
+            dsv4_usage(argv[0]);
+            return 0;
+        } else {
+            dsv4_usage(argv[0]);
+            return 2;
+        }
     }
-    if (!model || !trunkdir) { dsv4_usage(argv[0]); return 2; }
+    if (!model || !trunkdir) {
+        dsv4_usage(argv[0]);
+        return 2;
+    }
 
     struct sigaction cancel_sa;
     memset(&cancel_sa, 0, sizeof cancel_sa);
@@ -53,8 +58,7 @@ int main(int argc, char **argv)
 
     /* Thread policy before engine_init(): the cache's reader pthreads inherit
      * the calling thread's mask. This is fixed, not a command-line option. */
-    const DSV4ThreadOpts topts = { DSV4_PIN_P, 4, 6, DSV4_PIN_E };
-    dsv4_threads_apply(&topts);
+    dsv4_threads_apply();
 
     /* Line buffering is not enough on a pipe: every event must be visible to
      * the TUI the moment it is produced. */
@@ -62,9 +66,9 @@ int main(int argc, char **argv)
     setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
 
     Engine e;
-    if (dsv4_engine_init(&e, model, trunkdir, budget_gb, budget_auto,
-                         ctx, ngen) != 0) {
-        dsv4_emit_error("engine init failed (see stderr for the loader's message)");
+    if (dsv4_engine_init(&e, model, trunkdir, budget_gb, ctx, ngen) != 0) {
+        dsv4_emit_error("engine init failed "
+                        "(see stderr for the loader's message)");
         dsv4_engine_free(&e);
         return 1;
     }

@@ -108,7 +108,7 @@ int dsv4_handle_command(Engine *e, char *line)
         const char *tv = field(&f, "tokens");
         if (decode_path(field(&f, "path"), path, sizeof path) != 0 ||
             !tv || parse_ids(e, tv, &nt) != 0 || nt == 0) {
-            dsv4_emit_kv_error("kv_build needs path=hex:... and tokens=...");
+            dsv4_emit_error("KV: kv_build needs path=hex:... and tokens=...");
         } else {
             dsv4_engine_kv_build(e, e->in_ids, nt, path);
         }
@@ -117,9 +117,9 @@ int dsv4_handle_command(Engine *e, char *line)
         int nt = 0;
         const char *tv = field(&f, "tokens");
         if (decode_path(field(&f, "path"), path, sizeof path) != 0) {
-            dsv4_emit_kv_error("kv_load needs path=hex:...");
+            dsv4_emit_error("KV: kv_load needs path=hex:...");
         } else if (tv && parse_ids(e, tv, &nt) != 0) {
-            dsv4_emit_kv_error("kv_load tokens= is malformed");
+            dsv4_emit_error("KV: kv_load tokens= is malformed");
         } else {
             dsv4_engine_kv_load(e, e->in_ids, nt, path);
         }

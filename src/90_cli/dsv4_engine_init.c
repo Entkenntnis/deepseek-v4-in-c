@@ -20,8 +20,7 @@ static int prefill_cancel_cb(void *ctx)
 }
 
 int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
-                     double budget_gb, int budget_auto, int ctx,
-                     int gen_default)
+                     double budget_gb, int ctx, int gen_default)
 {
     memset(e, 0, sizeof *e);
     e->model_dir = model;
@@ -38,6 +37,7 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
 
     if (dsv4_st_open(&e->st, model, trunkdir) != 0) return -1;
 
+    const int budget_auto = budget_gb < 0.0;
     int64_t budget = (int64_t)(budget_gb * 1073741824.0);
     if (budget_auto) {
         const int64_t avail = dsv4_mem_available_bytes();

@@ -80,8 +80,6 @@ def wait_for(proc: subprocess.Popen, event: str) -> dict:
             raise RuntimeError("serve exited while waiting for " + event)
         kind = ev.get("event")
         if kind == "error":
-            raise RuntimeError(ev.get("message", "engine error"))
-        if kind == "kv_error":
             raise RuntimeError(ev.get("message", "KV cache error"))
         if kind == event:
             return ev

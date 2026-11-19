@@ -47,6 +47,9 @@ typedef struct {
     /* Time spent in the output head this turn. The prefill benchmark's default
      * table subtracts it from TTFT to show where the time went. */
     double           head_s;
+    /* Last time dynamic stats were appended to an event. Static cache/trunk
+     * fields are emitted only on ready; the live counters are throttled. */
+    double           last_stats_s;
 
     int              gen_default;
 
@@ -66,35 +69,31 @@ double dsv4_proc_read_gb(void);
 void   dsv4_emit_hex_field(const char *key, const char *s);
 int    dsv4_hex_decode(const char *s, char *out, int cap);
 void   dsv4_usage(const char *me);
+/* One error event for every failure. KV-cache messages start with "KV: " so
+ * the client can treat them as recoverable without a separate event type. */
 void   dsv4_emit_error(const char *fmt, ...);
 
-/* ---- stats ---- */
-void dsv4_write_sys(const Engine *e);
-void dsv4_write_cache(const Engine *e);
-void dsv4_write_trunk(const Engine *e);
-
 /* ---- events ---- */
-void dsv4_emit_ready(const Engine *e, const char *event);
-void dsv4_emit_start(const Engine *e, int start_pos, int prompt_tokens,
+void dsv4_emit_ready(Engine *e, const char *event);
+void dsv4_emit_start(Engine *e, int start_pos, int prompt_tokens,
                      int gen_max, int prefill_tokens);
 void dsv4_emit_layer(const Engine *e, const char *phase, int layer);
-void dsv4_emit_token(const Engine *e, int32_t id, int index,
+void dsv4_emit_token(Engine *e, int32_t id, int index,
                      double t_turn, double ttft);
-void dsv4_emit_done(const Engine *e, int prompt_tokens, int generated,
+void dsv4_emit_done(Engine *e, int prompt_tokens, int generated,
                     double seconds, double ttft, const char *stop);
 void dsv4_emit_reset(const Engine *e, const char *reason);
 void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p);
 void dsv4_emit_kv_built(int tokens, double seconds, long long bytes);
 void dsv4_emit_kv_loaded(int tokens, int context_cap, double seconds);
-void dsv4_emit_kv_error(const char *message);
 
 /* ---- commands ---- */
 int  dsv4_handle_command(Engine *e, char *line);
 
 /* ---- engine ---- */
+/* A negative budget_gb means "compute one from available memory". */
 int  dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
-                      double budget_gb, int budget_auto, int ctx,
-                      int gen_default);
+                      double budget_gb, int ctx, int gen_default);
 void dsv4_engine_free(Engine *e);
 int  dsv4_engine_reset_context(Engine *e);
 int  dsv4_append_ids(Engine *e, const int32_t *ids, int n);

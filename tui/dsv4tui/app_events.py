@@ -75,18 +75,6 @@ class EventMixin:
             self.stats_force = True
             self.dirty = True
 
-        elif name == "kv_error":
-            self.kv_pending = False
-            self.kv_loaded = False
-            # Fall back to the old path: the first turn sends the system prompt
-            # and pays the full prefill.
-            self.system_armed = True
-            msg = str(ev.get("message") or "cache rejected")
-            self.add_system(
-                f"cached tools preamble not used: {msg}; "
-                f"falling back to a normal prefill")
-            self.dirty = True
-
         elif name == "start":
             self.generating = True
             self.status = "generating"
@@ -251,20 +239,31 @@ class EventMixin:
 
         elif name == "error":
             msg = str(ev.get("message") or "unknown engine error")
-            # If an assistant bubble was opened for a turn that never started,
-            # do not leave an empty one above the error.
-            if self.current_msg is not None and not self.current_msg.text:
-                try:
-                    self.messages.remove(self.current_msg)
-                except ValueError:
-                    pass
-            self.current_msg = None
-            self.current_user_msg = None
-            self.generating = False
-            self.cancel_pending = False
-            self.cancel_on_start = False
-            self.prefill_active = False
-            if self.status not in ("starting",):
-                self.status = "ready" if self.backend_alive else "failed"
-            self.messages.append(Message("error", msg))
+            if msg.startswith("KV:"):
+                detail = msg[3:].lstrip()
+                self.kv_pending = False
+                self.kv_loaded = False
+                # Fall back to the old path: the first turn sends the system
+                # prompt and pays the full prefill.
+                self.system_armed = True
+                self.add_system(
+                    f"cached tools preamble not used: {detail}; "
+                    f"falling back to a normal prefill")
+            else:
+                # If an assistant bubble was opened for a turn that never
+                # started, do not leave an empty one above the error.
+                if self.current_msg is not None and not self.current_msg.text:
+                    try:
+                        self.messages.remove(self.current_msg)
+                    except ValueError:
+                        pass
+                self.current_msg = None
+                self.current_user_msg = None
+                self.generating = False
+                self.cancel_pending = False
+                self.cancel_on_start = False
+                self.prefill_active = False
+                if self.status not in ("starting",):
+                    self.status = "ready" if self.backend_alive else "failed"
+                self.messages.append(Message("error", msg))
             self.dirty = True

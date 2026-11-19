@@ -40,11 +40,11 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
                           const char *path)
 {
     if (!tokens || n_tokens <= 0 || !path || !path[0]) {
-        dsv4_emit_kv_error("kv_build needs both tokens and path");
+        dsv4_emit_error("KV: kv_build needs both tokens and path");
         return;
     }
     if (e->n_ids != 0 || e->pending_forward) {
-        dsv4_emit_kv_error("kv_build needs an empty context");
+        dsv4_emit_error("KV: kv_build needs an empty context");
         return;
     }
 
@@ -54,9 +54,9 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     const int n = dsv4_append_ids(e, tokens, n_tokens);
     if (n < 0) {
         if (n == -2)
-            dsv4_emit_kv_error("prefix does not fit in the context");
+            dsv4_emit_error("KV: prefix does not fit in the context");
         else
-            dsv4_emit_kv_error("prefix contains an invalid token id");
+            dsv4_emit_error("KV: prefix contains an invalid token id");
         return;
     }
 
@@ -64,10 +64,10 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     dsv4_prefill_prepare(e, n, &batched);
     const int rc = dsv4_prefill_run(e, e->ids, n, 0, batched, 0, "prefix", t0);
     if (rc != 0) {
-        dsv4_emit_kv_error(rc == DSV4_PREFILL_CANCELLED ||
-                           rc == DSV4_PREFILL_ABORTED
-                           ? "prefix prefill cancelled"
-                           : "prefix prefill failed");
+        dsv4_emit_error("KV: %s",
+                        rc == DSV4_PREFILL_CANCELLED ||
+                        rc == DSV4_PREFILL_ABORTED
+                        ? "prefix prefill cancelled" : "prefix prefill failed");
     }
 
     if (rc != 0) {
@@ -79,7 +79,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     char tag[128];
     model_tag(e->model_dir, tag, sizeof tag);
     if (dsv4_kv_save(path, tag, &e->c, e->lst, e->ids, n) != 0) {
-        dsv4_emit_kv_error("could not write the KV cache file");
+        dsv4_emit_error("KV: could not write the KV cache file");
         dsv4_cancel = 0;
         return;
     }
@@ -95,11 +95,11 @@ void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
                          const char *path)
 {
     if (!path || !path[0]) {
-        dsv4_emit_kv_error("kv_load needs a path");
+        dsv4_emit_error("KV: kv_load needs a path");
         return;
     }
     if (e->n_ids != 0 || e->pending_forward) {
-        dsv4_emit_kv_error("kv_load needs an empty context");
+        dsv4_emit_error("KV: kv_load needs an empty context");
         return;
     }
 
@@ -111,7 +111,7 @@ void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
     if (dsv4_kv_load(path, tag, &e->c, e->lst, e->maxpos,
                          e->ids, e->cap_ids, &loaded,
                          n_expect > 0 ? tokens : NULL, n_expect) != 0) {
-        dsv4_emit_kv_error("cached prefix rejected (see stderr)");
+        dsv4_emit_error("KV: cached prefix rejected (see stderr)");
         return;
     }
 
