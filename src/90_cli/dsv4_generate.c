@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_generate.c - one turn: prompt prefill, then decode until stop. */
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "dsv4_serve_int.h"
@@ -32,16 +31,20 @@ static void cancel_prefill_turn(Engine *e, int rollback, int start_pos,
     dsv4_cancel = 0;
 }
 
-void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
-                          int emit_layers)
+void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
+                          int ngen, int eos, int think, int emit_layers)
 {
     const double t0 = dsv4_now_s();
     dsv4_cancel = 0;
     e->prof_base = dsv4_prof;
 
     if (ngen < 0) ngen = 0;
-    if (e->eos_id < 0) {
-        dsv4_emit_error("tokenizer has no end-of-turn token; refusing to run");
+    if (n_tokens <= 0) {
+        dsv4_emit_error("generate needs a non-empty token list");
+        return;
+    }
+    if (eos < 0 || eos >= e->c.vocab) {
+        dsv4_emit_error("generate needs a valid end-of-turn token id");
         return;
     }
 
@@ -52,13 +55,13 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
 
     /* Close a truncated previous turn, then forward the token that the previous
      * turn deliberately left pending; its KV entry is not in the layer state yet. */
-    if (!prefix_start && e->n_ids > 0 && e->ids[e->n_ids - 1] != e->eos_id) {
+    if (!prefix_start && e->n_ids > 0 && e->ids[e->n_ids - 1] != eos) {
         if (e->n_ids >= e->cap_ids) {
             dsv4_emit_error("context full (%d tokens); reset before continuing",
                             e->cap_ids);
             return;
         }
-        e->ids[e->n_ids++] = e->eos_id;
+        e->ids[e->n_ids++] = eos;
         e->pending_forward = 1;
     }
     if (e->pending_forward) {
@@ -69,37 +72,14 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
         e->pending_forward = 0;
     }
 
-    const size_t sys_len = e->system_prompt ? strlen(e->system_prompt) : 0;
-    const size_t need = strlen(prompt) + sys_len + 256;
-    char *turn = malloc(need);
-    if (!turn) { dsv4_emit_error("out of memory formatting turn"); return; }
-
-    if (e->n_ids == 0) {
-        snprintf(turn, need, "%s%s%s%s%s%s%s",
-                 DSV4_BOS,
-                 e->system_prompt ? e->system_prompt : "",
-                 e->system_prompt ? "\n" : "",
-                 DSV4_USER, prompt, DSV4_ASSISTANT,
-                 think ? DSV4_THINK_OPEN : DSV4_THINK_CLOSE);
-    } else {
-        snprintf(turn, need, "%s%s%s%s",
-                 DSV4_USER, prompt, DSV4_ASSISTANT,
-                 think ? DSV4_THINK_OPEN : DSV4_THINK_CLOSE);
-    }
-
     const int start_pos = e->n_ids;
-    const int n_added = dsv4_append_text(e, turn);
-    free(turn);
+    const int n_added = dsv4_append_ids(e, tokens, n_tokens);
     if (n_added < 0) {
         if (n_added == -2)
             dsv4_emit_error("context full (%d tokens): this turn needs more "
                             "room. Use /reset or raise --ctx.", e->cap_ids);
         else
-            dsv4_emit_error("tokenization failed");
-        return;
-    }
-    if (n_added == 0) {
-        dsv4_emit_error("user message encoded to zero tokens");
+            dsv4_emit_error("invalid token id in prompt");
         return;
     }
 
@@ -218,7 +198,7 @@ void dsv4_engine_generate(Engine *e, const char *prompt, int ngen, int think,
          * the next generate may need the normal EOS handling again. */
         e->kv_prefix = 0;
 
-        if (id == e->eos_id) {
+        if (id == eos) {
             stop = "eos";
             e->pending_forward = 1;   /* forwarded at the start of next turn */
             break;

@@ -28,10 +28,11 @@
  *
  * LAYOUT
  *   tools/pack_trunk.py writes trunk.bin, where each layer is ONE contiguous
- *   run at a 4096-aligned offset, and trunk.json, which records every tensor's
+ *   run at a 4096-aligned offset, and trunk.idx, which records every tensor's
  *   offset WITHIN its run. The offsets are recorded rather than derived because
  *   the source checkpoint splits a layer's trunk across two runs with the
- *   routed experts in between -- see the packer for the layout.
+ *   routed experts in between -- see the packer for the layout. trunk.idx is a
+ *   line-based format so the reader needs no JSON parser.
  */
 #ifndef DSV4_TRUNK_H
 #define DSV4_TRUNK_H
@@ -73,8 +74,6 @@ typedef struct {
     int              direct;     /* 1 when opened O_DIRECT */
     int              n_layers;
     DSV4TrunkLayer  *lay;
-    char            *json_arena; /* backs every tensor name; freed on close */
-    char            *json_text;
 
     unsigned char  **pin;        /* [npin] one exact allocation per pinned layer */
     unsigned char   *ring;       /* [nslot] uniform slots                        */

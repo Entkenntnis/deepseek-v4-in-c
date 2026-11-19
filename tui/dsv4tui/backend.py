@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The real engine process and the queue between it and the UI loop."""
+"""The real engine process and the queue between it and the UI loop.
+
+The child speaks the line protocol in proto.py. Text never crosses that pipe:
+this class tokenizes prompts, detokenizes emitted ids in app_events.py, and
+keeps the chat framing and system prompt on the Python side.
+"""
 
 from __future__ import annotations
 
-import json
 import queue
 import signal
 import subprocess
 import threading
 from typing import Any, Optional
+
+from . import proto
+from .tokenizer import Tokenizer
 
 try:
     import resource
@@ -57,10 +64,16 @@ def _disable_core_dumps() -> None:
 
 
 class RealBackend:
-    def __init__(self, argv: list[str], sink: EventSink) -> None:
+    def __init__(self, argv: list[str], sink: EventSink,
+                 tokenizer: Tokenizer) -> None:
         self.argv = argv
         self.sink = sink
+        self.tokenizer = tokenizer
         self.proc: Optional[subprocess.Popen[str]] = None
+        # Chat framing state. The engine itself is context-agnostic now.
+        self.context_empty = True
+        self.prefix_loaded = False
+        self.system_prompt: Optional[str] = None
 
     def start(self) -> None:
         self.proc = subprocess.Popen(
@@ -81,6 +94,24 @@ class RealBackend:
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
 
+    def _track(self, ev: dict) -> None:
+        name = ev.get("event")
+        if name == "ready":
+            self.context_empty = True
+            self.prefix_loaded = False
+        elif name == "start":
+            self.context_empty = False
+        elif name == "done":
+            self.context_empty = int(ev.get("context_used") or 0) == 0
+        elif name == "reset":
+            self.context_empty = True
+            self.prefix_loaded = False
+            self.system_prompt = None
+        elif name == "kv_loaded":
+            self.context_empty = False
+            self.prefix_loaded = True
+            self.system_prompt = None
+
     def _read_stdout(self) -> None:
         assert self.proc and self.proc.stdout
         try:
@@ -88,12 +119,12 @@ class RealBackend:
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    self.sink.log(f"bad JSON from engine: {line[:300]}")
+                ev = proto.parse_event(line)
+                if ev is None:
+                    self.sink.log(f"bad event from engine: {line[:300]}")
                     continue
-                self.sink.event(obj)
+                self._track(ev)
+                self.sink.event(ev)
         except Exception as exc:  # pipe closed, decoding issue, ...
             self.sink.log(f"stdout reader stopped: {exc}")
         finally:
@@ -108,15 +139,67 @@ class RealBackend:
         except Exception:
             pass
 
-    def send(self, obj: dict) -> bool:
+    def _write(self, obj: dict) -> bool:
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
             return False
         try:
-            self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            self.proc.stdin.write(proto.encode_command(obj) + "\n")
             self.proc.stdin.flush()
             return True
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError, ValueError):
             return False
+
+    def send(self, obj: dict) -> bool:
+        """Translate a UI command into token ids and write it to the engine."""
+        name = obj.get("cmd")
+
+        if name == "system":
+            self.system_prompt = str(obj.get("text") or "")
+            return True
+
+        if name == "generate":
+            first = self.context_empty and not self.prefix_loaded
+            system = self.system_prompt if first else None
+            prompt = str(obj.get("prompt") or "")
+            tokens = self.tokenizer.turn_tokens(
+                prompt, system=system, think=bool(obj.get("think")),
+                first=first)
+            self.context_empty = False
+            return self._write({
+                "cmd": "generate",
+                "tokens": tokens,
+                "gen": int(obj.get("gen") or 0),
+                "eos": self.tokenizer.eos_id,
+                "think": bool(obj.get("think")),
+                "layers": bool(obj.get("layers")),
+            })
+
+        if name == "kv_build":
+            text = str(obj.get("text") or "")
+            return self._write({
+                "cmd": "kv_build",
+                "path": str(obj.get("path") or ""),
+                "tokens": self.tokenizer.encode(text),
+            })
+
+        if name == "kv_load":
+            text = str(obj.get("text") or "")
+            return self._write({
+                "cmd": "kv_load",
+                "path": str(obj.get("path") or ""),
+                "tokens": self.tokenizer.encode(text),
+            })
+
+        if name == "reset":
+            self.context_empty = True
+            self.prefix_loaded = False
+            self.system_prompt = None
+            return self._write({"cmd": "reset"})
+
+        if name in ("quit", "ping", "stats"):
+            return self._write({"cmd": name})
+
+        return False
 
     def cancel(self) -> bool:
         """Ask the engine to stop (SIGUSR1 in dsv4-serve).
@@ -136,7 +219,7 @@ class RealBackend:
         if not self.proc:
             return
         try:
-            self.send({"cmd": "quit"})
+            self._write({"cmd": "quit"})
         except Exception:
             pass
         try:

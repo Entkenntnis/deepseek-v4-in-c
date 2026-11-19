@@ -40,7 +40,6 @@ Examples:
 import argparse
 import codecs
 import hashlib
-import importlib.util
 import json
 import os
 import statistics
@@ -51,6 +50,11 @@ from pathlib import Path
 
 HOME = Path.home()
 REPO = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO / "tui"))
+from dsv4tui import proto  # noqa: E402
+from dsv4tui.dsml import system_prompt as tui_system_prompt  # noqa: E402
+from dsv4tui.tokenizer import Tokenizer  # noqa: E402
 DEFAULT_MODEL = HOME / "colibri-models" / "deepseek-v4-flash"
 DEFAULT_TRUNK = HOME / "colibri-models" / "dsv4-trunk-flash"
 DEFAULT_TOK = HOME / "colibri-models" / "dsv4-tok-flash.bin"
@@ -129,7 +133,6 @@ def build_command(a):
         str(a.binary),
         "--model", str(a.model),
         "--trunk", str(a.trunk),
-        "--tok", str(a.tok),
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
         "--threads", str(a.threads),
@@ -153,18 +156,9 @@ def load_preamble(path):
     if path:
         return Path(os.path.expanduser(str(path))).read_text(encoding="utf-8")
 
-    # Load dsml.py directly instead of importing the TUI package: the preamble
-    # must match the real TUI, but the benchmark should not need curses/rich or
-    # the rest of the UI just to ask for one string.
-    dsml = REPO / "tui" / "dsv4tui" / "dsml.py"
-    if not dsml.is_file():
-        raise RuntimeError(f"{dsml} not found; pass --preamble-file")
-    spec = importlib.util.spec_from_file_location("_dsv4_prefill_dsml", dsml)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {dsml}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.system_prompt()
+    # The preamble must match the real TUI. Import it from the package so its
+    # relative imports keep working.
+    return tui_system_prompt()
 
 
 def sha256_text(text):
@@ -172,7 +166,7 @@ def sha256_text(text):
 
 
 def send(proc, obj):
-    proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    proc.stdin.write(proto.encode_command(obj) + "\n")
     proc.stdin.flush()
 
 
@@ -184,11 +178,11 @@ def read_event(proc):
         line = line.strip()
         if not line:
             continue
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError:
-            print(f"prefill: non-JSON output: {line}", file=sys.stderr)
+        ev = proto.parse_event(line)
+        if ev is None:
+            print(f"prefill: bad event: {line}", file=sys.stderr)
             return None
+        return ev
 
 
 def wait_for(proc, event):
@@ -248,8 +242,10 @@ def dump_stderr(errfile, lines=40):
         print("\n".join(tail), file=sys.stderr)
 
 
-def generate(proc, prompt, label, progress):
-    send(proc, {"cmd": "generate", "prompt": prompt, "gen": 1})
+def generate(proc, tok, prompt, preamble, label, progress):
+    tokens = tok.turn_tokens(prompt, system=preamble, first=True)
+    send(proc, {"cmd": "generate", "tokens": tokens, "gen": 1,
+                "eos": tok.eos_id})
     start = None
     tokens = []
     while True:
@@ -275,11 +271,11 @@ def generate(proc, prompt, label, progress):
             raise RuntimeError(ev.get("message", "engine error"))
 
 
-def decode_text(tokens):
+def decode_text(tok, tokens):
     dec = codecs.getincrementaldecoder("utf-8")("replace")
     out = []
     for t in tokens:
-        out.append(dec.decode(bytes.fromhex(t.get("hex", ""))))
+        out.append(dec.decode(tok.token_bytes(int(t.get("id") or 0))))
     out.append(dec.decode(b"", final=True))
     return "".join(out)
 
@@ -288,7 +284,7 @@ def token_hash(ids):
     return hashlib.sha256(",".join(str(i) for i in ids).encode()).hexdigest()
 
 
-def metrics(start, tokens, done):
+def metrics(tok, start, tokens, done):
     if len(tokens) != 1:
         raise RuntimeError(f"expected one token, got {len(tokens)}")
 
@@ -329,7 +325,7 @@ def metrics(start, tokens, done):
         "stop": done.get("stop", "?"),
         "token_ids": [int(t["id"]) for t in tokens],
         "token_id": int(tokens[0]["id"]),
-        "text": decode_text(tokens),
+        "text": decode_text(tok, tokens),
         "sys": done.get("sys", {}) or {},
         "prof": prof,
     }
@@ -381,6 +377,11 @@ def main():
     except (OSError, RuntimeError) as exc:
         print(f"prefill: {exc}", file=sys.stderr)
         return 2
+    try:
+        tok = Tokenizer(a.tok)
+    except (OSError, ValueError) as exc:
+        print(f"prefill: cannot load tokenizer {a.tok}: {exc}", file=sys.stderr)
+        return 2
     preamble_sha = sha256_text(preamble)
 
     progress = Progress(enabled=not a.detailed and not a.as_json)
@@ -413,14 +414,6 @@ def main():
             return 2
         progress.update("model ready", force=True)
 
-        send(proc, {"cmd": "system", "text": preamble})
-        if wait_for(proc, "system") is None:
-            progress.finish("failed setting system prompt")
-            print("prefill: serve exited while setting the system prompt",
-                  file=sys.stderr)
-            dump_stderr(errfile)
-            return 2
-
         results = []
         for i in range(a.runs):
             if i:
@@ -431,8 +424,9 @@ def main():
                     dump_stderr(errfile)
                     return 2
             label = f"run {i + 1}/{a.runs}" + (" (warmup)" if i == 0 else "")
-            start, tokens, done = generate(proc, a.prompt, label, progress)
-            results.append(metrics(start, tokens, done))
+            start, tokens, done = generate(proc, tok, a.prompt, preamble,
+                                           label, progress)
+            results.append(metrics(tok, start, tokens, done))
 
         send(proc, {"cmd": "quit"})
     except (RuntimeError, BrokenPipeError) as exc:

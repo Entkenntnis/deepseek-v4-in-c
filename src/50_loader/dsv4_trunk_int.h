@@ -6,7 +6,7 @@
 #include "dsv4.h"
 #include "dsv4_trunk.h"
 
-/* Parse trunk.json into tr->lay, then resolve plan_layer()'s request order to
+/* Parse trunk.idx into tr->lay, then resolve plan_layer()'s request order to
  * manifest indices once per layer. */
 int dsv4_trunk_load_manifest(DSV4Trunk *tr, const char *dir);
 int dsv4_trunk_build_maps(DSV4Trunk *tr, const DSV4Cfg *c);

@@ -35,6 +35,10 @@ from pathlib import Path
 
 HOME = Path.home()
 REPO = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO / "tui"))
+from dsv4tui import proto  # noqa: E402
+from dsv4tui.tokenizer import Tokenizer  # noqa: E402
 DEFAULT_MODEL = HOME / "colibri-models" / "deepseek-v4-flash"
 DEFAULT_TRUNK = HOME / "colibri-models" / "dsv4-trunk-flash"
 DEFAULT_TOK = HOME / "colibri-models" / "dsv4-tok-flash.bin"
@@ -94,7 +98,6 @@ def build_command(a):
         str(a.binary),
         "--model", str(a.model),
         "--trunk", str(a.trunk),
-        "--tok", str(a.tok),
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
         "--threads", str(a.threads),
@@ -121,7 +124,7 @@ def build_command(a):
 
 
 def send(proc, obj):
-    proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    proc.stdin.write(proto.encode_command(obj) + "\n")
     proc.stdin.flush()
 
 
@@ -133,11 +136,11 @@ def read_event(proc):
         line = line.strip()
         if not line:
             continue
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError:
-            print(f"e2e: non-JSON output: {line}", file=sys.stderr)
+        ev = proto.parse_event(line)
+        if ev is None:
+            print(f"e2e: bad event: {line}", file=sys.stderr)
             return None
+        return ev
 
 
 def wait_for(proc, event):
@@ -197,8 +200,10 @@ def dump_stderr(errfile, lines=40):
         print("\n".join(tail), file=sys.stderr)
 
 
-def generate(proc, prompt, gen, label, progress):
-    send(proc, {"cmd": "generate", "prompt": prompt, "gen": gen})
+def generate(proc, tok, prompt, gen, label, progress):
+    tokens = tok.turn_tokens(prompt, first=True)
+    send(proc, {"cmd": "generate", "tokens": tokens, "gen": gen,
+                "eos": tok.eos_id})
     start = None
     tokens = []
     while True:
@@ -231,11 +236,11 @@ def generate(proc, prompt, gen, label, progress):
             raise RuntimeError(ev.get("message", "engine error"))
 
 
-def decode_text(tokens):
+def decode_text(tok, tokens):
     dec = codecs.getincrementaldecoder("utf-8")("replace")
     out = []
     for t in tokens:
-        out.append(dec.decode(bytes.fromhex(t.get("hex", ""))))
+        out.append(dec.decode(tok.token_bytes(int(t.get("id") or 0))))
     out.append(dec.decode(b"", final=True))
     return "".join(out)
 
@@ -298,6 +303,11 @@ def main():
     if not Path(a.binary).is_file():
         print(f"e2e: {a.binary} not found; run `make serve` first", file=sys.stderr)
         return 2
+    try:
+        tok = Tokenizer(a.tok)
+    except (OSError, ValueError) as exc:
+        print(f"e2e: cannot load tokenizer {a.tok}: {exc}", file=sys.stderr)
+        return 2
 
     progress = Progress(enabled=not a.detailed and not a.as_json)
     errfile = None
@@ -335,11 +345,12 @@ def main():
                     dump_stderr(errfile)
                     return 2
             label = f"run {i + 1}/{a.runs}" + (" (warmup)" if i == 0 else "")
-            start, tokens, done = generate(proc, PROMPT, a.gen, label, progress)
+            start, tokens, done = generate(proc, tok, PROMPT, a.gen, label,
+                                           progress)
             ids = [int(t["id"]) for t in tokens]
             m = metrics(start, tokens, done)
             m["token_ids"] = ids
-            m["text"] = decode_text(tokens)
+            m["text"] = decode_text(tok, tokens)
             results.append(m)
 
         send(proc, {"cmd": "quit"})

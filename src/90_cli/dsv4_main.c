@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* dsv4_main.c - argument parsing, commands and the command loop. */
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,44 +10,65 @@
 
 #include "dsv4_serve_int.h"
 #include "dsv4_trace.h"
-#include "json.h"
 #include "dsv4_threads.h"
 
-static const char *jstr(jval *o, const char *key)
+#define MAX_FIELDS 16
+
+typedef struct {
+    char *key[MAX_FIELDS];
+    char *val[MAX_FIELDS];
+    int   n;
+} Fields;
+
+static const char *field(const Fields *f, const char *key)
 {
-    jval *v = json_get(o, key);
-    return v && v->t == J_STR ? v->str : NULL;
+    for (int i = 0; i < f->n; i++)
+        if (!strcmp(f->key[i], key)) return f->val[i];
+    return NULL;
 }
 
-static double jnum(jval *o, const char *key, double dflt)
+static int field_int(const Fields *f, const char *key, int dflt)
 {
-    jval *v = json_get(o, key);
-    return v && v->t == J_NUM ? v->num : dflt;
+    const char *v = field(f, key);
+    return v ? (int)strtol(v, NULL, 10) : dflt;
 }
 
-static int jbool(jval *o, const char *key, int dflt)
+static int ensure_in_ids(Engine *e, int need)
 {
-    jval *v = json_get(o, key);
-    if (!v) return dflt;
-    if (v->t == J_BOOL) return v->boolean ? 1 : 0;
-    if (v->t == J_NUM)  return v->num != 0.0;
-    return dflt;
+    if (need <= e->in_cap) return 0;
+    int cap = e->in_cap ? e->in_cap : 1024;
+    while (cap < need) cap *= 2;
+    int32_t *p = realloc(e->in_ids, (size_t)cap * sizeof *p);
+    if (!p) return -1;
+    e->in_ids = p;
+    e->in_cap = cap;
+    return 0;
 }
 
-/* json.h deliberately has no free: it was written for parse-once-at-startup
- * files. A command stream parses repeatedly, so this walks the tree and frees
- * every j_dup'd string too. */
-static void jfree(jval *v)
+/* Parse a comma-separated token-id list into e->in_ids. */
+static int parse_ids(Engine *e, const char *s, int *n_out)
 {
-    if (!v) return;
-    if (v->t == J_STR) free(v->str);
-    for (int i = 0; i < v->len; i++) {
-        if (v->kids) jfree(v->kids[i]);
-        if (v->keys) free(v->keys[i]);
+    int n = 0;
+    const char *p = s;
+    while (*p) {
+        char *end = NULL;
+        const long v = strtol(p, &end, 10);
+        if (end == p || v < 0 || v > INT32_MAX) return -1;
+        if (ensure_in_ids(e, n + 1) != 0) return -1;
+        e->in_ids[n++] = (int32_t)v;
+        p = end;
+        if (*p == ',') p++;
+        else if (*p) return -1;
     }
-    free(v->kids);
-    free(v->keys);
-    free(v);
+    *n_out = n;
+    return 0;
+}
+
+static int decode_path(const char *v, char *out, size_t cap)
+{
+    if (!v || strncmp(v, "hex:", 4) != 0) return -1;
+    if (dsv4_hex_decode(v + 4, out, (int)cap) < 0) return -1;
+    return 0;
 }
 
 static void handle_cancel(int sig)
@@ -55,61 +77,81 @@ static void handle_cancel(int sig)
     dsv4_cancel = 1;
 }
 
-static void handle_command(Engine *e, jval *v)
+/* Returns 1 when the command asks the caller to stop. */
+static int handle_command(Engine *e, char *line)
 {
-    const char *cmd = jstr(v, "cmd");
-    if (!cmd) { dsv4_emit_error("command object has no \"cmd\""); return; }
+    char *save = NULL;
+    char *cmd = strtok_r(line, " \t\r\n", &save);
+    if (!cmd) return 0;
+
+    Fields f = { .n = 0 };
+    for (char *tok = strtok_r(NULL, " \t\r\n", &save);
+         tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
+        char *eq = strchr(tok, '=');
+        if (!eq || f.n >= MAX_FIELDS) {
+            dsv4_emit_error("malformed field \"%s\"", tok);
+            return 0;
+        }
+        *eq = 0;
+        f.key[f.n] = tok;
+        f.val[f.n] = eq + 1;
+        f.n++;
+    }
 
     if (!strcmp(cmd, "generate")) {
-        const char *prompt = jstr(v, "prompt");
-        if (!prompt) prompt = "";
-        const int ngen = (int)jnum(v, "gen", e->gen_default);
-        const int think = jbool(v, "think", e->think_default);
-        const int layers = jbool(v, "layers", e->emit_layers_default);
-        dsv4_engine_generate(e, prompt, ngen, think, layers);
+        int nt = 0;
+        const char *tv = field(&f, "tokens");
+        if (!tv || parse_ids(e, tv, &nt) != 0 || nt == 0) {
+            dsv4_emit_error("generate needs a non-empty tokens= list");
+            return 0;
+        }
+        const int eos = field_int(&f, "eos", -1);
+        const int ngen = field_int(&f, "gen", e->gen_default);
+        const int think = field_int(&f, "think", e->think_default);
+        const int layers = field_int(&f, "layers", e->emit_layers_default);
+        dsv4_engine_generate(e, e->in_ids, nt, ngen, eos, think, layers);
     } else if (!strcmp(cmd, "reset")) {
         if (dsv4_engine_reset_context(e) != 0)
             dsv4_emit_error("context reset failed");
         else
             dsv4_emit_reset(e, "user");
-    } else if (!strcmp(cmd, "system")) {
-        const char *text = jstr(v, "text");
-        free(e->system_prompt);
-        e->system_prompt = text ? strdup(text) : NULL;
-        printf("{\"event\":\"system\",\"ok\":true,\"chars\":%d}\n",
-               text ? (int)strlen(text) : 0);
-        fflush(stdout);
     } else if (!strcmp(cmd, "stats")) {
         dsv4_emit_ready(e, "stats");
     } else if (!strcmp(cmd, "kv_build")) {
-        const char *path = jstr(v, "path");
-        const char *text = jstr(v, "text");
-        if (!path || !text) {
-            dsv4_emit_kv_error("kv_build needs both \"text\" and \"path\"");
+        char path[4096];
+        int nt = 0;
+        const char *tv = field(&f, "tokens");
+        if (decode_path(field(&f, "path"), path, sizeof path) != 0 ||
+            !tv || parse_ids(e, tv, &nt) != 0 || nt == 0) {
+            dsv4_emit_kv_error("kv_build needs path=hex:... and tokens=...");
         } else {
-            dsv4_engine_kv_build(e, text, path);
+            dsv4_engine_kv_build(e, e->in_ids, nt, path);
         }
     } else if (!strcmp(cmd, "kv_load")) {
-        const char *path = jstr(v, "path");
-        const char *text = jstr(v, "text");
-        if (!path) {
-            dsv4_emit_kv_error("kv_load needs \"path\"");
+        char path[4096];
+        int nt = 0;
+        const char *tv = field(&f, "tokens");
+        if (decode_path(field(&f, "path"), path, sizeof path) != 0) {
+            dsv4_emit_kv_error("kv_load needs path=hex:...");
+        } else if (tv && parse_ids(e, tv, &nt) != 0) {
+            dsv4_emit_kv_error("kv_load tokens= is malformed");
         } else {
-            dsv4_engine_kv_load(e, text, path);
+            dsv4_engine_kv_load(e, e->in_ids, nt, path);
         }
     } else if (!strcmp(cmd, "ping")) {
-        printf("{\"event\":\"pong\"}\n");
+        fputs("pong\n", stdout);
         fflush(stdout);
     } else if (!strcmp(cmd, "quit")) {
-        /* handled by the caller */
+        return 1;
     } else {
         dsv4_emit_error("unknown command \"%s\"", cmd);
     }
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-    const char *model = NULL, *trunkdir = NULL, *tokfile = NULL;
+    const char *model = NULL, *trunkdir = NULL;
     double budget_gb = 8.0;
     int budget_auto = 0;
     int ctx = 8192, ngen = 128, think = 0, layers = 1;
@@ -127,7 +169,10 @@ int main(int argc, char **argv)
         if (argv[i][0] != '-' && !model) { model = argv[i]; continue; }
         else if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunkdir = argv[++i];
-        else if (!strcmp(argv[i], "--tok") && i + 1 < argc) tokfile = argv[++i];
+        /* Kept as an ignored option so old launch lines do not mistake the
+         * tokenizer path for the model argument. The engine no longer sees
+         * text, so it does not load a tokenizer. */
+        else if (!strcmp(argv[i], "--tok") && i + 1 < argc) ++i;
         else if (!strcmp(argv[i], "--budget") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "auto")) budget_auto = 1;
@@ -163,7 +208,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-layers")) layers = 0;
         else if (!strcmp(argv[i], "--help")) { dsv4_usage(argv[0]); return 0; }
     }
-    if (!model || !trunkdir || !tokfile) { dsv4_usage(argv[0]); return 2; }
+    if (!model || !trunkdir) { dsv4_usage(argv[0]); return 2; }
 
     struct sigaction cancel_sa;
     memset(&cancel_sa, 0, sizeof cancel_sa);
@@ -211,7 +256,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
 
     Engine e;
-    if (dsv4_engine_init(&e, model, trunkdir, tokfile, budget_gb, budget_auto,
+    if (dsv4_engine_init(&e, model, trunkdir, budget_gb, budget_auto,
                          ctx, ngen, think, layers) != 0) {
         dsv4_emit_error("engine init failed (see stderr for the loader's message)");
         dsv4_engine_free(&e);
@@ -229,18 +274,7 @@ int main(int argc, char **argv)
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             line[--n] = 0;
         if (n == 0) continue;
-
-        jval *v = json_parse(line, NULL);
-        if (!v || v->t != J_OBJ) {
-            dsv4_emit_error("invalid JSON command");
-            jfree(v);
-            continue;
-        }
-        const char *cmd = jstr(v, "cmd");
-        const int quit = cmd && !strcmp(cmd, "quit");
-        handle_command(&e, v);
-        jfree(v);
-        if (quit) break;
+        if (handle_command(&e, line)) break;
     }
     free(line);
 

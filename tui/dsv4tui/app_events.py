@@ -139,7 +139,12 @@ class EventMixin:
             self.dirty = True
 
         elif name == "token":
-            raw = bytes.fromhex(ev.get("hex") or "")
+            if ev.get("hex") is not None:
+                raw = bytes.fromhex(str(ev.get("hex")))
+            elif self.tokenizer is not None:
+                raw = self.tokenizer.token_bytes(int(ev.get("id") or 0))
+            else:
+                raw = b""
             text = strip_special_tokens(self.decoder.decode(raw, final=False))
             if text and self.current_msg:
                 self.current_msg.text += text

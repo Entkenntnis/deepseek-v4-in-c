@@ -21,9 +21,8 @@ static int prefill_cancel_cb(void *ctx)
 }
 
 int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
-                     const char *tokfile, double budget_gb, int budget_auto,
-                     int ctx, int gen_default, int think_default,
-                     int layers_default)
+                     double budget_gb, int budget_auto, int ctx,
+                     int gen_default, int think_default, int layers_default)
 {
     memset(e, 0, sizeof *e);
     e->model_dir = model;
@@ -44,19 +43,13 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
             e->c.hidden, e->c.n_layers, e->c.vocab);
 
     if (dsv4_st_open(&e->st, model) != 0) return -1;
-    if (dsv4_tok_load(&e->tok, tokfile) != 0) return -1;
-    if ((int)e->tok.n_vocab != e->c.vocab) {
-        fprintf(stderr, "tokenizer has %u ids, config says %d; refusing\n",
-                e->tok.n_vocab, e->c.vocab);
-        return -1;
-    }
 
     int64_t budget = (int64_t)(budget_gb * 1073741824.0);
     if (budget_auto) {
         const int64_t avail = dsv4_mem_available_bytes();
         const int64_t model_bytes = dsv4_bind_model_bytes(&e->st, &e->c, 1);
         const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
-        /* Scratch, KV state, rope tables, tokenizer and allocator overhead.
+        /* Scratch, KV state, rope tables and allocator overhead.
          * The budget does not cover these; the `--budget auto` output shows the
          * allowance. Keep enough spare that the reserve above is actually
          * spare. */
@@ -160,14 +153,8 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     e->ids = calloc((size_t)e->cap_ids, sizeof(int32_t));
     if (!e->h || !e->xh || !e->logits || !e->ids) return -1;
 
-    e->enc_cap = e->cap_ids * 2 + 1024;
-    e->enc_tmp = malloc((size_t)e->enc_cap * sizeof(int32_t));
-    e->tok_cap = 65536;
-    e->tok_bytes = malloc((size_t)e->tok_cap);
-    e->hex_cap = e->tok_cap * 2 + 1;
-    e->hexbuf = malloc((size_t)e->hex_cap);
-    if (!e->enc_tmp || !e->tok_bytes || !e->hexbuf) return -1;
-
-    e->eos_id = dsv4_tok_find(&e->tok, DSV4_EOS, (int)strlen(DSV4_EOS));
+    e->in_cap = e->cap_ids;
+    e->in_ids = malloc((size_t)e->in_cap * sizeof(int32_t));
+    if (!e->in_ids) return -1;
     return 0;
 }

@@ -123,11 +123,12 @@ void dsv4_trunk_close(DSV4Trunk *tr)
     free(tr->pin); free(tr->ring); free(tr->widen);
     free(tr->layer_of); free(tr->slot_of);
     if (tr->lay) for (int L = 0; L < tr->n_layers; L++) {
+        for (int i = 0; i < tr->lay[L].nt; i++) free(tr->lay[L].t[i].name);
         free(tr->lay[L].t);
         free(tr->lay[L].bind_of);
         free(tr->lay[L].bind_widen);
     }
-    free(tr->lay); free(tr->json_arena); free(tr->json_text);
+    free(tr->lay);
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;
 }

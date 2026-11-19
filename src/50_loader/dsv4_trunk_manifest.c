@@ -1,5 +1,17 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_trunk_manifest.c - read trunk.json and resolve the bind order. */
+/* dsv4_trunk_manifest.c - read trunk.idx and resolve the bind order.
+ *
+ * The manifest is line-based:
+ *
+ *   DSV4TRUNK 1
+ *   n_layers 43
+ *   layer <file_off> <nbytes> <ntensor>
+ *   tensor <name> <off> <nbytes> <dtype>
+ *   ...
+ *
+ * One `layer` line per layer, including absent ones as `layer 0 0 0`, followed
+ * by exactly `ntensor` tensor lines. Names contain no whitespace.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +19,6 @@
 #include "dsv4_bind.h"
 #include "dsv4_trunk.h"
 #include "dsv4_trunk_int.h"
-#include "json.h"
 
 /* The manifest stores dtypes as the safetensors spelling, so the mapping is the
  * reader's, not a second table that could drift from it. */
@@ -24,65 +35,107 @@ static int dtype_from_name(const char *s)
     return DSV4_DT_UNKNOWN;
 }
 
-static char *slurp(const char *path, long *len)
+/* Next non-blank line, with its newline removed. */
+static int next_line(FILE *f, char **line, size_t *cap)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); return NULL; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    char *s = (char *)malloc((size_t)n + 1);
-    if (!s) { fclose(f); return NULL; }
-    if (fread(s, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(s); return NULL; }
-    s[n] = 0; fclose(f);
-    if (len) *len = n;
-    return s;
+    ssize_t n;
+    while ((n = getline(line, cap, f)) >= 0) {
+        while (n > 0 && ((*line)[n - 1] == '\n' || (*line)[n - 1] == '\r'))
+            (*line)[--n] = 0;
+        char *p = *line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p) return 1;
+    }
+    return 0;
+}
+
+static int bad(const char *path, const char *what, int L)
+{
+    fprintf(stderr, "dsv4_trunk: %s: bad %s line for layer %d\n",
+            path, what, L);
+    return -1;
 }
 
 int dsv4_trunk_load_manifest(DSV4Trunk *tr, const char *dir)
 {
-    char p[1024];
-    snprintf(p, sizeof p, "%s/trunk.json", dir);
-    tr->json_text = slurp(p, NULL);
-    if (!tr->json_text) return -1;
-
-    jval *root = json_parse(tr->json_text, &tr->json_arena);
-    if (!root) { fprintf(stderr, "%s: not valid JSON\n", p); return -1; }
-
-    jval *nl = json_get(root, "n_layers");
-    jval *ls = json_get(root, "layers");
-    if (!nl || !ls || ls->t != J_ARR) {
-        fprintf(stderr, "%s: missing n_layers or layers\n", p);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/trunk.idx", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "dsv4_trunk: cannot open %s (re-run tools/pack_trunk.py "
+                        "or tools/pack_trunk.py --reindex)\n", path);
         return -1;
     }
-    tr->n_layers = (int)nl->num;
+
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = -1;
+    char magic[32];
+    int version = 0;
+
+    if (!next_line(f, &line, &cap) ||
+        sscanf(line, "%31s %d", magic, &version) != 2 ||
+        strcmp(magic, "DSV4TRUNK") != 0 || version != 1) {
+        fprintf(stderr, "dsv4_trunk: %s: not a version-1 trunk index\n", path);
+        goto out;
+    }
+    if (!next_line(f, &line, &cap) ||
+        sscanf(line, "n_layers %d", &tr->n_layers) != 1 ||
+        tr->n_layers <= 0) {
+        fprintf(stderr, "dsv4_trunk: %s: missing or invalid n_layers\n", path);
+        goto out;
+    }
+
     tr->lay = (DSV4TrunkLayer *)calloc((size_t)tr->n_layers,
                                        sizeof(DSV4TrunkLayer));
-    if (!tr->lay) return -1;
+    if (!tr->lay) goto out;
 
-    for (int L = 0; L < tr->n_layers && L < ls->len; L++) {
-        jval *o = ls->kids[L];
-        if (o->t != J_OBJ) continue;                 /* null = layer absent */
+    for (int L = 0; L < tr->n_layers; L++) {
+        long long file_off = 0, nbytes = 0;
+        int nt = 0;
+        if (!next_line(f, &line, &cap) ||
+            sscanf(line, "layer %lld %lld %d", &file_off, &nbytes, &nt) != 3) {
+            bad(path, "layer", L);
+            goto out;
+        }
+        if (nt < 0) { bad(path, "tensor count in layer", L); goto out; }
+
         DSV4TrunkLayer *lay = &tr->lay[L];
-        lay->file_off = (int64_t)json_get(o, "file_off")->num;
-        lay->nbytes   = (int64_t)json_get(o, "nbytes")->num;
-        jval *ts = json_get(o, "tensors");
-        lay->nt = ts->len;
-        lay->t = (DSV4TrunkTensor *)calloc((size_t)lay->nt,
+        lay->file_off = file_off;
+        lay->nbytes = nbytes;
+        lay->nt = nt;
+        lay->t = (DSV4TrunkTensor *)calloc((size_t)(nt ? nt : 1),
                                            sizeof(DSV4TrunkTensor));
-        for (int i = 0; i < lay->nt; i++) {
-            jval *e = ts->kids[i];
-            lay->t[i].name   = json_get(e, "name")->str;   /* borrowed */
-            lay->t[i].off    = (int64_t)json_get(e, "off")->num;
-            lay->t[i].nbytes = (int64_t)json_get(e, "nbytes")->num;
-            lay->t[i].dtype  = dtype_from_name(json_get(e, "dtype")->str);
+        if (!lay->t) goto out;
+
+        for (int i = 0; i < nt; i++) {
+            char name[512], dtype[512];
+            long long off = 0, nb = 0;
+            if (!next_line(f, &line, &cap) ||
+                sscanf(line, "tensor %511s %lld %lld %511s",
+                       name, &off, &nb, dtype) != 4) {
+                bad(path, "tensor", L);
+                goto out;
+            }
+            lay->t[i].name = strdup(name);
+            if (!lay->t[i].name) goto out;
+            lay->t[i].off = off;
+            lay->t[i].nbytes = nb;
+            lay->t[i].dtype = dtype_from_name(dtype);
             if (lay->t[i].dtype == DSV4_DT_UNKNOWN) {
                 fprintf(stderr, "dsv4_trunk: layer %d tensor %s has dtype '%s', "
                                 "which this build does not implement\n",
-                        L, lay->t[i].name, json_get(e, "dtype")->str);
-                return -1;
+                        L, name, dtype);
+                goto out;
             }
         }
     }
-    return 0;
+    rc = 0;
+
+out:
+    free(line);
+    fclose(f);
+    return rc;
 }
 
 /* Resolve plan_layer()'s request order to manifest indices once per layer.

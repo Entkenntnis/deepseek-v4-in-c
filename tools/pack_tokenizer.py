@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Pack tokenizer.json into a flat binary the C loads with two reads.
+"""Pack tokenizer.json into a flat binary the Python tokenizer loads directly.
 
 WHY PACK IT AT ALL
     tokenizer.json is 128,000 vocab entries plus 127,741 merges plus 1,283 added
     tokens. Parsing that JSON at every process start costs more than loading the
-    entire dense trunk of a small model, and the C would need a general JSON
-    parser sized for it. The packed form is read in two calls and needs no
-    parsing.
+    entire dense trunk of a small model. The packed form is read once as bytes
+    and needs no JSON parse. The C engine no longer reads text at all; this pack
+    is consumed by tui/dsv4tui/tokenizer.py.
 
-FORMAT  (all little-endian; the C mirrors this exactly)
+FORMAT  (all little-endian; the Python reader mirrors this exactly)
     magic      "DSV4TOK\\0"          8 bytes
     version    u32 = 1
     n_vocab    u32
@@ -27,16 +27,16 @@ FORMAT  (all little-endian; the C mirrors this exactly)
 
 MERGES ARE STORED AS IDS, NOT STRINGS
     The reference stores merges as pairs of token strings. Resolving them to ids
-    once here means the C's merge loop compares integers instead of doing string
-    lookups in its inner loop, and a merge whose pieces are not in the vocab is
-    caught HERE rather than silently never firing.
+    once here means the Python merge loop compares integers instead of doing
+    string lookups in its inner loop, and a merge whose pieces are not in the
+    vocab is caught HERE rather than silently never firing.
 
 TOKEN BYTES ARE THE BYTE-LEVEL ALPHABET, NOT UTF-8 TEXT
     A ByteLevel BPE maps each of the 256 input bytes to a printable codepoint
     first, so a token like "Ġthe" means <space>the. The blob stores the token
-    exactly as the vocab spells it; the C converts input bytes into the same
-    alphabet before matching. Storing decoded UTF-8 here would make tokens that
-    differ only in leading whitespace collide.
+    exactly as the vocab spells it; the Python tokenizer converts input bytes
+    into the same alphabet before matching. Storing decoded UTF-8 here would
+    make tokens that differ only in leading whitespace collide.
 """
 import json
 import os
@@ -89,7 +89,7 @@ def main():
     holes = sum(1 for t in tokens if t is None)
     if holes:
         # Not fatal: a gap just means no input can ever produce that id. Filling
-        # with an empty string keeps the offset table dense and the C simple.
+        # with an empty string keeps the offset table dense and the reader simple.
         print(f"  {holes} id(s) have no token; filling with empty strings")
         tokens = [t if t is not None else "" for t in tokens]
 

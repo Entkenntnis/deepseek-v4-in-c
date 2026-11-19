@@ -15,7 +15,6 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -24,10 +23,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tui"))
 
+from dsv4tui import proto  # noqa: E402
 from dsv4tui.defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX,
                               DEFAULT_KV, DEFAULT_MODEL, DEFAULT_TOK,
                               DEFAULT_TRUNK)  # noqa: E402
 from dsv4tui.dsml import py_prefix_text  # noqa: E402
+from dsv4tui.tokenizer import Tokenizer  # noqa: E402
 
 
 def env_path(name: str, default: Path) -> Path:
@@ -57,7 +58,7 @@ def parse_args() -> argparse.Namespace:
 
 def send(proc: subprocess.Popen, obj: dict) -> None:
     assert proc.stdin is not None
-    proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    proc.stdin.write(proto.encode_command(obj) + "\n")
     proc.stdin.flush()
 
 
@@ -70,11 +71,11 @@ def read_event(proc: subprocess.Popen) -> dict | None:
         line = line.strip()
         if not line:
             continue
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError:
-            print(f"build_kv: non-JSON from serve: {line}", file=sys.stderr)
+        ev = proto.parse_event(line)
+        if ev is None:
+            print(f"build_kv: bad event: {line}", file=sys.stderr)
             return None
+        return ev
 
 
 def wait_for(proc: subprocess.Popen, event: str) -> dict:
@@ -96,7 +97,6 @@ def build_command(a: argparse.Namespace) -> list[str]:
         str(a.binary),
         "--model", str(a.model),
         "--trunk", str(a.trunk),
-        "--tok", str(a.tok),
         "--budget", str(a.budget),
         "--ctx", str(a.ctx),
     ]
@@ -129,7 +129,14 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    try:
+        tok = Tokenizer(a.tok)
+    except (OSError, ValueError) as exc:
+        print(f"build_kv: cannot load tokenizer {a.tok}: {exc}",
+              file=sys.stderr)
+        return 2
     prefix = py_prefix_text()
+    prefix_tokens = tok.encode(prefix)
     proc = subprocess.Popen(
         build_command(a),
         stdin=subprocess.PIPE,
@@ -146,7 +153,8 @@ def main() -> int:
         print(f"build_kv: {cfg.get('layers', '?')} layers, "
               f"{cfg.get('hidden', '?')}d; pre-filling tools preamble",
               file=sys.stderr)
-        send(proc, {"cmd": "kv_build", "path": str(out), "text": prefix})
+        send(proc, {"cmd": "kv_build", "path": str(out),
+                    "tokens": prefix_tokens})
         ev = wait_for(proc, "kv_built")
         tokens = int(ev.get("tokens") or 0)
         seconds = float(ev.get("seconds") or 0.0)

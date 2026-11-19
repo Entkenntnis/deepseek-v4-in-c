@@ -15,6 +15,7 @@ from .defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX, DEFAULT_GEN,
 from .demo import DemoBackend
 from .messages import Message
 from .pytool import PySession
+from .tokenizer import Tokenizer
 
 
 class AppBase:
@@ -26,6 +27,7 @@ class AppBase:
         self.current_msg: Optional[Message] = None
         self.current_user_msg: Optional[Message] = None
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.tokenizer: Optional[Tokenizer] = None
 
         self.ready: dict = {}
         self.last: dict = {}
@@ -130,16 +132,16 @@ class AppBase:
         if self.demo:
             self.backend = DemoBackend(self.sink)
         else:
+            self.tokenizer = Tokenizer(DEFAULT_TOK)
             argv = [
                 str(DEFAULT_BINARY),
                 str(DEFAULT_MODEL),
                 "--trunk", str(DEFAULT_TRUNK),
-                "--tok", str(DEFAULT_TOK),
                 "--budget", DEFAULT_BUDGET,
                 "--ctx", str(DEFAULT_CTX),
                 "--gen", str(DEFAULT_GEN),
             ]
-            self.backend = RealBackend(argv, self.sink)
+            self.backend = RealBackend(argv, self.sink, self.tokenizer)
         self.backend.start()
 
     def close(self) -> None:

@@ -14,14 +14,12 @@ void dsv4_engine_free(Engine *e)
     free(e->lst);
     free(e->h); free(e->xh); free(e->logits); free(e->ids);
     free(e->cs_d); free(e->sn_d); free(e->cs_c); free(e->sn_c);
-    free(e->enc_tmp); free(e->tok_bytes); free(e->hexbuf);
+    free(e->in_ids);
     dsv4_scratch_free(&e->scratch);
     dsv4_bind_model_free(&e->mb);
     dsv4_cache_free(&e->cache);
     dsv4_trunk_close(&e->tr);
-    dsv4_tok_free(&e->tok);
     dsv4_st_close(&e->st);
-    free(e->system_prompt);
     memset(e, 0, sizeof *e);
 }
 
@@ -40,22 +38,16 @@ int dsv4_engine_reset_context(Engine *e)
     return 0;
 }
 
-/* Append `text` to the sequence, encoding into a temporary first so a context
- * overflow cannot leave a half-appended turn behind. */
-int dsv4_append_text(Engine *e, const char *text)
+/* Append token ids to the sequence. Range-check first so a malformed command
+ * cannot index an embedding row out of bounds and a context overflow cannot
+ * leave a half-appended turn behind. */
+int dsv4_append_ids(Engine *e, const int32_t *ids, int n)
 {
-    const int len = (int)strlen(text);
-    const int need = len + 64;
-    if (need > e->enc_cap) {
-        int32_t *p = realloc(e->enc_tmp, (size_t)need * sizeof(int32_t));
-        if (!p) return -1;
-        e->enc_tmp = p;
-        e->enc_cap = need;
-    }
-    int n = dsv4_tok_encode(&e->tok, text, len, e->enc_tmp, e->enc_cap);
     if (n < 0) return -1;
+    for (int i = 0; i < n; i++)
+        if (ids[i] < 0 || ids[i] >= e->c.vocab) return -1;
     if (n > e->cap_ids - e->n_ids) return -2;
-    memcpy(e->ids + e->n_ids, e->enc_tmp, (size_t)n * sizeof(int32_t));
+    memcpy(e->ids + e->n_ids, ids, (size_t)n * sizeof(int32_t));
     e->n_ids += n;
     return n;
 }

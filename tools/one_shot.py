@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run one prompt through bin/dsv4-serve and print the full diagnostics.
 
-Serve is the resident engine: it loads the model once, speaks JSON lines on
-stdin/stdout, and keeps the KV state alive. This script is the one-shot client:
-it starts serve, sends one generate command, streams the text, prints every
-counter serve reports, then quits.
+Serve is the resident engine: it loads the model once, speaks the line protocol
+on stdin/stdout, and keeps the KV state alive. This script is the one-shot
+client: it tokenizes the prompt, starts serve, sends one generate command,
+streams the text, prints every counter serve reports, then quits.
 
 Examples:
     python3 tools/one_shot.py "The capital of France is" --gen 16
@@ -24,6 +24,10 @@ from pathlib import Path
 
 HOME = Path.home()
 REPO = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO / "tui"))
+from dsv4tui import proto  # noqa: E402
+from dsv4tui.tokenizer import Tokenizer  # noqa: E402
 
 DEFAULT_MODEL = HOME / "colibri-models" / "deepseek-v4-flash"
 DEFAULT_TRUNK = HOME / "colibri-models" / "dsv4-trunk-flash"
@@ -53,7 +57,8 @@ def parse_args():
     p.add_argument("--top", action="store_true", help="show top-5 alternatives")
     p.add_argument("--ids", action="store_true", help="show generated token ids")
     p.add_argument("--json", action="store_true", dest="raw_json",
-                   help="print raw serve events instead of the human report")
+                   help="print parsed serve events as JSON instead of the "
+                        "human report")
     p.add_argument("--quiet", action="store_true", help="suppress the human report")
     p.add_argument("--threads", type=int)
     p.add_argument("--pin", choices=("off", "all", "p", "e"))
@@ -76,7 +81,7 @@ def parse_args():
 
 def build_command(a):
     cmd = [str(a.binary), "--model", str(a.model),
-           "--trunk", str(a.trunk), "--tok", str(a.tok),
+           "--trunk", str(a.trunk),
            "--budget", str(a.budget), "--ctx", str(a.ctx)]
     for flag, value in (("--threads", a.threads), ("--pin", a.pin),
                         ("--readers", a.readers), ("--reader-pin", a.reader_pin),
@@ -108,6 +113,7 @@ class Client:
     def __init__(self, args):
         self.a = args
         self.proc = None
+        self.tok: Tokenizer | None = None
         self.ready = None
         self.start = None
         self.done = None
@@ -120,7 +126,7 @@ class Client:
 
     def send(self, obj):
         try:
-            self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            self.proc.stdin.write(proto.encode_command(obj) + "\n")
             self.proc.stdin.flush()
         except (BrokenPipeError, ValueError):
             pass
@@ -133,11 +139,11 @@ class Client:
             line = line.strip()
             if not line:
                 continue
-            try:
-                return json.loads(line), line
-            except json.JSONDecodeError:
-                announce(self.a, f"non-JSON from serve: {line}")
+            ev = proto.parse_event(line)
+            if ev is None:
+                announce(self.a, f"bad event from serve: {line}")
                 continue
+            return ev, line
 
     def on_sigint(self, _sig, _frame):
         self.interrupted = True
@@ -181,7 +187,7 @@ class Client:
         self.tokens.append(ev)
         if self.a.raw_json:
             return
-        raw = bytes.fromhex(ev.get("hex", ""))
+        raw = self.tok.token_bytes(int(ev.get("id") or 0)) if self.tok else b""
         text = decoder.decode(raw)
         if text:
             sys.stdout.write(text)
@@ -288,6 +294,12 @@ class Client:
                   file=sys.stderr)
             return 2
 
+        try:
+            self.tok = Tokenizer(a.tok)
+        except (OSError, ValueError) as exc:
+            print(f"error: cannot load tokenizer {a.tok}: {exc}", file=sys.stderr)
+            return 2
+
         cmd = build_command(a)
         announce(a, f"loading {a.model}")
         try:
@@ -303,7 +315,7 @@ class Client:
 
         for ev, line in iter(self.read, (None, None)):
             if a.raw_json:
-                print(line, flush=True)
+                print(json.dumps(ev, ensure_ascii=False), flush=True)
             if ev.get("event") == "ready":
                 break
             if ev.get("event") == "error":
@@ -317,9 +329,10 @@ class Client:
             return 130 if self.interrupted else 1
         self.ready_event(ev)
 
-        if a.system:
-            self.send({"cmd": "system", "text": a.system})
-        self.send({"cmd": "generate", "prompt": a.prompt, "gen": a.gen,
+        tokens = self.tok.turn_tokens(
+            a.prompt, system=a.system, think=bool(a.think), first=True)
+        self.send({"cmd": "generate", "tokens": tokens, "gen": a.gen,
+                   "eos": self.tok.eos_id,
                    "think": bool(a.think), "layers": bool(a.layers)})
 
         failed = False
@@ -330,7 +343,7 @@ class Client:
                 failed = True
                 break
             if a.raw_json:
-                print(line, flush=True)
+                print(json.dumps(ev, ensure_ascii=False), flush=True)
             kind = ev.get("event")
             if kind == "start":
                 self.start_event(ev)

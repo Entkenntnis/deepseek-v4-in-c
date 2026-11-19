@@ -32,6 +32,12 @@ THE ASSUMPTION K3 MADE THAT IS FALSE HERE
 WHAT IS DELIBERATELY NOT PACKED
     The routed experts. They are most of the checkpoint, they are streamed on
     demand by the LRU cache, and copying them here would defeat the point.
+
+MANIFEST
+    The C reader consumes trunk.idx, a whitespace-separated line format. The
+    packer also keeps trunk.json for humans and older tooling; nothing in the C
+    binary parses it. Use --reindex to create trunk.idx from an existing
+    trunk.json without copying trunk.bin again.
 """
 import argparse
 import json
@@ -83,13 +89,39 @@ def layer_tensors(idx, layer):
     return sorted(k for k in idx if k.startswith(pfx))
 
 
+def write_index(path, manifest):
+    """Write the line-based index the C loader reads."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("DSV4TRUNK 1\n")
+        f.write(f"n_layers {manifest['n_layers']}\n")
+        for lay in manifest["layers"]:
+            if lay is None:
+                f.write("layer 0 0 0\n")
+                continue
+            f.write(f"layer {lay['file_off']} {lay['nbytes']} "
+                    f"{len(lay['tensors'])}\n")
+            for t in lay["tensors"]:
+                f.write(f"tensor {t['name']} {t['off']} {t['nbytes']} "
+                        f"{t['dtype']}\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
     ap.add_argument("out_dir")
     ap.add_argument("--layers", type=int, default=None,
                     help="pack only the first N layers (for testing)")
+    ap.add_argument("--reindex", action="store_true",
+                    help="only rewrite trunk.idx from the existing trunk.json")
     args = ap.parse_args()
+
+    if args.reindex:
+        json_path = os.path.join(args.out_dir, "trunk.json")
+        manifest = json.load(open(json_path, encoding="utf-8"))
+        out = os.path.join(args.out_dir, "trunk.idx")
+        write_index(out, manifest)
+        print(f"wrote {out} from {json_path}")
+        return
 
     cfg = json.load(open(os.path.join(args.model_dir, "config.json")))
     n_layers = cfg["num_hidden_layers"]
@@ -149,8 +181,10 @@ def main():
         out.seek((out.tell() + ALIGN - 1) // ALIGN * ALIGN - 1)
         out.write(b"\0")
 
-    with open(os.path.join(args.out_dir, "trunk.json"), "w") as f:
+    json_path = os.path.join(args.out_dir, "trunk.json")
+    with open(json_path, "w") as f:
         json.dump(manifest, f)
+    write_index(os.path.join(args.out_dir, "trunk.idx"), manifest)
 
     total = os.path.getsize(bin_path)
     print(f"\npacked {packed} layers ({skipped} absent) -> {bin_path}")

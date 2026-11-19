@@ -35,31 +35,11 @@ static void model_tag(const char *dir, char *out, size_t cap)
     }
 }
 
-/* Tokenize into the engine's scratch buffer. Used only for prefix validation;
- * it must not touch e->ids or e->n_ids. */
-static int encode_expect(Engine *e, const char *text, int *n_out)
+void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
+                          const char *path)
 {
-    *n_out = 0;
-    if (!text || !text[0]) return 0;
-
-    const int len = (int)strlen(text);
-    const int need = len + 64;
-    if (need > e->enc_cap) {
-        int32_t *p = realloc(e->enc_tmp, (size_t)need * sizeof(int32_t));
-        if (!p) return -1;
-        e->enc_tmp = p;
-        e->enc_cap = need;
-    }
-    const int n = dsv4_tok_encode(&e->tok, text, len, e->enc_tmp, e->enc_cap);
-    if (n < 0) return -1;
-    *n_out = n;
-    return 0;
-}
-
-void dsv4_engine_kv_build(Engine *e, const char *text, const char *path)
-{
-    if (!text || !text[0] || !path || !path[0]) {
-        dsv4_emit_kv_error("kv_build needs both text and path");
+    if (!tokens || n_tokens <= 0 || !path || !path[0]) {
+        dsv4_emit_kv_error("kv_build needs both tokens and path");
         return;
     }
     if (e->n_ids != 0 || e->pending_forward) {
@@ -70,12 +50,12 @@ void dsv4_engine_kv_build(Engine *e, const char *text, const char *path)
     const double t0 = dsv4_now_s();
     dsv4_cancel = 0;
 
-    const int n = dsv4_append_text(e, text);
+    const int n = dsv4_append_ids(e, tokens, n_tokens);
     if (n < 0) {
         if (n == -2)
             dsv4_emit_kv_error("prefix does not fit in the context");
         else
-            dsv4_emit_kv_error("prefix tokenization failed");
+            dsv4_emit_kv_error("prefix contains an invalid token id");
         return;
     }
 
@@ -126,7 +106,8 @@ void dsv4_engine_kv_build(Engine *e, const char *text, const char *path)
     dsv4_cancel = 0;
 }
 
-void dsv4_engine_kv_load(Engine *e, const char *text, const char *path)
+void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
+                         const char *path)
 {
     if (!path || !path[0]) {
         dsv4_emit_kv_error("kv_load needs a path");
@@ -137,19 +118,14 @@ void dsv4_engine_kv_load(Engine *e, const char *text, const char *path)
         return;
     }
 
-    int n_expect = 0;
-    if (encode_expect(e, text, &n_expect) != 0) {
-        dsv4_emit_kv_error("could not tokenize the expected prefix");
-        return;
-    }
-
+    const int n_expect = tokens ? n_tokens : 0;
     const double t0 = dsv4_now_s();
     char tag[128];
     model_tag(e->model_dir, tag, sizeof tag);
     int loaded = 0;
     if (dsv4_state_file_load(path, tag, &e->c, e->lst, e->maxpos,
                              e->ids, e->cap_ids, &loaded,
-                             n_expect > 0 ? e->enc_tmp : NULL, n_expect) != 0) {
+                             n_expect > 0 ? tokens : NULL, n_expect) != 0) {
         dsv4_emit_kv_error("cached prefix rejected (see stderr)");
         return;
     }
