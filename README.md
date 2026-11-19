@@ -8,7 +8,7 @@ This file is for humans, never touch or change by agent.
 
 Optimised version for my system: Intel Core Ultra 7 258V, 32 GB RAM, 1 TB NVMe
 
-Main entry point is `make tui` and start chatting.
+Main entry point is `make tui` and start chatting, requires https://github.com/Entkenntnis/deepseek-v4-in-c/blob/main/tui/requirements.txt and some gcc tools (make, gcc, vulkan, openmp, ... see Makefile)
 
 Run `make test` for some sanity checks.
 
