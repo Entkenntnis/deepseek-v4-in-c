@@ -31,7 +31,7 @@ static void handle_cancel(int sig)
 int main(int argc, char **argv)
 {
     const char *model = NULL, *trunkdir = NULL;
-    double budget_gb = 8.0;
+    double budget_gb = 16.0;
     int ctx = 8192, ngen = 128;
 
     for (int i = 1; i < argc; i++) {

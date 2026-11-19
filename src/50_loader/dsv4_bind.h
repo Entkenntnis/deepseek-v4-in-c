@@ -24,9 +24,6 @@ int  dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
                      DSV4ModelBind *m);
 void dsv4_bind_model_free(DSV4ModelBind *m);
 
-/* Bytes dsv4_bind_model() will allocate, without reading any. */
-int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head);
-
 /* Bind one layer's run. `widen` holds the widened small vectors; the packer
  * recorded its exact size in `lay->widen_bytes`. Returns 0 on success. */
 int dsv4_bind_layer(const DSV4Cfg *c, int layer,

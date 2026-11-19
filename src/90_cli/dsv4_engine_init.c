@@ -7,8 +7,12 @@
 #include "dsv4_kernels.h"
 #include "dsv4_serve_int.h"
 
-/* Linux MemAvailable in bytes, or -1. A snapshot, not a reservation. Used only
- * by --budget auto, so it stays with the engine's budget calculation. */
+/* Precomputed from the packed Flash model.idx: embed, head, final norm and the
+ * head's mHC tensors. Keeping it here means --budget auto does not have to scan
+ * the model layout on every start. */
+#define DSV4_MODEL_BYTES 2118402072LL
+
+/* Linux MemAvailable in bytes, or -1. A snapshot, not a reservation. */
 static int64_t mem_available_bytes(void)
 {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -54,35 +58,26 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     int64_t budget = (int64_t)(budget_gb * 1073741824.0);
     if (budget_auto) {
         const int64_t avail = mem_available_bytes();
-        const int64_t model_bytes = dsv4_bind_model_bytes(&e->st, &e->c, 1);
         const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
-        /* Scratch, KV state, rope tables and allocator overhead.
-         * The budget does not cover these; the `--budget auto` output shows the
-         * allowance. Keep enough spare that the reserve above is actually
-         * spare. */
         const int64_t runtime = (int64_t)512 << 20;
         if (avail <= 0) {
             fprintf(stderr, "--budget auto: cannot read available memory; "
                             "pass an explicit --budget GB\n");
             return -1;
         }
-        if (model_bytes < 0) {
-            fprintf(stderr, "--budget auto: cannot size the model's embed/head "
-                            "weights; pass an explicit --budget GB\n");
-            return -1;
-        }
-        budget = avail - reserve - model_bytes - runtime;
+        budget = avail - reserve - DSV4_MODEL_BYTES - runtime;
         if (budget <= 0) {
             fprintf(stderr, "--budget auto: %.2f GiB available, %.2f GiB model, "
                             "%.2f GiB reserve + runtime leaves nothing\n",
                     (double)avail / 1073741824.0,
-                    (double)model_bytes / 1073741824.0,
+                    (double)DSV4_MODEL_BYTES / 1073741824.0,
                     (double)(reserve + runtime) / 1073741824.0);
             return -1;
         }
         fprintf(stderr, "--budget auto: %.2f GiB available - %.2f GiB model - "
                         "%.2f GiB reserve - %.2f GiB runtime = %.2f GiB budget\n",
-                (double)avail / 1073741824.0, (double)model_bytes / 1073741824.0,
+                (double)avail / 1073741824.0,
+                (double)DSV4_MODEL_BYTES / 1073741824.0,
                 (double)reserve / 1073741824.0,
                 (double)runtime / 1073741824.0,
                 (double)budget / 1073741824.0);

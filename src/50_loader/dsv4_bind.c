@@ -51,12 +51,6 @@ static int64_t model_bytes(const DSV4St *s, int want_head)
     return total;
 }
 
-int64_t dsv4_bind_model_bytes(const DSV4St *s, const DSV4Cfg *c, int want_head)
-{
-    (void)c;
-    return model_bytes(s, want_head);
-}
-
 int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
                     DSV4ModelBind *m)
 {

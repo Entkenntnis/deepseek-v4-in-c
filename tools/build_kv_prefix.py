@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tok", default=env_path("DSV4_TOK", DEFAULT_TOK))
     p.add_argument("--binary", default=env_path("DSV4_SERVE_BIN", DEFAULT_BINARY))
     p.add_argument("--budget", default=DEFAULT_BUDGET,
-                   help="GB or auto (default: auto)")
+                   help=f"GB or auto (default: {DEFAULT_BUDGET})")
     p.add_argument("--ctx", type=int, default=DEFAULT_CTX)
     p.add_argument("--output", default=None,
                    help=f"cache file to write (default: {DEFAULT_KV})")
