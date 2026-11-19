@@ -5,8 +5,21 @@
 #include <string.h>
 
 #include "dsv4_kernels.h"
-#include "dsv4_util.h"
 #include "dsv4_serve_int.h"
+
+/* Linux MemAvailable in bytes, or -1. A snapshot, not a reservation. Used only
+ * by --budget auto, so it stays with the engine's budget calculation. */
+static int64_t mem_available_bytes(void)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char line[256];
+    long long kb = -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "MemAvailable: %lld kB", &kb) == 1) break;
+    fclose(f);
+    return kb < 0 ? -1 : (int64_t)kb * 1024;
+}
 
 static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
 {
@@ -40,7 +53,7 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     const int budget_auto = budget_gb < 0.0;
     int64_t budget = (int64_t)(budget_gb * 1073741824.0);
     if (budget_auto) {
-        const int64_t avail = dsv4_mem_available_bytes();
+        const int64_t avail = mem_available_bytes();
         const int64_t model_bytes = dsv4_bind_model_bytes(&e->st, &e->c, 1);
         const int64_t reserve = (int64_t)1 << 30;       /* 1 GiB spare */
         /* Scratch, KV state, rope tables and allocator overhead.
