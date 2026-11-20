@@ -86,6 +86,10 @@ void dsv4_emit_kv_built(int tokens, double seconds, long long bytes);
 void dsv4_emit_kv_loaded(int tokens, int context_cap, double seconds);
 
 /* ---- commands ---- */
+enum {
+    DSV4_COMMAND_CONTINUE = 0,
+    DSV4_COMMAND_QUIT     = 1
+};
 int  dsv4_handle_command(Engine *e, char *line);
 
 /* ---- engine ---- */

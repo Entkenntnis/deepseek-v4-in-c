@@ -147,10 +147,10 @@ int dsv4_handle_command(Engine *e, char *line)
         fputs("pong\n", stdout);
         fflush(stdout);
     } else if (!strcmp(cmd, "quit")) {
-        return 1;
+        return DSV4_COMMAND_QUIT;
     } else {
         dsv4_emit_error("unknown command \"%s\"", cmd);
     }
-    return 0;
+    return DSV4_COMMAND_CONTINUE;
 }
 
