@@ -121,7 +121,6 @@ int  dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
                       double t0);
 void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
                           const char *path);
-void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,
-                         const char *path);
+void dsv4_engine_kv_load(Engine *e, const char *path);
 
 #endif /* DSV4_SERVE_INT_H */

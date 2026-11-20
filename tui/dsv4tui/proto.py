@@ -40,13 +40,17 @@ def encode_command(cmd: dict[str, Any]) -> str:
         fields.append(f"eos={int(cmd.get('eos', -1))}")
         fields.append(f"think={1 if cmd.get('think') else 0}")
         fields.append(f"layers={1 if cmd.get('layers') else 0}")
-    elif name in ("kv_build", "kv_load"):
+    elif name == "kv_build":
         path = cmd.get("path")
         if path is not None:
             fields.append("path=" + hex_field(str(path)))
         tokens = cmd.get("tokens")
         if tokens is not None:
             fields.append("tokens=" + ",".join(str(int(i)) for i in tokens))
+    elif name == "kv_load":
+        path = cmd.get("path")
+        if path is not None:
+            fields.append("path=" + hex_field(str(path)))
     elif name in ("reset", "stats", "ping", "quit"):
         pass
     else:

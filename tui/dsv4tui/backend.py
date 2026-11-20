@@ -183,11 +183,9 @@ class RealBackend:
             })
 
         if name == "kv_load":
-            text = str(obj.get("text") or "")
             return self._write({
                 "cmd": "kv_load",
                 "path": str(obj.get("path") or ""),
-                "tokens": self.tokenizer.encode(text),
             })
 
         if name == "reset":

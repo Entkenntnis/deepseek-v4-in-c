@@ -90,7 +90,7 @@ int dsv4_handle_command(Engine *e, char *line)
 {
     char *save = NULL;
     char *cmd = strtok_r(line, " \t\r\n", &save);
-    if (!cmd) return 0;
+    if (!cmd) return DSV4_COMMAND_CONTINUE;
 
     Fields f = { .n = 0 };
     for (char *tok = strtok_r(NULL, " \t\r\n", &save);
@@ -98,7 +98,7 @@ int dsv4_handle_command(Engine *e, char *line)
         char *eq = strchr(tok, '=');
         if (!eq || f.n >= MAX_FIELDS) {
             dsv4_emit_error("malformed field \"%s\"", tok);
-            return 0;
+            return DSV4_COMMAND_CONTINUE;
         }
         *eq = 0;
         f.key[f.n] = tok;
@@ -111,7 +111,7 @@ int dsv4_handle_command(Engine *e, char *line)
         const char *tv = field(&f, "tokens");
         if (!tv || parse_ids(e, tv, &nt) != 0 || nt == 0) {
             dsv4_emit_error("generate needs a non-empty tokens= list");
-            return 0;
+            return DSV4_COMMAND_CONTINUE;
         }
         const int eos = field_int(&f, "eos", -1);
         const int ngen = field_int(&f, "gen", e->gen_default);
@@ -134,14 +134,10 @@ int dsv4_handle_command(Engine *e, char *line)
         }
     } else if (!strcmp(cmd, "kv_load")) {
         char path[4096];
-        int nt = 0;
-        const char *tv = field(&f, "tokens");
         if (decode_path(field(&f, "path"), path, sizeof path) != 0) {
             dsv4_emit_error("KV: kv_load needs path=hex:...");
-        } else if (tv && parse_ids(e, tv, &nt) != 0) {
-            dsv4_emit_error("KV: kv_load tokens= is malformed");
         } else {
-            dsv4_engine_kv_load(e, e->in_ids, nt, path);
+            dsv4_engine_kv_load(e, path);
         }
     } else if (!strcmp(cmd, "ping")) {
         fputs("pong\n", stdout);

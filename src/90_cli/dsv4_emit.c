@@ -160,8 +160,8 @@ void dsv4_emit_kv_built(int tokens, double seconds, long long bytes)
 
 void dsv4_emit_kv_loaded(int tokens, int context_cap, double seconds)
 {
-    printf("kv_loaded tokens=%d used=%d context_cap=%d seconds=%.4f\n",
-           tokens, tokens, context_cap, seconds);
+    printf("kv_loaded tokens=%d context_cap=%d seconds=%.4f\n",
+           tokens, context_cap, seconds);
     fflush(stdout);
 }
 

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from .defaults import DEFAULT_ENV, DEFAULT_KV
-from .dsml import tools_prefix_text
 from .messages import Message
 
 
@@ -132,8 +131,7 @@ class CommandMixin:
                 # normal `system` command and a full prefill.
                 self.tool_enabled = True
                 if DEFAULT_KV.exists() and self.backend_alive and self.backend.send(
-                        {"cmd": "kv_load", "path": str(DEFAULT_KV),
-                         "text": tools_prefix_text()}):
+                        {"cmd": "kv_load", "path": str(DEFAULT_KV)}):
                     self.kv_pending = True
                     self.add_system(self._tools_note(
                         f"tools on; loading cached preamble from "

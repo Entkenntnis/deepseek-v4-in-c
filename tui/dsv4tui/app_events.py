@@ -64,7 +64,7 @@ class EventMixin:
             # The prefix is already in the KV state; sending the system prompt
             # again would make the first turn start with a duplicate preamble.
             self.system_armed = False
-            used = int(ev.get("used") or ev.get("tokens") or 0)
+            used = int(ev.get("tokens") or 0)
             if used:
                 self.context_used = used
             self.context_cap = int(ev.get("context_cap") or self.context_cap)
