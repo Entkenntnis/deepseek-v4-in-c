@@ -10,7 +10,6 @@
 
 #include "dsv4_trunk.h"
 #include "dsv4_bind.h"
-#include "dsv4_util.h"
 
 static int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
 {
@@ -92,7 +91,6 @@ int dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
         dsv4_trunk_close(tr);
         return -1;
     }
-    if (data_bytes > 0) dsv4_hugepages(tr->data, (size_t)data_bytes);
 
     int64_t at = 0;
     for (int L = 0; L < tr->n_layers; L++) {
