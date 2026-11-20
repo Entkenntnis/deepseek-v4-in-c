@@ -49,14 +49,6 @@ void dsv4_cache_bind_slot(DSV4Cache *c, DSV4Slot *s)
     }
 }
 
-int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg)
-{
-    DSV4Cache tmp;
-    memset(&tmp, 0, sizeof tmp);
-    dsv4_cache_expert_geometry(&tmp, cfg);
-    return tmp.slot_bytes;
-}
-
 typedef struct {
     int     expert;
     int     shard;

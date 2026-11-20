@@ -107,7 +107,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
         if (dsv4_prefill_cancelled(p))
             return dsv4_prefill_cancel_code(p);
         DSV4LayerW lw;
-        if (dsv4_trunk_bind(p->tr, c, L, &lw) != 0) return -1;
+        if (dsv4_trunk_bind(p->tr, L, &lw) != 0) return -1;
 
         const int comp = dsv4_compress_ratio(c, L) != 0;
         const float *cs = comp ? cs_c : cs_d;

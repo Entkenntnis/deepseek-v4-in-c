@@ -161,7 +161,7 @@ int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
 
     for (int L = 0; L < e->c.n_layers; L++) {
         DSV4LayerW lw;
-        if (dsv4_trunk_bind(&e->tr, &e->c, L, &lw) != 0) {
+        if (dsv4_trunk_bind(&e->tr, L, &lw) != 0) {
             dsv4_emit_error("trunk bind failed on layer %d at position %d",
                             L, pos);
             return -1;

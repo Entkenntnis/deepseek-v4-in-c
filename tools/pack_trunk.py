@@ -6,8 +6,8 @@ WHY THIS EXISTS
     A decode step walks layers 0..N-1 in a fixed order, every token. If each
     layer's weights are scattered across a 160 GB checkpoint, that walk is
     thousands of small reads. Rewritten into trunk.bin, one layer is ONE pread
-    at a known offset, and the memory requirement becomes a dial: pin a prefix,
-    stream the rest.
+    at a known offset, and the C engine can load the whole dense trunk in one
+    pass before it starts serving.
 
     The C engine no longer parses safetensors JSON. This script already reads
     every header, so it writes the complete layout instead:

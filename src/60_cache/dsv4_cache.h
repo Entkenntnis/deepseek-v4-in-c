@@ -81,10 +81,6 @@ typedef struct DSV4Cache {
     struct DSV4CacheBatch *pf_batch;
 } DSV4Cache;
 
-/* What one slot costs: payload plus alignment slack. This, not expert_bytes, is
- * what a budget is divided by -- the slack is real resident memory. */
-int64_t dsv4_cache_slot_bytes(const DSV4Cfg *cfg);
-
 /* budget_bytes decides the slot count. Returns 0 on success. A budget below one
  * expert is an error. */
 int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,

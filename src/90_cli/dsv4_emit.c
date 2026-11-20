@@ -46,11 +46,11 @@ static void write_static(const Engine *e)
     const DSV4Cache *c = &e->cache;
     const DSV4Trunk *t = &e->tr;
     printf(" cache_slots=%d cache_resident_gb=%.3f cache_slot_mb=%.2f"
-           " trunk_layers=%d trunk_pinned=%d trunk_resident_gb=%.3f",
+           " trunk_layers=%d trunk_resident_gb=%.3f",
            c->nslot,
            (double)c->slot_bytes * (double)c->nslot / 1073741824.0,
            (double)c->slot_bytes / 1048576.0,
-           t->n_layers, t->npin,
+           t->n_layers,
            (double)dsv4_trunk_resident_bytes(t) / 1073741824.0);
 }
 

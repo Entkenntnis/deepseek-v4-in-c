@@ -9,6 +9,8 @@ pytool.py, and web search in websearch.py.
 
 from __future__ import annotations
 
+import time
+
 from .defaults import (SEARCH_DEFAULT_RESULTS, SEARCH_MAX_RESULTS,
                        TOOL_MAX_ROUNDS)
 from .dsml import (DSML, TOOL_NAME, WEB_SEARCH_NAME, code_fence,
@@ -34,6 +36,14 @@ class ToolMixin:
         self.pending_query = ""
         self.current_user_msg = Message("user", text)
         self.messages.append(self.current_user_msg)
+        # The turn clock covers the whole exchange: model rounds, tool runs and
+        # the gaps between them. The conversation clock starts at the first
+        # user message and survives until the transcript is reset.
+        self.turn_start = time.monotonic()
+        self.round_prefill_s = 0.0
+        if not self.conv_started:
+            self.conv_started = time.time()
+        self.stats_force = True
         self._open_assistant()
         self.scroll = 0
         self.generating = True
@@ -43,6 +53,7 @@ class ToolMixin:
                                   "gen": self.gen_limit}):
             self.generating = False
             self.status = "failed"
+            self.end_turn_clock()
             self.add_system("could not write to the engine")
 
     def _ensure_system(self) -> None:
@@ -195,6 +206,7 @@ class ToolMixin:
                                   "gen": self.gen_limit}):
             self.generating = False
             self.status = "failed"
+            self.end_turn_clock()
             self.add_system("could not write to the engine")
 
     # -- cancellation ------------------------------------------------------
@@ -218,6 +230,7 @@ class ToolMixin:
         self.pending_tool_name = ""
         self.chain_id += 1
         self.generating = False
+        self.end_turn_clock()
         self.current_msg = None
         self.current_user_msg = None
         self.status = "ready" if self.backend_alive else "failed"

@@ -109,6 +109,12 @@ class CommandMixin:
             self.status = "ready"
             self.context_used = 0
             self.decode_spt.clear()
+            self.turn_start = 0.0
+            self.last_turn_s = 0.0
+            self.active_s = 0.0
+            self.active_prefill_s = 0.0
+            self.round_prefill_s = 0.0
+            self.conv_started = 0.0
             self.stats_force = True
             self.add_system("context reset; cache stays warm")
         elif cmd == "/tools":

@@ -70,7 +70,6 @@ class DemoBackend(DemoGenerateMixin):
     def _trunk(self) -> dict:
         return {
             "layers": 43,
-            "pinned": 43,
             "resident_gb": 6.43,
         }
 

@@ -20,6 +20,7 @@ class IngestMixin:
             elif kind == "eof":
                 self.backend_alive = False
                 self.generating = False
+                self.end_turn_clock()
                 self.chain_id += 1
                 self.tool_running = False
                 self.py.cancel()

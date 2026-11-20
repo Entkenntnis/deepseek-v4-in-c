@@ -46,7 +46,8 @@ class EventMixin:
                     f"{cfg.get('experts', '?')} experts top{cfg.get('topk', '?')}; "
                     f"cache {cache.get('slots', '?')} slots "
                     f"({cache.get('resident_gb', 0):+.2f} GB), "
-                    f"trunk {trunk.get('pinned', '?')} pinned. "
+                    f"trunk {trunk.get('layers', '?')} layers "
+                    f"({float(trunk.get('resident_gb') or 0.0):.2f} GB). "
                     f"Context {self.context_cap} tokens."))
                 if not RICH_AVAILABLE and not self.md_warned:
                     self.md_warned = True
@@ -83,8 +84,8 @@ class EventMixin:
             self.prompt_tokens = int(ev.get("prompt_tokens") or 0)
             self.context_cap = int(ev.get("context_cap") or self.context_cap)
             self.context_used = int(ev.get("pos") or 0) + self.prompt_tokens
-            self.turn_start = time.monotonic()
             self.last_token_t = 0.0
+            self.round_prefill_s = 0.0
             # decode_spt is cleared on the first decoded token, so the graph
             # only ever covers the current turn's decode.
             self.prefill_size = int(ev.get("prefill_tokens") or 0)
@@ -151,6 +152,7 @@ class EventMixin:
                 if ps > 0.0 and pt > 0:
                     self.prefill_s = ps
                     self.prefill_tokens = pt
+                    self.round_prefill_s = ps
                 self.prefill_active = False
             elif self.last_token_t > 0:
                 dt = t - self.last_token_t
@@ -192,9 +194,23 @@ class EventMixin:
                                              else "(no tokens)")
             if dropped:
                 self.add_system("turn cancelled; context unchanged")
+            # Every model round counts, including tool rounds. A round that
+            # never produced a token spent all of its time in prefill.
+            seconds = float(ev.get("seconds") or 0.0)
+            if generated > 0:
+                prefill = self.round_prefill_s
+                if prefill <= 0.0:
+                    prefill = float(ev.get("ttft") or 0.0)
+                prefill = min(prefill, seconds)
+            else:
+                prefill = seconds
+            self.active_s += seconds
+            self.active_prefill_s += prefill
+            self.round_prefill_s = 0.0
             if self.tool_turn_done(stop):
                 self.dirty = True
                 return
+            self.end_turn_clock()
             self.current_msg = None
             self.current_user_msg = None
             self.dirty = True
@@ -230,6 +246,12 @@ class EventMixin:
             self.prefill_elapsed = 0.0
             self.prefill_rate = 0.0
             self.prefill_sample_ts = 0.0
+            self.turn_start = 0.0
+            self.last_turn_s = 0.0
+            self.active_s = 0.0
+            self.active_prefill_s = 0.0
+            self.round_prefill_s = 0.0
+            self.conv_started = 0.0
             if ev.get("reason") == "cancel":
                 # The no-snapshot fallback: a partially written block cannot
                 # be resumed, so the engine dropped the whole context. The
@@ -265,6 +287,7 @@ class EventMixin:
                 self.cancel_pending = False
                 self.cancel_on_start = False
                 self.prefill_active = False
+                self.end_turn_clock()
                 if self.status not in ("starting",):
                     self.status = "ready" if self.backend_alive else "failed"
                 self.messages.append(Message("error", msg))

@@ -12,6 +12,10 @@
  * the model layout on every start. */
 #define DSV4_MODEL_BYTES 2118402072LL
 
+/* The dense trunk is fully resident. Everything left over goes to the expert
+ * cache, and that cache must be big enough to be useful. */
+#define DSV4_MIN_CACHE_BYTES ((int64_t)1 << 30)
+
 /* Linux MemAvailable in bytes, or -1. A snapshot, not a reservation. */
 static int64_t mem_available_bytes(void)
 {
@@ -77,17 +81,17 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
                 (double)budget / 1073741824.0);
     }
 
-    const int64_t efloor = (int64_t)e->c.topk * dsv4_cache_slot_bytes(&e->c);
-    if (budget <= efloor) {
-        fprintf(stderr, "--budget %.2f GB cannot work: one layer's %d experts "
-                        "alone need %.2f GB\n",
-                (double)budget / 1073741824.0, e->c.topk,
-                (double)efloor / 1073741824.0);
-        return -1;
-    }
-    if (dsv4_trunk_open(&e->tr, trunkdir, &e->c, budget - efloor) != 0)
+    if (dsv4_trunk_open(&e->tr, trunkdir, &e->c, budget) != 0)
         return -1;
     const int64_t left = budget - dsv4_trunk_resident_bytes(&e->tr);
+    if (left < DSV4_MIN_CACHE_BYTES) {
+        fprintf(stderr, "--budget %.2f GiB leaves %.2f GiB for the expert "
+                        "cache; at least %.2f GiB is required\n",
+                (double)budget / 1073741824.0,
+                (double)left / 1073741824.0,
+                (double)DSV4_MIN_CACHE_BYTES / 1073741824.0);
+        return -1;
+    }
     if (dsv4_cache_init(&e->cache, &e->st, &e->tr, &e->c, left) != 0) return -1;
     if (dsv4_bind_model(&e->st, &e->c, 1, &e->mb) != 0) return -1;
 

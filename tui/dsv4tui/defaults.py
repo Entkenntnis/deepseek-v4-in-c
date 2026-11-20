@@ -68,6 +68,19 @@ def fmt_gbps(value: float) -> str:
     return f"{value:.2f} GB/s"
 
 
+def fmt_duration(seconds: float) -> str:
+    """Compact duration for the TIMING block: 12.3s, 1m 02.3s, 1h 02m."""
+    if seconds <= 0.0:
+        return "-"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(seconds, 60.0)
+    if minutes < 60.0:
+        return f"{int(minutes)}m {rest:04.1f}s"
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 

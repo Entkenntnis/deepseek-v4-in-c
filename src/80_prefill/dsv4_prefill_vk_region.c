@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Host-memory import: trunk runs, pinned layers and the expert-slot arena. */
+/* Host-memory import: trunk layer runs and the expert-slot arena. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,19 +106,10 @@ DSV4VkRegion *dsv4_prefill_vk_region_for(DSV4PrefillVk *v, const void *ptr,
         if (p >= r->base && p + need <= r->base + r->bytes) return r;
     }
     if (v->tr) {
-        if (v->tr->ring && v->tr->nslot > 0) {
-            const size_t b = (size_t)v->tr->nslot * (size_t)v->tr->slot_bytes;
-            if (p >= v->tr->ring && p + need <= v->tr->ring + b) {
-                if (dsv4_prefill_vk_region_import(v, v->tr->ring, b) == 0)
-                    return &v->regions[v->nreg - 1];
-                return NULL;
-            }
-        }
-        for (int L = 0; L < v->tr->npin; L++) {
-            unsigned char *b = v->tr->pin[L];
+        for (int L = 0; L < v->tr->n_layers; L++) {
+            unsigned char *b = v->tr->lay[L].run;
             if (!b) continue;
-            const size_t sz = (size_t)v->tr->lay[L].nbytes
-                            + 2u * DSV4_VK_SLOT_ALIGN;
+            const size_t sz = v->tr->lay[L].run_bytes;
             if (p >= b && p + need <= b + sz) {
                 if (dsv4_prefill_vk_region_import(v, b, sz) == 0)
                     return &v->regions[v->nreg - 1];

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import time
 from collections import deque
 from typing import Any, Optional
 
@@ -66,6 +67,14 @@ class AppBase:
         self.context_used = 0
         self.context_cap = DEFAULT_CTX
         self.turn_start = 0.0
+        self.last_turn_s = 0.0
+        # Conversation-wide engine time: sum(done.seconds) split into the
+        # engine's prefill timer and everything else (decode/head).
+        self.active_s = 0.0
+        self.active_prefill_s = 0.0
+        self.round_prefill_s = 0.0
+        # Wall clock of the first user message; 0 until a turn starts.
+        self.conv_started = 0.0
         self.last_token_t = 0.0
         # One duration per decoded token, in turns.
         self.decode_spt: deque[float] = deque(maxlen=4096)
@@ -126,12 +135,17 @@ class AppBase:
         self._color_cache: dict[Any, int] = {}
         self._next_pair = 1
 
+    def end_turn_clock(self) -> None:
+        """Freeze the current turn's wall clock and keep its final value."""
+        if self.turn_start > 0.0:
+            self.last_turn_s = time.monotonic() - self.turn_start
+            self.turn_start = 0.0
+
     def decode_avg_spt(self) -> float:
         """Mean seconds per decoded token, excluding prefill and TTFT."""
         if not self.decode_spt:
             return 0.0
         return sum(self.decode_spt) / len(self.decode_spt)
-
     def decode_avg_tps(self) -> float:
         """Mean decode rate, matching the sidebar's decode average."""
         spt = self.decode_avg_spt()

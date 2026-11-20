@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional
 
-from .defaults import axis_label, clamp, fmt_gbps, nice_step
+from .defaults import (axis_label, clamp, fmt_duration, fmt_gbps, nice_step)
 
 
 class GraphMixin:
@@ -28,6 +29,10 @@ class GraphMixin:
 
         in_prefill = self.prefill_active
         show_prefill = in_prefill or self.prefill_tokens > 0
+        # TIMING only means something once a conversation exists: hide it at
+        # startup and after a reset until the first user message.
+        show_timing = (self.conv_started > 0.0 or self.turn_start > 0.0
+                       or self.last_turn_s > 0.0)
         # Keep the last turn's graph on screen after `done`; it is replaced by
         # the next turn's decode data once that turn produces tokens.
         has_decode = bool(self.decode_spt)
@@ -111,6 +116,28 @@ class GraphMixin:
             emit_memory()
             emit()
             emit_cpu()
+            if show_timing:
+                emit()
+                emit_timing()
+
+        def emit_timing() -> None:
+            # The turn clock is live while a user turn runs (model rounds, tool
+            # runs and the gaps between them); otherwise it keeps the last
+            # turn's final value. `active` is the engine's own compute time
+            # summed over every round, split by its prefill timer.
+            turn_s = (time.monotonic() - self.turn_start
+                      if self.turn_start > 0.0 else self.last_turn_s)
+            started = (time.strftime("%H:%M:%S",
+                                     time.localtime(self.conv_started))
+                       if self.conv_started > 0.0 else "-")
+            decode_s = max(0.0, self.active_s - self.active_prefill_s)
+            emit((" TIMING", "section"))
+            emit((" turn ", "dim"), (fmt_duration(turn_s), "value"),
+                 ("  started ", "dim"), (started, "value"))
+            emit((" active ", "dim"), (fmt_duration(self.active_s), "value"))
+            emit((" prefill ", "dim"),
+                 (fmt_duration(self.active_prefill_s), "value"),
+                 ("  dec ", "dim"), (fmt_duration(decode_s), "value"))
 
         if in_decode:
             emit((" DECODE", "section"),
@@ -132,6 +159,7 @@ class GraphMixin:
                 cols = [("empty", 0.0)] * (graph_w - len(visible)) + visible
 
                 graph_h = max(3, min(10, height - 12
+                                     - (5 if show_timing else 0)
                                      - (3 if show_prefill else 0)))
                 target = 5 if graph_h >= 6 else 2
                 peak = max(rate for _, rate in visible)
