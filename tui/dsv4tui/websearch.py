@@ -17,7 +17,9 @@ import time
 import urllib.error
 import urllib.request
 
-from .defaults import DEFAULT_ENV, SEARCH_MAX_RESULTS, SEARCH_TIMEOUT_S
+from .defaults import (DEFAULT_ENV, SEARCH_DEFAULT_RESULTS,
+                       SEARCH_MAX_RESULTS, SEARCH_OUTPUT_CHARS,
+                       SEARCH_SUMMARY_CHARS, SEARCH_TIMEOUT_S)
 
 SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
 
@@ -71,13 +73,39 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "…"
 
 
+def _result_chars(result: dict) -> int:
+    return sum(len(str(result.get(key) or ""))
+               for key in ("title", "url", "summary", "site_name", "date"))
+
+
+def _trim_results(results: list[dict], limit: int) -> list[dict]:
+    """Keep the whole search reply under a predictable context budget."""
+    if not results:
+        return results
+    total = sum(_result_chars(r) for r in results)
+    if total <= limit:
+        return results
+
+    fixed = sum(_result_chars(dict(r, summary="")) for r in results)
+    per = max(120, (limit - fixed) // len(results))
+    for result in results:
+        result["summary"] = _clip(result.get("summary") or "", per)
+
+    while len(results) > 1 and sum(_result_chars(r) for r in results) > limit:
+        results.pop()
+    return results
+
+
 class WebSearch:
     """One Search API call at a time, with the same async shape as PySession."""
 
     def __init__(self, timeout: float = SEARCH_TIMEOUT_S,
-                 max_results: int = SEARCH_MAX_RESULTS) -> None:
+                 max_results: int = SEARCH_MAX_RESULTS,
+                 default_results: int = SEARCH_DEFAULT_RESULTS) -> None:
         self.timeout = timeout
-        self.max_results = max_results
+        self.max_results = max(1, min(SEARCH_MAX_RESULTS, max_results))
+        self.default_results = max(
+            1, min(self.max_results, default_results))
         self._io = threading.Lock()
         self._busy = threading.Lock()
         self._cancelled = False
@@ -113,10 +141,10 @@ class WebSearch:
                     f"{DEFAULT_ENV} or the environment", query, started)
 
             try:
-                n = int(count if count is not None else self.max_results)
+                n = int(count if count is not None else self.default_results)
             except (TypeError, ValueError):
-                n = self.max_results
-            n = max(1, min(50, n))
+                n = self.default_results
+            n = max(1, min(self.max_results, n))
 
             body = json.dumps({"query": query, "count": n,
                                "need_content": False}).encode("utf-8")
@@ -156,13 +184,16 @@ class WebSearch:
                 if not isinstance(item, dict):
                     continue
                 results.append({
-                    "title": str(item.get("title") or item.get("url") or ""),
+                    "title": _clip(item.get("title")
+                                   or item.get("url") or "", 200),
                     "url": str(item.get("url") or ""),
                     "summary": _clip(item.get("summary")
-                                     or item.get("snippet") or "", 900),
-                    "site_name": str(item.get("site_name") or ""),
-                    "date": str(item.get("date") or ""),
+                                     or item.get("snippet") or "",
+                                     SEARCH_SUMMARY_CHARS),
+                    "site_name": _clip(item.get("site_name") or "", 80),
+                    "date": _clip(item.get("date") or "", 40),
                 })
+            results = _trim_results(results, SEARCH_OUTPUT_CHARS)
             return {
                 "ok": True,
                 "query": query,

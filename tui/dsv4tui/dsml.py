@@ -50,7 +50,7 @@ WEB_SEARCH_SCHEMA = {
             },
             "count": {
                 "type": "integer",
-                "description": "Number of results, 1-50 (default 5).",
+                "description": "Number of results, 1-5 (default 3).",
             },
         },
         "required": ["query"],

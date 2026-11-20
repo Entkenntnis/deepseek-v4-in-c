@@ -38,7 +38,12 @@ TOOL_MAX_OUTPUT = 800
 # DEEPSEEK_API_KEY environment variable or the repo's gitignored .env file.
 DEFAULT_ENV = REPO / ".env"
 SEARCH_TIMEOUT_S = 20.0
+SEARCH_DEFAULT_RESULTS = 3
 SEARCH_MAX_RESULTS = 5
+# Keep one tool result small: five summaries plus metadata still fit in a few
+# KB of the model context.
+SEARCH_SUMMARY_CHARS = 700
+SEARCH_OUTPUT_CHARS = 6000
 
 # These are spelled as they are in the checkpoint's own encoding/README.md.
 BOS = "<｜begin▁of▁sentence｜>"

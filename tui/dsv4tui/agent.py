@@ -9,7 +9,8 @@ pytool.py, and web search in websearch.py.
 
 from __future__ import annotations
 
-from .defaults import SEARCH_MAX_RESULTS, TOOL_MAX_ROUNDS
+from .defaults import (SEARCH_DEFAULT_RESULTS, SEARCH_MAX_RESULTS,
+                       TOOL_MAX_ROUNDS)
 from .dsml import (DSML, TOOL_NAME, WEB_SEARCH_NAME, code_fence,
                    format_result, parse_tool_calls, render_tool_text,
                    render_web_text, system_prompt)
@@ -120,11 +121,11 @@ class ToolMixin:
                 self.add_system("web_search call had no query; ignored")
                 return False
             try:
-                count = int(args.get("count", SEARCH_MAX_RESULTS))
+                count = int(args.get("count", SEARCH_DEFAULT_RESULTS))
             except (TypeError, ValueError):
-                count = SEARCH_MAX_RESULTS
+                count = SEARCH_DEFAULT_RESULTS
             self.pending_query = query.strip()
-            self.pending_count = max(1, min(50, count))
+            self.pending_count = max(1, min(SEARCH_MAX_RESULTS, count))
             pending_text = (f"**Search** `{self.pending_query}`\n\n"
                             "_running…_")
 

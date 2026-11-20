@@ -11,8 +11,8 @@ from typing import Any, Optional
 from .backend import EventSink, RealBackend
 from .defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX, DEFAULT_GEN,
                        DEFAULT_MODEL, DEFAULT_TOK, DEFAULT_TRUNK,
-                       SEARCH_MAX_RESULTS, SEARCH_TIMEOUT_S, TOOL_MAX_OUTPUT,
-                       TOOL_TIMEOUT_S)
+                       SEARCH_DEFAULT_RESULTS, SEARCH_MAX_RESULTS,
+                       SEARCH_TIMEOUT_S, TOOL_MAX_OUTPUT, TOOL_TIMEOUT_S)
 from .demo import DemoBackend
 from .messages import Message
 from .pytool import PySession
@@ -107,7 +107,7 @@ class AppBase:
         self.pending_tool_name = ""
         self.pending_code = ""
         self.pending_query = ""
-        self.pending_count = SEARCH_MAX_RESULTS
+        self.pending_count = SEARCH_DEFAULT_RESULTS
 
         self.input = ""
         self.input_cursor = 0
