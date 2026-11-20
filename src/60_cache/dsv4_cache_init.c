@@ -9,6 +9,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
 #include "dsv4_threads.h"
+#include "dsv4_util.h"
 
 static int cache_check_budget(DSV4Cache *c, const DSV4Cfg *cfg,
                               int64_t budget_bytes)
@@ -77,6 +78,9 @@ static int cache_make_slots(DSV4Cache *c)
         posix_memalign((void **)&c->slot_arena, 4096,
                        (size_t)c->nslot * (size_t)c->slot_bytes) != 0)
         c->slot_arena = NULL;
+    if (c->slot_arena)
+        dsv4_hugepages(c->slot_arena,
+                       (size_t)c->nslot * (size_t)c->slot_bytes);
 
     for (int i = 0; i < c->nslot; i++) {
         c->slot[i].layer = -1;

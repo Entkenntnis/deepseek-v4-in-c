@@ -7,6 +7,7 @@
 
 #include "dsv4_bind.h"
 #include "dsv4_trunk.h"
+#include "dsv4_util.h"
 
 /* ---- model-level slots ---- */
 enum {
@@ -60,6 +61,7 @@ int dsv4_bind_model(const DSV4St *s, const DSV4Cfg *c, int want_head,
 
     unsigned char *blob = (unsigned char *)malloc(need ? (size_t)need : 1);
     if (!blob) return -1;
+    dsv4_hugepages(blob, (size_t)need);
 
     size_t at = 0;
     for (size_t i = 0; i < sizeof model_slots / sizeof model_slots[0]; i++) {
