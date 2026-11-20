@@ -82,10 +82,9 @@ class StatsMixin:
         if final:
             spt = seconds / tokens
             tps = tokens / seconds
-            mode = "; per-token" if size <= 1 else ""
             emit((" ", "dim"),
                  (f"{seconds:.2f} s "
-                  f"({tps:.2f} tok/s, {spt:.3f} s/tok{mode})",
+                  f"({tps:.2f} tok/s, {spt:.3f} s/tok)",
                   "value"))
         else:
             prog = clamp(float(p.get("progress") or 0.0), 0.0, 1.0)

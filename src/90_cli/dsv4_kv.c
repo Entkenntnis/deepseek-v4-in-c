@@ -38,9 +38,13 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
         return;
     }
 
-    int batched = 0;
-    dsv4_prefill_prepare(e, n, &batched);
-    const int rc = dsv4_prefill_run(e, e->ids, n, 0, batched, "prefix", t0);
+    if (dsv4_prefill_prepare(e, n) != 0) {
+        dsv4_engine_reset_context(e);
+        dsv4_runtime_clear_cancel();
+        dsv4_emit_error("KV: cannot allocate the prefix prefill block");
+        return;
+    }
+    const int rc = dsv4_prefill_run(e, e->ids, n, 0);
     if (rc != 0) {
         dsv4_emit_error("KV: %s",
                         rc == DSV4_PREFILL_CANCELLED ||

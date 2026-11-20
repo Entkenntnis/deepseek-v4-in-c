@@ -360,11 +360,11 @@ def main():
         if errfile is not None:
             errfile.close()
 
-    # A per-token fallback is a different code path; its timing is not the
-    # block-prefill number this benchmark exists to measure.
+    # The block path must report the whole prompt. A short count means the run
+    # did not measure the block-prefill number this benchmark exists for.
     for i, r in enumerate(results):
         if r["prefill_tokens"] != r["prompt_tokens"]:
-            print(f"prefill: run {i + 1} used the per-token fallback "
+            print(f"prefill: run {i + 1} did not prefill the whole prompt "
                   f"(prefill_tokens={r['prefill_tokens']}, "
                   f"prompt_tokens={r['prompt_tokens']}); timing is not comparable",
                   file=sys.stderr)

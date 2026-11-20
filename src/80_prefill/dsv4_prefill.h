@@ -59,9 +59,8 @@ int  dsv4_prefill_init(DSV4Prefill **out, const DSV4Cfg *c, DSV4Trunk *tr,
 void dsv4_prefill_free(DSV4Prefill *p);
 
 /* Allocate the block buffers for `n_tokens` before any model state is touched.
- * dsv4_prefill_range() calls this too, but a caller that wants a safe fallback
- * to the per-token path on allocation failure should call it first: after the
- * range starts writing KV/compressor state there is no way back. */
+ * dsv4_prefill_range() calls this too, but callers reserve first so a failed
+ * allocation happens before anything writes KV/compressor state. */
 int  dsv4_prefill_reserve(DSV4Prefill *p, int n_tokens);
 
 /* Bytes dsv4_prefill_reserve() will allocate for `n_tokens`. The cache guard

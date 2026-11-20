@@ -132,9 +132,9 @@ static int argmax(const float *lg, int n)
     return best;
 }
 
-/* Run the output head on whatever residual stream is in e->h. Shared by the
- * per-token path and the batched prefill: the inputs are identical, and two
- * copies would be one more place for them to drift. */
+/* Run the output head on whatever residual stream is in e->h. Shared by
+ * decode and the batched prefill: the inputs are identical, and two copies
+ * would be one more place for them to drift. */
 void dsv4_head_from_h(Engine *e, int32_t *best)
 {
     const int hc = e->c.hc_mult, d = e->c.hidden;
