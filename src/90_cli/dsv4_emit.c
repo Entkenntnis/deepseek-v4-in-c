@@ -13,7 +13,7 @@
 
 /* Static fields never change after init, so they are sent only on ready.
  * Dynamic fields are sampled at the TUI's cadence instead of on every event. */
-#define DSV4_STATS_INTERVAL_S 0.5
+#define DSV4_STATS_INTERVAL_S 0.1
 
 /* String fields travel as hex. That keeps the line protocol ASCII-only and
  * means a path or an error message needs no quoting, escaping, or Unicode
