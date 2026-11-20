@@ -15,6 +15,7 @@ from .defaults import (DEFAULT_BINARY, DEFAULT_BUDGET, DEFAULT_CTX, DEFAULT_GEN,
                        SEARCH_TIMEOUT_S, TOOL_MAX_OUTPUT, TOOL_TIMEOUT_S)
 from .demo import DemoBackend
 from .messages import Message
+from .power import IdleInhibitor
 from .pytool import PySession
 from .tokenizer import Tokenizer
 from .websearch import WebSearch
@@ -115,6 +116,7 @@ class AppBase:
         self.spinner = 0
         self.stderr_lines: deque[str] = deque(maxlen=8)
         self.running = True
+        self.idle = IdleInhibitor()
         self.dirty = True
         self.last_render = 0.0
         self.demo = bool(args.demo)
@@ -152,6 +154,7 @@ class AppBase:
         self.backend.start()
 
     def close(self) -> None:
+        self.idle.end()
         if self.backend:
             self.backend.close()
         self.py.stop()

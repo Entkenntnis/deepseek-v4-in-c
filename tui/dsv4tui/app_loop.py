@@ -28,6 +28,7 @@ class LoopMixin:
             self.drain()
             now = time.monotonic()
             active = self.status in ("starting", "waiting") or self.generating
+            self.idle.sync(active)
             if (self.dirty or (active and now - self.last_render > 0.12)
                     or now - self.last_render > 0.8):
                 self.render(stdscr)
