@@ -40,7 +40,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
 
     int batched = 0;
     dsv4_prefill_prepare(e, n, &batched);
-    const int rc = dsv4_prefill_run(e, e->ids, n, 0, batched, 0, "prefix", t0);
+    const int rc = dsv4_prefill_run(e, e->ids, n, 0, batched, "prefix", t0);
     if (rc != 0) {
         dsv4_emit_error("KV: %s",
                         rc == DSV4_PREFILL_CANCELLED ||

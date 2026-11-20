@@ -18,7 +18,7 @@ import struct
 import unicodedata
 from pathlib import Path
 
-from .defaults import (ASSISTANT, BOS, EOS, THINK_CLOSE, THINK_OPEN, USER)
+from .defaults import (ASSISTANT, BOS, EOS, THINK_CLOSE, USER)
 
 _TOK_MAGIC = b"DSV4TOK\0"
 _MAX_PIECES = 65536
@@ -175,8 +175,6 @@ class Tokenizer:
         self.eos_id = self._special(EOS)
         self.user_id = self._special(USER)
         self.assistant_id = self._special(ASSISTANT)
-        self.think_open_id = self._special(THINK_OPEN)
-        self.think_close_id = self._special(THINK_CLOSE)
 
     # ---------------------------------------------------------- special ids
 
@@ -418,7 +416,7 @@ class Tokenizer:
     # ------------------------------------------------------------ turn framing
 
     def turn_tokens(self, prompt: str, system: str | None = None,
-                    think: bool = False, first: bool = False) -> list[int]:
+                    first: bool = False) -> list[int]:
         """The exact chat framing the C engine used to build itself."""
         parts: list[str] = []
         if first:
@@ -429,7 +427,7 @@ class Tokenizer:
         parts.append(USER)
         parts.append(prompt)
         parts.append(ASSISTANT)
-        parts.append(THINK_OPEN if think else THINK_CLOSE)
+        parts.append(THINK_CLOSE)
         return self.encode("".join(parts))
 
     def prefix_tokens(self, system: str) -> list[int]:

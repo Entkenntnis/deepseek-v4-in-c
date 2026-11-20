@@ -162,16 +162,13 @@ class RealBackend:
             system = self.system_prompt if first else None
             prompt = str(obj.get("prompt") or "")
             tokens = self.tokenizer.turn_tokens(
-                prompt, system=system, think=bool(obj.get("think")),
-                first=first)
+                prompt, system=system, first=first)
             self.context_empty = False
             return self._write({
                 "cmd": "generate",
                 "tokens": tokens,
                 "gen": int(obj.get("gen") or 0),
                 "eos": self.tokenizer.eos_id,
-                "think": bool(obj.get("think")),
-                "layers": bool(obj.get("layers")),
             })
 
         if name == "kv_build":

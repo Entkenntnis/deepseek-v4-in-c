@@ -100,16 +100,15 @@ void dsv4_engine_free(Engine *e);
 int  dsv4_engine_reset_context(Engine *e);
 int  dsv4_append_ids(Engine *e, const int32_t *ids, int n);
 int  dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
-                  int emit_layers, const char *phase, double t_turn,
-                  int32_t *best);
+                  const char *phase, double t_turn, int32_t *best);
 void dsv4_head_from_h(Engine *e, int32_t *best);
 void dsv4_cancel_prefill_turn(Engine *e, int rollback, int start_pos,
                               int prompt_tokens, double t0, double tp0);
 void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
-                      int ngen, int eos, int emit_layers, double t0,
-                      double tp0, int32_t best);
+                      int ngen, int eos, double t0, double tp0,
+                      int32_t best);
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
-                          int ngen, int eos, int emit_layers);
+                          int ngen, int eos);
 
 /* Reserve the block path if it is available. Always returns 0; *batched says
  * whether the following dsv4_prefill_run() will use it. */
@@ -117,8 +116,7 @@ int  dsv4_prefill_prepare(Engine *e, int n, int *batched);
 /* Run the new tokens through either the block path (when batched) or the
  * per-token path. Returns 0, DSV4_PREFILL_CANCELLED/ABORTED, or -1. */
 int  dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
-                      int batched, int emit_layers, const char *phase,
-                      double t0);
+                      int batched, const char *phase, double t0);
 void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
                           const char *path);
 void dsv4_engine_kv_load(Engine *e, const char *path);

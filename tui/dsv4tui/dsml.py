@@ -110,24 +110,14 @@ _PARAM_RE = re.compile(
     re.escape(f"<{DSML}parameter") + r"""\s+name=["']([^"']*)["']"""
     + r"""\s+string=["'](true|false)["']\s*>(.*?)"""
     + re.escape(f"</{DSML}parameter>"), re.S)
-_THINK_RE = re.compile(r"<think>(.*?)(?:</think>|$)", re.S)
+def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
+    """Split an assistant turn into (content, tool calls).
 
-
-def parse_tool_calls(text: str) -> tuple[str, str, list[dict]]:
-    """Split an assistant turn into (content, reasoning, tool calls).
-
-    `content` is the prose before the DSML block, with the reasoning and the
-    markup removed. `reasoning` is the <think> body when one is present. Each
-    call is {"name": str, "arguments": dict}. Parsing is deliberately lenient:
-    greedy decode occasionally drops a newline or uses ASCII bars.
+    `content` is the prose before the DSML block, with the markup removed.
+    Each call is {"name": str, "arguments": dict}. Parsing is deliberately
+    lenient: greedy decode occasionally drops a newline or uses ASCII bars.
     """
     text = text.replace("|DSML|", DSML)
-    reasoning = ""
-    m = _THINK_RE.search(text)
-    if m:
-        reasoning = m.group(1).strip()
-        # The reasoning block (closed or truncated) sits at the start.
-        text = text[m.end():] if m.group(0).endswith("</think>") else ""
 
     block = _BLOCK_RE.search(text)
     content = text[:block.start()] if block else text
@@ -147,7 +137,7 @@ def parse_tool_calls(text: str) -> tuple[str, str, list[dict]]:
                         pass
                 args[key] = value
             calls.append({"name": im.group(1), "arguments": args})
-    return content, reasoning, calls
+    return content, calls
 
 
 def format_result(results: list[dict]) -> str:

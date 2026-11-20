@@ -9,8 +9,8 @@
 #include "dsv4_util.h"
 
 void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
-                      int ngen, int eos, int emit_layers, double t0,
-                      double tp0, int32_t best)
+                      int ngen, int eos, double t0, double tp0,
+                      int32_t best)
 {
     int generated = 0;
     double ttft = 0.0;
@@ -57,7 +57,7 @@ void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
             break;
         }
 
-        const int frc = dsv4_forward(e, id, pos, 1, emit_layers, "gen",
+        const int frc = dsv4_forward(e, id, pos, 1, "gen",
                                      dsv4_now_s() - t0, &best);
         if (frc != 0) {
             e->pending_forward = 1;   /* the emitted token is not in the KV yet */
@@ -148,8 +148,7 @@ void dsv4_head_from_h(Engine *e, int32_t *best)
 }
 
 int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
-                 int emit_layers, const char *phase, double t_turn,
-                 int32_t *best)
+                 const char *phase, double t_turn, int32_t *best)
 {
     const int hc = e->c.hc_mult, d = e->c.hidden;
 
@@ -171,7 +170,7 @@ int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
         dsv4_layer_forward(e->h, &lw, &e->c, &e->scratch, &e->cache,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,
                            comp ? e->sn_c : e->sn_d, pos, tid);
-        if (emit_layers) dsv4_emit_layer(e, phase, L);
+        dsv4_emit_layer(e, phase, L);
     }
 
     if (want_logits) dsv4_head_from_h(e, best);

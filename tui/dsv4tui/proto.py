@@ -38,8 +38,6 @@ def encode_command(cmd: dict[str, Any]) -> str:
         fields.append("tokens=" + ",".join(str(int(i)) for i in tokens))
         fields.append(f"gen={int(cmd.get('gen', 0))}")
         fields.append(f"eos={int(cmd.get('eos', -1))}")
-        fields.append(f"think={1 if cmd.get('think') else 0}")
-        fields.append(f"layers={1 if cmd.get('layers') else 0}")
     elif name == "kv_build":
         path = cmd.get("path")
         if path is not None:

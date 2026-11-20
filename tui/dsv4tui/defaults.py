@@ -50,7 +50,6 @@ BOS = "<｜begin▁of▁sentence｜>"
 EOS = "<｜end▁of▁sentence｜>"
 USER = "<｜User｜>"
 ASSISTANT = "<｜Assistant｜>"
-THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 SPECIAL_TOKENS = (BOS, EOS, USER, ASSISTANT)
 

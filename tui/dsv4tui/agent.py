@@ -80,7 +80,7 @@ class ToolMixin:
             return False
 
         raw = msg.text
-        content, _reasoning, calls = parse_tool_calls(raw)
+        content, calls = parse_tool_calls(raw)
         if not self.tool_enabled:
             # The tools preamble may still be in the KV cache after startup.
             if calls or f"<{DSML}" in raw or "<|DSML|" in raw:

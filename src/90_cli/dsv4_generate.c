@@ -20,8 +20,7 @@ int dsv4_prefill_prepare(Engine *e, int n, int *batched)
 }
 
 int dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
-                     int batched, int emit_layers, const char *phase,
-                     double t0)
+                     int batched, const char *phase, double t0)
 {
     if (batched) {
         const int rc = dsv4_prefill_range(e->pf, ids, n, pos0,
@@ -36,7 +35,7 @@ int dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
 
     for (int i = 0; i < n; i++) {
         if (dsv4_runtime_cancelled()) return DSV4_PREFILL_CANCELLED;
-        if (dsv4_forward(e, ids[i], pos0 + i, 0, emit_layers, phase,
+        if (dsv4_forward(e, ids[i], pos0 + i, 0, phase,
                          dsv4_now_s() - t0, NULL) != 0)
             return -1;
     }
@@ -44,7 +43,7 @@ int dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
 }
 
 void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
-                          int ngen, int eos, int emit_layers)
+                          int ngen, int eos)
 {
     const double t0 = dsv4_now_s();
     dsv4_runtime_clear_cancel();
@@ -78,7 +77,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     }
     if (e->pending_forward) {
         const int pos = e->n_ids - 1;
-        if (dsv4_forward(e, e->ids[pos], pos, 0, emit_layers, "resume",
+        if (dsv4_forward(e, e->ids[pos], pos, 0, "resume",
                          dsv4_now_s() - t0, NULL) != 0) return;
         e->pending_forward = 0;
     }
@@ -122,7 +121,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     e->prefill_tokens = 0;
     const double tp0 = dsv4_now_s();
     const int prc = dsv4_prefill_run(e, e->ids + start_pos, n_added, start_pos,
-                                     use_batched, emit_layers, "prompt", t0);
+                                     use_batched, "prompt", t0);
     /* run() released the block buffers, so the full cache window can return
      * before the decode loop starts refilling it. */
     if (use_batched)
@@ -165,5 +164,5 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     }
 
     dsv4_decode_loop(e, n_added, start_pos, snap_ok, ngen, eos,
-                      emit_layers, t0, tp0, best);
+                     t0, tp0, best);
 }
