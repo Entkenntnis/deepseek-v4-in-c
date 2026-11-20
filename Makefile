@@ -62,7 +62,7 @@ $(BIN)/dsv4-serve: $(SERVE_OBJ) $(ENGINE_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -o $@ $(LDFLAGS) $(VK_LDFLAGS)
 
-# Prefill shaders: compile once, embed the words so the binary needs no .spv.
+# Prefill GEMM shaders, embedded into dsv4_prefill_vk_init.o.
 $(VK_SPV): build/%.spv: src/10_compute/shaders/%.comp
 	@mkdir -p build
 	glslc -O --target-env=vulkan1.3 -o $@ $<

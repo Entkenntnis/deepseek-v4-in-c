@@ -16,6 +16,12 @@
 
 typedef struct DSV4PrefillVk DSV4PrefillVk;
 
+/* Host-pointer imports are created in chunks of this size. The cache guard
+ * must evict at least one whole chunk beyond the prefill block, because a
+ * chunk that still contains a used slot re-commits all pages in that chunk --
+ * including evicted ones -- when the prefill imports it. */
+#define DSV4_VK_IMPORT_CHUNK ((int64_t)1 << 30)
+
 /* Called after a tile is submitted and before the fence is waited on. It must
  * not touch Vulkan state or the caller's in-flight X/Y buffers. Returns 1 when
  * it did work and 0 when no CPU bucket is ready. The backend calls it in a

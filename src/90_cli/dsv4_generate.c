@@ -100,7 +100,8 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
      * is released. */
     DSV4CacheGuard guard;
     const DSV4PrefillBytes pb = dsv4_prefill_bytes(&e->c, n_added);
-    dsv4_cache_guard_begin(&e->cache, pb.block_bytes + pb.token_bytes, &guard);
+    dsv4_cache_guard_begin(&e->cache, pb.block_bytes + pb.token_bytes,
+                           dsv4_prefill_guard_slack(e->pf), &guard);
 
     int use_batched = 0;
     dsv4_prefill_prepare(e, n_added, &use_batched);

@@ -92,19 +92,22 @@ int  dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
 void dsv4_cache_free(DSV4Cache *c);
 
 /* ---- prefill memory guard ------------------------------------------------
- * Before a block prefill, drop enough LRU slots to make `reserve_bytes` of
- * resident memory available and cap claims to the remaining slots. The slots
- * above the new limit are invalidated and their pages are advised away with
- * MADV_DONTNEED; clearing keys alone would not lower RSS because the arena is
- * allocated up front. end() restores the full window after the block buffers
- * have been released. The guard must be taken between turns, when no batch is
- * in flight; it drains an in-flight hash prefetch itself. */
+ * Before a block prefill, drop enough LRU slots to make `reserve_bytes` plus
+ * `extra_bytes` of resident memory available and cap claims to the remaining
+ * slots. `extra_bytes` is the caller's safety margin for allocations that are
+ * not in `reserve_bytes` -- the Vulkan backend uses one import chunk because a
+ * chunk holding a used slot re-commits evicted pages when it is imported. The
+ * slots above the new limit are invalidated and their pages are advised away
+ * with MADV_DONTNEED; clearing keys alone would not lower RSS because the
+ * arena is allocated up front. end() restores the full window after the block
+ * buffers have been released. The guard must be taken between turns, when no
+ * batch is in flight; it drains an in-flight hash prefetch itself. */
 typedef struct {
     int old_limit;
 } DSV4CacheGuard;
 
 void dsv4_cache_guard_begin(DSV4Cache *c, int64_t reserve_bytes,
-                            DSV4CacheGuard *g);
+                            int64_t extra_bytes, DSV4CacheGuard *g);
 void dsv4_cache_guard_end(DSV4Cache *c, DSV4CacheGuard *g);
 
 /* ---- hash-layer prefetch (automatic; init enables it) -------------------- */

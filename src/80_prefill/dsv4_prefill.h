@@ -104,6 +104,13 @@ void dsv4_prefill_release(DSV4Prefill *p);
 #define DSV4_PREFILL_CANCELLED 1   /* stopped before model state was changed */
 #define DSV4_PREFILL_ABORTED   2   /* stopped after KV/compressor state changed */
 
+/* Bytes the cache guard should evict on top of `reserve_bytes`. The Vulkan
+ * backend imports cache chunks of DSV4_VK_IMPORT_CHUNK bytes; the chunk that
+ * still holds a used slot can re-commit evicted pages, so evicting one extra
+ * chunk keeps the peak at the pre-guard cache footprint. Returns 0 when the
+ * prefill runs without Vulkan. */
+int64_t dsv4_prefill_guard_slack(const DSV4Prefill *p);
+
 /* Run tokens ids[0..n-1] through every layer as one block, at absolute
  * positions pos0..pos0+n-1. On return `h_out` is the last token's residual
  * stream, ready for the output head.

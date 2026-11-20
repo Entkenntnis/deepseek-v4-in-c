@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BINARY = REPO / "bin" / "dsv4-serve"
 
 DEFAULT_BUDGET = "auto"
-DEFAULT_CTX = 8192
+DEFAULT_CTX = 24000
 DEFAULT_GEN = 1024
 
 # The precomputed /tools preamble KV state. `make kv` writes this file and

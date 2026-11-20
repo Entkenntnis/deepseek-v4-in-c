@@ -6,6 +6,12 @@
  * kernel to drop their pages. It then caps claims to the remaining prefix for
  * the duration of the prefill: otherwise the prefill itself would refill the
  * whole cache while its block buffers are still alive.
+ *
+ * The caller supplies an extra margin. Vulkan imports the cache in 1 GiB
+ * host-pointer chunks and importing a chunk that still holds a used slot
+ * re-commits every page in that chunk, including pages the guard just dropped.
+ * Evicting one extra chunk keeps that re-commit from exceeding the pre-guard
+ * cache footprint.
  */
 #include <errno.h>
 #include <stdint.h>
@@ -29,7 +35,7 @@ static void drop_pages(unsigned char *base, size_t bytes)
 }
 
 void dsv4_cache_guard_begin(DSV4Cache *c, int64_t reserve_bytes,
-                            DSV4CacheGuard *g)
+                            int64_t extra_bytes, DSV4CacheGuard *g)
 {
     if (!c || !g) return;
     g->old_limit = c->limit;
@@ -48,8 +54,9 @@ void dsv4_cache_guard_begin(DSV4Cache *c, int64_t reserve_bytes,
     }
 
     old_limit = c->limit;
-    const int64_t slots = reserve_bytes > 0
-        ? (reserve_bytes + c->slot_bytes - 1) / c->slot_bytes : 0;
+    const int64_t reserve_total = reserve_bytes + (extra_bytes > 0 ? extra_bytes : 0);
+    const int64_t slots = reserve_total > 0
+        ? (reserve_total + c->slot_bytes - 1) / c->slot_bytes : 0;
     keep = old_limit - (int)slots;
     if (keep < 0) keep = 0;
 
@@ -80,8 +87,12 @@ void dsv4_cache_guard_begin(DSV4Cache *c, int64_t reserve_bytes,
         for (int i = keep; i < old_limit; i++)
             drop_pages(c->slot[i].bytes, (size_t)c->slot_bytes);
 
-    fprintf(stderr, "cache: %d -> %d slots for %.1f MB prefill\n",
+    fprintf(stderr, "cache: %d -> %d slots for %.1f MB prefill",
             old_limit, keep, (double)reserve_bytes / 1048576.0);
+    if (extra_bytes > 0)
+        fprintf(stderr, " + %.1f MB import slack",
+                (double)extra_bytes / 1048576.0);
+    fputc('\n', stderr);
 }
 
 void dsv4_cache_guard_end(DSV4Cache *c, DSV4CacheGuard *g)

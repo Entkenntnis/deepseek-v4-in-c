@@ -138,6 +138,11 @@ void dsv4_prefill_free(DSV4Prefill *p)
     free(p);
 }
 
+int64_t dsv4_prefill_guard_slack(const DSV4Prefill *p)
+{
+    return p && p->vk ? DSV4_VK_IMPORT_CHUNK : 0;
+}
+
 void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
                            int tokens_done, int tokens_total,
                            double elapsed, double progress)
