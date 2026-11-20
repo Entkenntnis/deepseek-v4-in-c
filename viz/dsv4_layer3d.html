@@ -1,0 +1,2175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DeepSeek-V4 · Decoder Layer 2 in 3D</title>
+<style>
+  :root {
+    --bg: #05070c;
+    --panel: rgba(5, 11, 22, 0.84);
+    --line: rgba(148, 163, 184, 0.17);
+    --text: #dbeafe;
+    --muted: #8da0b8;
+    --cyan: #67e8f9;
+    --teal: #2dd4bf;
+    --green: #34d399;
+    --violet: #c084fc;
+    --orange: #fb923c;
+    --gold: #fbbf24;
+    --rose: #f472b6;
+    --slate: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body {
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", sans-serif;
+    color: var(--text);
+  }
+  #scene { position: fixed; inset: 0; }
+  #labels {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .panel {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.40);
+    backdrop-filter: blur(14px);
+    border-radius: 14px;
+  }
+
+  #hud {
+    top: 18px;
+    left: 18px;
+    width: min(390px, calc(100vw - 36px));
+    padding: 16px 18px;
+    pointer-events: none;
+  }
+  #hud h1 {
+    margin: 0 0 3px;
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: 0.015em;
+  }
+  #hud .sub {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  #hud .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 11px;
+  }
+  #hud .tag {
+    padding: 4px 8px;
+    border: 1px solid rgba(103, 232, 249, 0.22);
+    border-radius: 999px;
+    color: var(--cyan);
+    background: rgba(8, 47, 73, 0.25);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .legend {
+    margin-top: 13px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(148, 163, 184, 0.12);
+    display: grid;
+    gap: 9px;
+  }
+  .legend .row {
+    display: grid;
+    grid-template-columns: 30px 1fr;
+    align-items: center;
+    gap: 9px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .legend .row b { color: #cbd5e1; font-weight: 600; }
+  .legend .sample {
+    width: 24px;
+    height: 19px;
+    position: relative;
+    display: inline-block;
+  }
+  .sample.activation::before {
+    content: "";
+    position: absolute;
+    left: 3px; top: 2px;
+    width: 15px; height: 12px;
+    border-radius: 2px;
+    background: linear-gradient(135deg, #a5f3fc, #0891b2);
+    box-shadow: 0 0 11px rgba(103, 232, 249, 0.55);
+  }
+  .sample.activation::after {
+    content: "";
+    position: absolute;
+    left: 8px; top: 0px;
+    width: 15px; height: 12px;
+    border: 1px solid rgba(165, 243, 252, 0.38);
+    border-radius: 2px;
+  }
+  .sample.weight::before {
+    content: "";
+    position: absolute;
+    left: 2px; top: 3px;
+    width: 19px; height: 12px;
+    border-radius: 2px;
+    border: 1px dashed rgba(203, 213, 225, 0.65);
+    background:
+      linear-gradient(rgba(148, 163, 184, 0.22) 1px, transparent 1px) 0 0 / 6px 5px,
+      linear-gradient(90deg, rgba(148, 163, 184, 0.22) 1px, transparent 1px) 0 0 / 7px 5px,
+      rgba(51, 65, 85, 0.44);
+  }
+  .sample.op::before {
+    content: "";
+    position: absolute;
+    left: 7px; top: 0px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #fef3c7, #f59e0b 55%, #b45309);
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.55);
+  }
+
+  #views {
+    left: 18px;
+    bottom: 18px;
+    padding: 9px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    max-width: min(720px, calc(100vw - 36px));
+  }
+  button {
+    appearance: none;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(15, 23, 42, 0.72);
+    color: #cbd5e1;
+    border-radius: 9px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: 140ms ease;
+    white-space: nowrap;
+  }
+  button:hover {
+    border-color: rgba(103, 232, 249, 0.45);
+    color: #f8fafc;
+    background: rgba(8, 47, 73, 0.62);
+  }
+  button.primary,
+  button.active {
+    border-color: rgba(103, 232, 249, 0.48);
+    color: #ecfeff;
+    background: rgba(8, 47, 73, 0.78);
+    box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.12);
+  }
+
+  #info {
+    right: 18px;
+    top: 18px;
+    width: min(330px, calc(100vw - 36px));
+    padding: 15px 16px;
+    pointer-events: none;
+  }
+  #info .kicker {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  #info h2 {
+    margin: 7px 0 4px;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  #info .shape,
+  #info .io,
+  #info .formula {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #info .shape {
+    color: var(--cyan);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  #info .io {
+    display: none;
+    margin-top: 6px;
+    color: #7dd3fc;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: normal;
+  }
+  #info .formula {
+    display: none;
+    margin-top: 6px;
+    color: #fcd34d;
+    font-size: 10px;
+    line-height: 1.45;
+  }
+  #info .desc {
+    margin: 10px 0 0;
+    color: #a9bacd;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  #info .hint {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.10);
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  #tokenbar {
+    right: 18px;
+    bottom: 18px;
+    padding: 10px 12px;
+    min-width: 270px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  #tokenbar input[type="range"] { flex: 1; accent-color: var(--teal); }
+  #tokenbar b { color: #d1fae5; font-weight: 600; }
+  #tokenbar .pos {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #5eead4;
+    white-space: nowrap;
+  }
+
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(2, 6, 23, 0.94);
+    border: 1px solid rgba(103, 232, 249, 0.28);
+    border-radius: 8px;
+    padding: 7px 9px;
+    color: #e2e8f0;
+    font-size: 11px;
+    opacity: 0;
+    transform: translate(12px, 12px);
+    transition: opacity 90ms ease;
+    z-index: 30;
+    max-width: 320px;
+    line-height: 1.45;
+    box-shadow: 0 12px 34px rgba(0,0,0,.40);
+  }
+
+  .act-label,
+  .weight-label,
+  .op-label,
+  .edge-label,
+  .lane-label,
+  .state-label {
+    user-select: none;
+    pointer-events: none;
+    white-space: nowrap;
+    text-shadow: 0 1px 3px #000;
+  }
+  .act-label {
+    color: #d9fbff;
+    font-size: 10px;
+    line-height: 1.25;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(2, 20, 30, 0.76);
+    border: 1px solid rgba(103, 232, 249, 0.24);
+    border-left: 2px solid rgba(103, 232, 249, 0.85);
+  }
+  .act-label b,
+  .weight-label b {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+  }
+  .act-label b { color: #67e8f9; }
+
+  .weight-label {
+    color: #cbd5e1;
+    font-size: 9px;
+    line-height: 1.3;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(15, 23, 42, 0.88);
+    border: 1px dashed rgba(203, 213, 225, 0.42);
+    max-width: 215px;
+    white-space: normal;
+  }
+  .weight-label b { color: #fbbf24; }
+
+  .op-label {
+    max-width: 205px;
+    white-space: normal;
+    text-align: center;
+    padding: 4px 7px;
+    border-radius: 7px;
+    color: #f8fafc;
+    background: rgba(2, 6, 23, 0.84);
+    border: 1px solid rgba(148, 163, 184, 0.20);
+    border-left: 2px solid rgba(251, 191, 36, 0.7);
+    line-height: 1.3;
+  }
+  .op-label .op-title {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 650;
+  }
+  .op-label .op-io {
+    display: none;
+    margin-top: 2px;
+    color: #93c5fd;
+    font-size: 8.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    line-height: 1.35;
+  }
+  .op-label.show-io .op-io { display: block; }
+
+  .edge-label {
+    color: #bff7ff;
+    font-size: 8.5px;
+    line-height: 1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: rgba(2, 12, 24, 0.72);
+    border: 1px solid rgba(103, 232, 249, 0.16);
+  }
+
+  .state-label {
+    color: #d1fae5;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(2, 20, 17, 0.82);
+    border: 1px solid rgba(52, 211, 153, 0.28);
+    border-left: 2px solid rgba(52, 211, 153, 0.85);
+  }
+  .state-label b {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #6ee7b7;
+  }
+  .state-status {
+    color: #94a3b8;
+    font-size: 9px;
+    line-height: 1.2;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(2, 6, 23, 0.75);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .lane-label {
+    color: #64748b;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(2, 6, 23, 0.45);
+  }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+
+<div id="hud" class="panel">
+  <h1>DeepSeek-V4 · decoder layer in 3D</h1>
+  <p class="sub">
+    Layer 2 of 43. Four mHC residual streams, MLA-shaped attention,
+    HCA ratio-4 KV compression, CSA lightning indexer, and top-6 MoE.
+  </p>
+  <div class="tags">
+    <span class="tag">layer 2</span>
+    <span class="tag">hca ratio 4</span>
+    <span class="tag">csa indexer</span>
+    <span class="tag">moe top-6</span>
+  </div>
+  <div class="legend">
+    <div class="row">
+      <span class="sample activation"></span>
+      <span><b>Activation / value</b> — solid block. One float ≈ one cube; size is linear in the tensor shape.</span>
+    </div>
+    <div class="row">
+      <span class="sample weight"></span>
+      <span><b>Weight / parameter</b> — flat gridded plate. Static data, not part of the token flow; hover a plate for its matrix shape.</span>
+    </div>
+    <div class="row">
+      <span class="sample op"></span>
+      <span><b>Operation</b> — sphere. Hover it for the exact input and output shapes.</span>
+    </div>
+  </div>
+</div>
+
+<div id="views" class="panel">
+  <button data-view="overview">Overview</button>
+  <button data-view="q">Q path</button>
+  <button data-view="kv">KV + HCA</button>
+  <button data-view="indexer">CSA indexer</button>
+  <button data-view="attention">Attention</button>
+  <button data-view="ffn">FFN</button>
+  <button data-view="experts">Experts</button>
+  <button data-view="output">Layer output</button>
+</div>
+
+<div id="info" class="panel">
+  <div class="kicker" id="infoKicker">Inspector</div>
+  <h2 id="infoTitle">Decoder layer 2</h2>
+  <div class="shape" id="infoShape">43-layer DeepSeek-V4-Flash stack</div>
+  <div class="io" id="infoIO"></div>
+  <div class="formula" id="infoFormula"></div>
+  <p class="desc" id="infoDesc">
+    Solid boxes carry activations along wires. Gridded plates are static
+    weights attached to operations. Spheres are operations. Hover a sphere for
+    its exact input/output shapes; every activation-carrying edge is labelled
+    with the tensor shape it carries.
+  </p>
+  <div class="hint">
+    Drag to orbit · scroll to zoom · right-drag to pan · click any block, plate,
+    or sphere to inspect it. The view buttons isolate a path; Overview is the
+    whole-layer map. Hover a sphere for its full I/O.
+  </div>
+</div>
+
+<div id="tokenbar" class="panel">
+  <span>token</span>
+  <input id="tokenSlider" type="range" min="0" max="127" value="12" />
+  <span class="pos" id="tokenPos">12</span>
+</div>
+
+<div id="tooltip"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// ------------------------------------------------------------------ config ---
+const CFG = {
+  hidden: 4096,
+  hc: 4,
+  heads: 64,
+  headDim: 512,
+  qLora: 1024,
+  oLora: 1024,
+  oGroups: 8,
+  window: 128,
+  indexHeads: 64,
+  indexHeadDim: 128,
+  indexTopk: 512,
+  experts: 256,
+  topk: 6,
+  moeInter: 2048,
+  ratio: 4,
+};
+
+const C = {
+  act:      0x67e8f9,
+  actDeep:  0x0891b2,
+  weight:   0x94a3b8,
+  mhc:      0xfbbf24,
+  attn:     0x67e8f9,
+  kv:       0x34d399,
+  comp:     0x2dd4bf,
+  idx:      0xc084fc,
+  ffn:      0xfb923c,
+  expert:   0xf59e0b,
+  route:    0xf472b6,
+  out:      0x60a5fa,
+};
+
+const V = (x, y, z = 0) => new THREE.Vector3(x, y, z);
+const hex = (n) => `#${new THREE.Color(n).getHexString()}`;
+
+// --------------------------------------------------------------- renderer ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.Fog(0x05070c, 190, 360);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 1200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.domElement.style.display = 'block';
+document.getElementById('scene').appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+labelRenderer.domElement.id = 'labels';
+document.body.appendChild(labelRenderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 8;
+controls.maxDistance = 340;
+controls.screenSpacePanning = true;
+
+scene.add(new THREE.HemisphereLight(0x9bd8ff, 0x020617, 1.25));
+const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+keyLight.position.set(-40, 60, 70);
+scene.add(keyLight);
+const rimLight = new THREE.DirectionalLight(0x60a5fa, 1.1);
+rimLight.position.set(70, -30, -60);
+scene.add(rimLight);
+const warmLight = new THREE.DirectionalLight(0xfbbf24, 0.65);
+warmLight.position.set(30, -20, 30);
+scene.add(warmLight);
+
+const world = new THREE.Group();
+scene.add(world);
+
+const floor = new THREE.GridHelper(260, 52, 0x1e293b, 0x0b1220);
+floor.position.set(66, -74, 0);
+floor.material.transparent = true;
+floor.material.opacity = 0.20;
+floor.material.depthWrite = false;
+world.add(floor);
+
+// ------------------------------------------------------------------ state ---
+const nodes = new Map();
+const pickables = [];
+const weightLabelObjects = [];
+const edges = [];
+const weightLinks = [];
+const lanes = [];
+const tmpWorld = new THREE.Vector3();
+
+let hoverKey = null;
+let selectedKey = null;
+
+// --------------------------------------------------------------- geometry ---
+const VOXEL = 0.0008;
+const MIN = 0.12;
+
+function formatShape(shape) {
+  if (!shape) return '';
+  if (shape.length === 1) return `[${shape[0]}]`;
+  return `[${shape.join('×')}]`;
+}
+
+function activationDims(shape, streams = 1) {
+  let w, h, d;
+  if (shape.length === 1) {
+    w = Math.max(shape[0] * VOXEL, MIN);
+    h = MIN;
+    d = MIN;
+  } else if (shape.length === 2) {
+    w = Math.max(shape[1] * VOXEL, MIN);
+    h = Math.max(shape[0] * VOXEL, MIN);
+    d = MIN;
+  } else {
+    w = Math.max(shape[shape.length - 1] * VOXEL, MIN);
+    h = Math.max(shape[shape.length - 2] * VOXEL, MIN);
+    d = MIN;
+  }
+  if (streams > 1) {
+    h = MIN;
+    d = Math.max(streams * MIN + (streams - 1) * 0.035, 0.44);
+  }
+  return [w, h, d];
+}
+
+function weightDims(shape) {
+  if (shape.length === 1) {
+    const n = shape[0];
+    return [Math.min(1.55, Math.max(0.48, 0.48 + Math.log10(n) * 0.26)), 0.38, 0.07];
+  }
+  let r = shape[0];
+  let c = shape[shape.length - 1];
+  if (shape.length === 3) {
+    r = shape[1];
+    c = shape[2];
+  }
+  const ratio = c / Math.max(1, r);
+  const k = 1.42;
+  if (ratio > 4) return [1.55 * k, 0.42 * k, 0.07];
+  if (ratio > 1.7) return [1.28 * k, 0.58 * k, 0.07];
+  if (ratio < 0.25) return [0.52 * k, 1.48 * k, 0.07];
+  if (ratio < 0.60) return [0.72 * k, 1.18 * k, 0.07];
+  return [1.02 * k, 0.92 * k, 0.07];
+}
+
+function makeLabel(html, className, parent, position, extra = {}) {
+  const el = document.createElement('div');
+  el.className = className;
+  el.innerHTML = html;
+  Object.assign(el.style, extra);
+  const obj = new CSS2DObject(el);
+  obj.position.copy(position);
+  if (parent) parent.add(obj);
+  else world.add(obj);
+  return { el, obj };
+}
+
+function registerPickable(mesh, key) {
+  mesh.userData.nodeKey = key;
+  pickables.push(mesh);
+}
+
+function setHover(key) {
+  if (hoverKey === key) return;
+  hoverKey = key;
+  refreshHighlights();
+}
+
+function selectKey(key) {
+  selectedKey = key;
+  refreshHighlights();
+  const node = nodes.get(key);
+  if (node) showInfo(node);
+}
+
+function refreshHighlights() {
+  for (const [key, node] of nodes) {
+    const hot = key === selectedKey ? 2 : key === hoverKey ? 1 : 0;
+    for (const m of node.materials) {
+      const base = m.userData.baseEmissiveIntensity ?? 0.15;
+      m.emissiveIntensity = base + (hot === 2 ? 0.36 : hot === 1 ? 0.20 : 0);
+    }
+    if (node.type === 'activation') {
+      node.labelObj.obj.visible = Boolean(node.data.major) || hot > 0;
+    } else if (node.type === 'operation') {
+      node.labelObj.element.classList.toggle('show-io', hot > 0);
+    }
+  }
+}
+
+// -------------------------------------------------------------- activations ---
+function addActivation(key, shape, pos, opts = {}) {
+  const {
+    label,
+    color = C.act,
+    detail = '',
+    streams = 1,
+    shapeLabel = null,
+    hub = false,
+    major = false,
+  } = opts;
+
+  const [w, h, d] = activationDims(shape, streams);
+  const group = new THREE.Group();
+  group.position.copy(pos);
+  world.add(group);
+
+  const mat = new THREE.MeshStandardMaterial({
+    color,
+    emissive: color,
+    emissiveIntensity: 0.24,
+    metalness: 0.22,
+    roughness: 0.34,
+    transparent: true,
+    opacity: 0.94,
+  });
+  mat.userData.baseEmissiveIntensity = 0.24;
+
+  if (streams > 1) {
+    const gap = 0.035;
+    const dh = (d - gap * (streams - 1)) / streams;
+    for (let i = 0; i < streams; i++) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, dh), mat);
+      m.position.z = -d / 2 + dh / 2 + i * (dh + gap);
+      group.add(m);
+      registerPickable(m, key);
+    }
+  } else {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    group.add(m);
+    registerPickable(m, key);
+  }
+
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d)),
+    new THREE.LineBasicMaterial({
+      color: 0xd9fbff,
+      transparent: true,
+      opacity: 0.20,
+      depthWrite: false,
+    })
+  );
+  group.add(outline);
+
+  const shapeText = shapeLabel || formatShape(shape);
+  const labelObj = makeLabel(
+    `<span style="color:${hex(color)}">▣</span> ${label}`,
+    'act-label',
+    group,
+    V(0, h / 2 + 0.32, 0)
+  );
+  labelObj.obj.visible = major;
+
+  const node = {
+    key,
+    type: 'activation',
+    pos: pos.clone(),
+    group,
+    materials: [mat],
+    labelObj,
+    data: {
+      type: 'activation',
+      title: label,
+      shapeText,
+      detail:
+        detail ||
+        'An activation: data produced by one operation and consumed by another. Its box is sized from the tensor shape.',
+      hub,
+      major,
+    },
+  };
+  nodes.set(key, node);
+  return node;
+}
+
+// ---------------------------------------------------------------- weights ---
+function addWeight(key, shape, pos, opts = {}) {
+  const {
+    label,
+    op,
+    color = C.weight,
+    detail = '',
+    shapeLabel = null,
+    tag = '',
+  } = opts;
+
+  const [w, h, d] = weightDims(shape);
+  const plate = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.065,
+      metalness: 0.72,
+      roughness: 0.30,
+      transparent: true,
+      opacity: 0.90,
+    })
+  );
+  plate.position.copy(pos);
+  plate.material.userData.baseEmissiveIntensity = 0.035;
+  world.add(plate);
+  registerPickable(plate, key);
+
+  const gridPts = [];
+  const gx = 6;
+  const gy = 4;
+  const zz = d / 2 + 0.003;
+  const hw = w / 2;
+  const hh = h / 2;
+  for (let i = 1; i < gx; i++) {
+    const x = -hw + (i * w) / gx;
+    gridPts.push(V(x, -hh, zz), V(x, hh, zz));
+  }
+  for (let j = 1; j < gy; j++) {
+    const y = -hh + (j * h) / gy;
+    gridPts.push(V(-hw, y, zz), V(hw, y, zz));
+  }
+  const grid = new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(gridPts),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+    })
+  );
+  plate.add(grid);
+
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d)),
+    new THREE.LineBasicMaterial({
+      color: 0xe2e8f0,
+      transparent: true,
+      opacity: 0.30,
+      depthWrite: false,
+    })
+  );
+  plate.add(outline);
+
+  const shapeText = shapeLabel || formatShape(shape);
+  const labelObj = makeLabel(
+    `<span style="color:#cbd5e1">▦</span> ${tag ? tag + ' ' : ''}${label}`,
+    'weight-label',
+    plate,
+    V(0, -h / 2 - 0.22, 0)
+  );
+  weightLabelObjects.push({ obj: labelObj.obj, key });
+
+  const node = {
+    key,
+    type: 'weight',
+    pos: pos.clone(),
+    group: plate,
+    materials: [plate.material],
+    labelObj,
+    data: {
+      type: 'weight',
+      title: `${tag ? tag + ' ' : ''}${label}`,
+      shapeText,
+      op: op || null,
+      detail:
+        detail ||
+        'A static parameter matrix. It is not activation data: the main path never carries it between operations.',
+    },
+  };
+  nodes.set(key, node);
+
+  if (op && nodes.has(op)) {
+    const target = nodes.get(op);
+    const curve = new THREE.LineCurve3(pos.clone(), target.pos.clone());
+    const pts = curve.getPoints(18);
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineDashedMaterial({
+        color: 0x94a3b8,
+        transparent: true,
+        opacity: 0.36,
+        dashSize: 0.16,
+        gapSize: 0.10,
+        depthWrite: false,
+      })
+    );
+    line.computeLineDistances();
+    world.add(line);
+    weightLinks.push({ line, weightKey: key, op });
+  }
+
+  return node;
+}
+
+// -------------------------------------------------------------- operations ---
+function addOperation(key, pos, opts = {}) {
+  const {
+    title,
+    io,
+    color = C.attn,
+    radius = 0.58,
+    detail = '',
+    formula = '',
+  } = opts;
+
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 30, 18),
+    new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.28,
+      metalness: 0.45,
+      roughness: 0.26,
+      transparent: true,
+      opacity: 0.96,
+    })
+  );
+  sphere.position.copy(pos);
+  sphere.material.userData.baseEmissiveIntensity = 0.28;
+  world.add(sphere);
+  registerPickable(sphere, key);
+
+  const glow = new THREE.Mesh(
+    new THREE.SphereGeometry(radius * 1.13, 24, 14),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.055,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  sphere.add(glow);
+
+  const labelEl = document.createElement('div');
+  labelEl.className = 'op-label';
+  labelEl.style.borderLeftColor = hex(color);
+  labelEl.innerHTML =
+    `<span class="op-title">● ${title}</span>` +
+    `<span class="op-io">${io}</span>`;
+  const labelObj = new CSS2DObject(labelEl);
+  labelObj.position.set(0, radius + 0.40, 0);
+  sphere.add(labelObj);
+
+  const node = {
+    key,
+    type: 'operation',
+    pos: pos.clone(),
+    group: sphere,
+    materials: [sphere.material],
+    labelObj,
+    data: {
+      type: 'operation',
+      title,
+      shapeText: io,
+      io,
+      formula,
+      detail:
+        detail ||
+        'An operation. It consumes the incoming activation shapes and produces the outgoing shape shown in its label.',
+    },
+  };
+  nodes.set(key, node);
+  return node;
+}
+
+// ------------------------------------------------------------------- edges ---
+function addEdge(from, to, shape, opts = {}) {
+  const a = nodes.get(from);
+  const b = nodes.get(to);
+  if (!a || !b) {
+    console.warn('edge missing endpoint', from, to);
+    return;
+  }
+
+  const via = opts.via ? nodes.get(opts.via) : null;
+  const p0 = a.pos.clone();
+  const p1 = b.pos.clone();
+  let mid = via ? via.pos.clone() : p0.clone().lerp(p1, 0.5);
+  if (opts.bendY) mid.y += opts.bendY;
+  if (opts.bendZ) mid.z += opts.bendZ;
+
+  let curve;
+  if (via || opts.bendY || opts.bendZ) {
+    curve = new THREE.CatmullRomCurve3([p0, mid, p1]);
+  } else {
+    curve = new THREE.LineCurve3(p0, p1);
+  }
+
+  const isWeight = opts.weight === true;
+  const color = opts.color ?? (isWeight ? 0x94a3b8 : C.act);
+  const opacity = opts.opacity ?? (isWeight ? 0.34 : 0.46);
+
+  if (isWeight) {
+    const pts = curve.getPoints(24);
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineDashedMaterial({
+        color,
+        transparent: true,
+        opacity,
+        dashSize: 0.14,
+        gapSize: 0.10,
+        depthWrite: false,
+      })
+    );
+    line.computeLineDistances();
+    world.add(line);
+    return;
+  }
+
+  const tube = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 36, opts.width ?? 0.022, 5, false),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  world.add(tube);
+
+  const shapeText = opts.shapeLabel || formatShape(shape);
+  const t = opts.labelT ?? (via ? 0.34 : 0.50);
+  const lp = curve.getPoint(t);
+  lp.y += opts.labelY ?? -0.24;
+  if (opts.labelZ) lp.z += opts.labelZ;
+
+  const labelObj = makeLabel(shapeText, 'edge-label', null, lp);
+  labelObj.el.title = `${from} → ${to}: ${shapeText}`;
+  if (opts.labelOpacity) labelObj.el.style.opacity = opts.labelOpacity;
+  edges.push({ tube, labelObj, from, to, via: opts.via || null });
+  return curve;
+}
+
+// --------------------------------------------------------- custom states -----
+function addRingState() {
+  const group = new THREE.Group();
+  group.position.copy(P.ring);
+  world.add(group);
+
+  const slots = [];
+  const radius = 1.12;
+  for (let i = 0; i < CFG.window; i++) {
+    const a = (i / CFG.window) * Math.PI * 2;
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(0.07, 0.18, 0.07),
+      new THREE.MeshStandardMaterial({
+        color: 0x115e59,
+        emissive: 0x0f766e,
+        emissiveIntensity: 0.18,
+        roughness: 0.5,
+        metalness: 0.2,
+      })
+    );
+    m.position.set(Math.cos(a) * radius, Math.sin(a) * radius, 0);
+    m.rotation.z = a;
+    group.add(m);
+    registerPickable(m, 'ring');
+    slots.push(m);
+  }
+
+  makeLabel(
+    `<span style="color:#6ee7b7">▣</span> KV ring <b>[128×512]</b>`,
+    'state-label',
+    group,
+    V(0, radius + 0.42, 0)
+  );
+  const status = makeLabel('slot 0 / 128', 'state-status', group, V(0, -radius - 0.40, 0));
+
+  const node = {
+    key: 'ring',
+    type: 'state',
+    pos: P.ring.clone(),
+    group,
+    materials: slots.map((m) => m.material),
+    labelObj: status,
+    slots,
+    data: {
+      type: 'activation',
+      title: 'KV sliding-window ring',
+      shapeText: '[128×512]',
+      detail:
+        'The last 128 KV rows, one head of 512 floats each. Decode overwrites one slot per token at pos % 128. This is activation state, not a weight.',
+    },
+  };
+  nodes.set('ring', node);
+  return node;
+}
+
+function addCompCacheState() {
+  const group = new THREE.Group();
+  group.position.copy(P.compCache);
+  world.add(group);
+
+  const rows = [];
+  for (let i = 0; i < 16; i++) {
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(0.34, 0.085, 0.09),
+      new THREE.MeshStandardMaterial({
+        color: 0x134e4a,
+        emissive: 0x0f766e,
+        emissiveIntensity: 0.12,
+        roughness: 0.5,
+        metalness: 0.2,
+      })
+    );
+    m.position.set((col - 1.5) * 0.40, (1.5 - row) * 0.18, 0);
+    group.add(m);
+    registerPickable(m, 'compCache');
+    rows.push(m);
+  }
+
+  makeLabel(
+    `<span style="color:#6ee7b7">▣</span> compressed cache <b>[n×512]</b>`,
+    'state-label',
+    group,
+    V(0, 0.92, 0)
+  );
+  const status = makeLabel('rows 3 · indexer picks ≤512', 'state-status', group, V(0, -0.92, 0));
+
+  const node = {
+    key: 'compCache',
+    type: 'state',
+    pos: P.compCache.clone(),
+    group,
+    materials: rows.map((m) => m.material),
+    labelObj: status,
+    rows,
+    data: {
+      type: 'activation',
+      title: 'HCA compressed-row cache',
+      shapeText: '[n×512]',
+      detail:
+        'Append-only compressed KV rows. A ratio-4 layer writes one row every four tokens, stamped with the first position of its window. The CSA indexer selects at most 512 of these for attention.',
+    },
+  };
+  nodes.set('compCache', node);
+  return node;
+}
+
+// ------------------------------------------------------------- layout map ---
+const P = {
+  hIn: V(0, 0, 0),
+  mhcPreA: V(7, 0, 0),
+  x1A: V(13, 0, 0),
+  rmsA: V(19, 0, 0),
+  xa: V(25, 0, 0),
+
+  wqA: V(31, 18, 0),
+  qr: V(37, 18, 0),
+  qNorm: V(43, 18, 0),
+  qrN: V(49, 18, 0),
+  wqB: V(55, 18, 0),
+  q: V(61, 18, 0),
+  qRope: V(67, 18, 0),
+  qR: V(73, 18, 0),
+
+  wkv: V(31, 9, 0),
+  kv: V(37, 9, 0),
+  kvNorm: V(43, 9, 0),
+  kvR: V(49, 9, 0),
+  kvWrite: V(55, 9, 0),
+  ring: V(61, 9, 0),
+
+  compProj: V(31, -8.5, 0),
+  compKV: V(38, -8.5, 0),
+  compress: V(45, -8.5, 0),
+  compRow: V(54, -8.5, 0),
+  compCache: V(63, -8.5, 0),
+
+  idxQProj: V(55, -18, 0),
+  idxQ: V(61, -18, 0),
+  idxWProj: V(43, -25, 0),
+  idxW: V(50, -25, 0),
+  idxScore: V(67, -21.5, 0),
+  idxSel: V(74, -21.5, 0),
+
+  sparseAttn: V(82, 12, 0),
+  o: V(88, 12, 0),
+  derope: V(94, 12, 0),
+  oD: V(100, 12, 0),
+  woA: V(106, 12, 0),
+  ogrp: V(112, 12, 0),
+  woB: V(118, 12, 0),
+  attnOut: V(124, 12, 0),
+
+  postA: V(10, 4.6, 0),
+  combA: V(13, 6.8, 0),
+  mhcPostA: V(128, 0, 0),
+  hMid: V(134, 0, 0),
+
+  mhcPreF: V(134, -42, 0),
+  x1F: V(128, -42, 0),
+  postF: V(130, -39.4, 0),
+  combF: V(127, -37.2, 0),
+  rmsF: V(122, -42, 0),
+  xf: V(116, -42, 0),
+
+  gate: V(108, -30, 0),
+  scores: V(102, -30, 0),
+  route: V(96, -30, 0),
+  ids: V(102, -44, 0),
+  routeW: V(93, -38, 0),
+
+  shared: V(108, -50, 0),
+  shOut: V(100, -48, 0),
+  routed: V(108, -58, 0),
+  rOut: V(100, -56, 0),
+
+  combine: V(88, -48, 0),
+  ffnOut: V(78, -46, 0),
+  mhcPostF: V(66, -46, 0),
+  hOut: V(56, -46, 0),
+};
+
+// ---------------------------------------------------- activations / states ---
+addActivation('hIn', [4, 4096], P.hIn, {
+  label: 'h',
+  streams: 4,
+  hub: true,
+  major: true,
+  detail:
+    'Four residual streams, each 4096 wide. Every mHC block mixes these four streams into one 4096-wide block, then writes back into all four.',
+});
+addActivation('x1A', [4096], P.x1A, {
+  label: 'x₁',
+  detail: 'The attention input after mHC reduces four residual streams to one 4096 float vector.',
+});
+addActivation('xa', [4096], P.xa, {
+  label: 'xa',
+  hub: true,
+  major: true,
+  detail:
+    'RMSNorm(attn_norm) output. The common 4096-wide input to the Q, KV, HCA-compressor, and indexer branches.',
+});
+addActivation('qr', [1024], P.qr, {
+  label: 'q_latent',
+  detail: 'Low-rank Q activation: Wq_a projects 4096 down to the 1024-wide Q latent.',
+});
+addActivation('qrN', [1024], P.qrN, {
+  label: 'q_latent_norm',
+  hub: true,
+  detail:
+    'q_norm is a learned RMSNorm over the 1024-wide Q latent. This same activation also feeds the CSA indexer Q projection.',
+});
+addActivation('q', [64, 512], P.q, {
+  label: 'q',
+  detail: '64 query heads × 512 channels. Wq_b up-projects the 1024-wide latent into this head layout.',
+});
+addActivation('qR', [64, 512], P.qR, {
+  label: 'q_rope',
+  detail: 'Queries after per-head RMSNorm and RoPE on the last 64 channels. The first 448 channels stay NoPE.',
+});
+addActivation('kv', [512], P.kv, {
+  label: 'kv',
+  detail: 'The single KV head: a 512-float row. Wkv projects the 4096-wide attention input to this row.',
+});
+addActivation('kvR', [512], P.kvR, {
+  label: 'kv_rope',
+  hub: true,
+  detail:
+    'KV after RMSNorm and RoPE. It is written to the sliding ring and also consumed by the HCA compressor.',
+});
+addActivation('compKV', [2, 1024], P.compKV, {
+  label: 'comp_proj',
+  streams: 2,
+  detail:
+    'The HCA compressor projects the attention input twice, to a key/value input and a gate input, each 1024 wide. For ratio 4, the projection is overlapped.',
+});
+addActivation('compRow', [512], P.compRow, {
+  label: 'compressed_row',
+  detail:
+    'A 512-float compressed KV row, produced once every four tokens. It is written with the first position of the four-token window.',
+});
+addActivation('idxQ', [64, 128], P.idxQ, {
+  label: 'idx_q',
+  detail: '64 indexer heads × 128 channels. Widx_q projects the 1024-wide Q latent into the indexer head layout.',
+});
+addActivation('idxW', [64], P.idxW, {
+  label: 'idx_w',
+  detail: 'One learned score weight per indexer head. Widx_w projects the 4096-wide attention input to these 64 weights.',
+});
+addActivation('idxSel', [512], P.idxSel, {
+  label: 'idx_sel',
+  shapeLabel: '[≤512]',
+  detail:
+    'The compressed-row positions selected by the indexer. Attention offsets these past the sliding-window rows before reading the cache.',
+});
+addActivation('o', [64, 512], P.o, {
+  label: 'o',
+  detail: 'Sparse-attention output: 64 heads × 512 channels. It has not been de-rotated yet.',
+});
+addActivation('oD', [64, 512], P.oD, {
+  label: 'o_derope',
+  detail: 'Attention output after inverse RoPE. Values are still in the 64×512 head layout.',
+});
+addActivation('ogrp', [8, 1024], P.ogrp, {
+  label: 'o_groups',
+  detail:
+    'Grouped low-rank output projection. Eight groups, each projected from 512 channels to 1024; the total activation is 8×1024.',
+});
+addActivation('attnOut', [4096], P.attnOut, {
+  label: 'attn_out',
+  detail: 'The attention-half output after Wo_b lifts the eight 1024-wide groups back to 4096.',
+});
+addActivation('hMid', [4, 4096], P.hMid, {
+  label: 'h_mid',
+  streams: 4,
+  hub: true,
+  major: true,
+  detail:
+    'The four residual streams after the attention half. mHC post mixes attn_out with the four saved residual streams and the post/comb Sinkhorn parameters.',
+});
+addActivation('x1F', [4096], P.x1F, {
+  label: 'x₁_ffn',
+  detail: 'The FFN input after mHC reduces the four residual streams to one 4096 float vector.',
+});
+addActivation('xf', [4096], P.xf, {
+  label: 'xf',
+  hub: true,
+  major: true,
+  detail:
+    'RMSNorm(ffn_norm) output. It feeds the router, the shared expert, and the six selected routed experts in parallel.',
+});
+addActivation('scores', [256], P.scores, {
+  label: 'scores',
+  detail:
+    'One score per routed expert. Layer 2 is a hash layer, so the selected expert indices come from tid2eid, but these scores still determine the combining weights.',
+});
+addActivation('ids', [6], P.ids, {
+  label: 'expert_ids',
+  detail: 'Six expert ids. On layer 2 they are a static token-id lookup from tid2eid, not argmax over scores.',
+});
+addActivation('routeW', [6], P.routeW, {
+  label: 'expert_weights',
+  detail: 'Six combining weights, normalized after selection. They multiply the six expert outputs before the sum.',
+});
+addActivation('shOut', [4096], P.shOut, {
+  label: 'shared_out',
+  detail: 'The shared expert output, added unweighted after the six routed experts.',
+});
+addActivation('rOut', [6, 4096], P.rOut, {
+  label: 'routed_out',
+  detail: 'Six routed-expert outputs, one 4096-wide row per selected expert.',
+});
+addActivation('ffnOut', [4096], P.ffnOut, {
+  label: 'ffn_out',
+  detail: 'The combined FFN output: six weighted routed experts plus the shared expert.',
+});
+addActivation('hOut', [4, 4096], P.hOut, {
+  label: 'h_out',
+  streams: 4,
+  hub: true,
+  major: true,
+  detail:
+    'The four residual streams leaving this decoder layer. They become the input of layer 3.',
+});
+addActivation('postA', [4], P.postA, {
+  label: 'post_attn',
+  shapeLabel: '[4]',
+  detail: 'One mHC post-gate value per residual stream for the attention half.',
+});
+addActivation('combA', [4, 4], P.combA, {
+  label: 'comb_attn',
+  detail: 'The 4×4 doubly-stochastic mHC mixing matrix for the attention half.',
+});
+addActivation('postF', [4], P.postF, {
+  label: 'post_ffn',
+  detail: 'One mHC post-gate value per residual stream for the FFN half.',
+});
+addActivation('combF', [4, 4], P.combF, {
+  label: 'comb_ffn',
+  detail: 'The 4×4 doubly-stochastic mHC mixing matrix for the FFN half.',
+});
+
+addRingState();
+addCompCacheState();
+
+// -------------------------------------------------------------- operations ---
+addOperation('mhcPreA', P.mhcPreA, {
+  title: 'mHC pre A',
+  io: 'h[4×4096] + W[24×16384] → x₁[4096] + post[4] + comb[4×4]',
+  color: C.mhc,
+  radius: 0.62,
+  formula: 'mixes = hc_fn · flat(h) · rsqrt(mean(h²)+eps)',
+  detail:
+    'Sinkhorn-normalized hyper-connections. Four residual streams are mixed into one 4096-wide vector and a small post/comb matrix is saved for the matching mHC post block.',
+});
+addOperation('rmsA', P.rmsA, {
+  title: 'RMSNorm A',
+  io: 'x₁[4096] + attn_norm[4096] → x̂[4096]',
+  color: C.attn,
+  formula: 'x̂ = x / sqrt(mean(x²)+eps) · attn_norm',
+  detail:
+    'The learned RMSNorm weight is a 4096-float vector. The output is the common input to the Q, KV, compressor, and indexer branches.',
+});
+addOperation('wqA', P.wqA, {
+  title: 'Wq_a · matmul',
+  io: 'x̂[4096] × Wq_a[1024×4096] → q_latent[1024]',
+  color: C.attn,
+  formula: 'q_latent = x̂ · Wq_aᵀ',
+  detail: 'Low-rank Q down-projection: 4096 → 1024. The result is normalized by q_norm before the up-projection.',
+});
+addOperation('qNorm', P.qNorm, {
+  title: 'q_norm · RMSNorm',
+  io: 'q_latent[1024] + q_norm[1024] → q_latent_norm[1024]',
+  color: C.attn,
+  formula: 'q_normed = q_latent / rms(q_latent) · q_norm_weight',
+  detail: 'A learned RMSNorm on the 1024-wide Q latent. The normalized latent feeds Wq_b and the CSA indexer.',
+});
+addOperation('wqB', P.wqB, {
+  title: 'Wq_b · matmul',
+  io: 'q_latent_norm[1024] × Wq_b[32768×1024] → q[64×512]',
+  color: C.attn,
+  formula: 'q = q_latent_norm · Wq_bᵀ',
+  detail: 'Q up-projection: 1024 → 32768 floats, laid out as 64 heads × 512 channels.',
+});
+addOperation('qRope', P.qRope, {
+  title: 'q norm + RoPE',
+  io: 'q[64×512] → q_rope[64×512]',
+  color: C.attn,
+  formula: 'per-head RMSNorm · rotate last 64 channels',
+  detail:
+    'Each head is normalized independently. RoPE is applied only to the last qk_rope=64 channels; the first 448 channels are NoPE.',
+});
+addOperation('wkv', P.wkv, {
+  title: 'Wkv · matmul',
+  io: 'x̂[4096] × Wkv[512×4096] → kv[512]',
+  color: C.kv,
+  formula: 'kv = x̂ · Wkvᵀ',
+  detail: 'One KV head only. The 4096-wide attention input becomes a single 512-float KV row.',
+});
+addOperation('kvNorm', P.kvNorm, {
+  title: 'KV norm + RoPE',
+  io: 'kv[512] + kv_norm[512] → kv_rope[512]',
+  color: C.kv,
+  formula: 'RMSNorm · rotate last 64 channels',
+  detail: 'The single KV head is RMS-normalized and RoPE-rotated. The result goes to the sliding ring and the HCA compressor.',
+});
+addOperation('kvWrite', P.kvWrite, {
+  title: 'KV ring write',
+  io: 'kv_rope[512] → ring_slot[512]',
+  color: C.kv,
+  detail: 'Overwrite one slot of the 128-row sliding-window ring at pos % 128. This is an operation on state, not a new tensor.',
+});
+addOperation('compProj', P.compProj, {
+  title: 'HCA proj',
+  io: 'x̂[4096] × Wc_kv[1024×4096] + Wc_gate[1024×4096] → 2×1024',
+  color: C.comp,
+  formula: 'comp_kv = x̂·Wc_kvᵀ, comp_gate = x̂·Wc_gateᵀ',
+  detail:
+    'Two parallel projections feed the HCA compressor: one key/value input and one gate input. Ratio 4 widens each to 1024 floats because the compressor is overlapped.',
+});
+addOperation('compress', P.compress, {
+  title: 'HCA compress',
+  io: 'kv_rope[512] + comp[2×1024] + APE[4×1024] → compressed_row[512] every 4 tokens',
+  color: C.comp,
+  formula: 'pool 4 tokens with gate · RMSNorm · RoPE · append',
+  detail:
+    'Pool four consecutive KV rows into one 512-float row. The compressor keeps an 8-slot working state (4 previous + 4 current phases). When the window closes, the row is normalized, RoPE-stamped, and appended to the compressed cache.',
+});
+addOperation('idxQProj', P.idxQProj, {
+  title: 'CSA Q proj',
+  io: 'q_latent_norm[1024] × Widx_q[8192×1024] → idx_q[64×128]',
+  color: C.idx,
+  formula: 'idx_q = q_latent_norm · Widx_qᵀ, then RoPE',
+  detail:
+    'The indexer has its own 64-head, 128-channel Q projection from the Q latent. RoPE is applied per indexer head.',
+});
+addOperation('idxWProj', P.idxWProj, {
+  title: 'CSA head w',
+  io: 'x̂[4096] × Widx_w[64×4096] → idx_w[64]',
+  color: C.idx,
+  formula: 'idx_w = x̂ · Widx_wᵀ',
+  detail: 'One score weight per indexer head. These weights scale each head contribution in the indexer score.',
+});
+addOperation('idxScore', P.idxScore, {
+  title: 'CSA score/top-k',
+  io: 'idx_q[64×128] + idx_w[64] + cache[n×512] → scores[n] → selected[≤512]',
+  color: C.idx,
+  formula: 'score(row) = Σ_h idx_w[h] · <idx_q[h], cache[row]>',
+  detail:
+    'Score every compressed row, then keep at most index_topk=512. The selected positions are offset past the sliding-window rows before attention reads the cache.',
+});
+addOperation('sparseAttn', P.sparseAttn, {
+  title: 'sparse attention',
+  io: 'q_rope[64×512] × (window[128×512] + selected[≤512×512]) + sink[64] → o[64×512]',
+  color: C.attn,
+  formula: 'softmax(q·kᵀ/√512 + sink) · v',
+  detail:
+    'Each head attends to the 128 sliding-window rows plus the compressed rows chosen by the indexer. The learned sink logit contributes only to the denominator, never a value vector.',
+});
+addOperation('derope', P.derope, {
+  title: 'de-RoPE',
+  io: 'o[64×512] → o_derope[64×512]',
+  color: C.attn,
+  formula: 'inverse rotate last 64 channels per head',
+  detail: 'Undo the query-side RoPE rotation on the attention output before the output projection.',
+});
+addOperation('woA', P.woA, {
+  title: 'Wo_a · matmul',
+  io: 'o_derope[64×512] × Wo_a[8×1024×512] → o_groups[8×1024]',
+  color: C.attn,
+  formula: 'for g: o_groups[g] = o_derope[g] · Wo_a[g]ᵀ',
+  detail:
+    'Grouped low-rank output projection. The 4096 attention channels are split into 8 groups of 512; each group projects to 1024.',
+});
+addOperation('woB', P.woB, {
+  title: 'Wo_b · matmul',
+  io: 'o_groups[8×1024] × Wo_b[4096×8192] → attn_out[4096]',
+  color: C.attn,
+  formula: 'attn_out = o_groups · Wo_bᵀ',
+  detail: 'Lift the eight 1024-wide groups back to one 4096-wide attention output.',
+});
+addOperation('mhcPostA', P.mhcPostA, {
+  title: 'mHC post A',
+  io: 'attn_out[4096] + h[4×4096] + post[4] + comb[4×4] → h[4×4096]',
+  color: C.mhc,
+  radius: 0.62,
+  formula: 'h′ = post ⊙ attn_out + combᵀ · h_residual',
+  detail:
+    'Write the attention result back into the four residual streams using the Sinkhorn post-gates and mixing matrix saved by mHC pre.',
+});
+addOperation('mhcPreF', P.mhcPreF, {
+  title: 'mHC pre F',
+  io: 'h[4×4096] + W[24×16384] → x₁[4096] + post[4] + comb[4×4]',
+  color: C.mhc,
+  radius: 0.62,
+  formula: 'same Sinkhorn mixing as the attention half',
+  detail:
+    'The FFN half re-mixes the four residual streams into one 4096-wide vector and saves a fresh post/comb pair.',
+});
+addOperation('rmsF', P.rmsF, {
+  title: 'RMSNorm F',
+  io: 'x₁[4096] + ffn_norm[4096] → x̂[4096]',
+  color: C.ffn,
+  formula: 'x̂ = x / sqrt(mean(x²)+eps) · ffn_norm',
+  detail: 'The common FFN input for the router, the shared expert, and the six routed experts.',
+});
+addOperation('gate', P.gate, {
+  title: 'router gate',
+  io: 'x̂[4096] × Wgate[256×4096] → scores[256]',
+  color: C.route,
+  formula: 'scores = x̂ · Wgateᵀ',
+  detail:
+    'One score per routed expert. Layer 2 is a hash layer, so these scores do not select the expert ids: tid2eid does. The scores still produce the six combining weights.',
+});
+addOperation('route', P.route, {
+  title: 'hash route',
+  io: 'scores[256] + tid2eid[129280×6] → ids[6] + weights[6]',
+  color: C.route,
+  formula: 'ids = tid2eid[token_id]; weights = normalize(scores[ids])',
+  detail:
+    'Layer 2 uses the static token-id lookup (num_hash_layers=3). The six indices bypass top-k; the six weights are still score-derived and normalized.',
+});
+addOperation('shared', P.shared, {
+  title: 'shared expert',
+  io: 'x̂[4096] + W1/W3[2048×4096] + W2[4096×2048] → shared_out[4096]',
+  color: C.expert,
+  formula: 'out = (silu(x·W1ᵀ) ⊙ (x·W3ᵀ)) · W2ᵀ',
+  detail:
+    'The always-on shared expert. It does not depend on routing, so it can run while routed experts are being fetched.',
+});
+addOperation('routed', P.routed, {
+  title: 'routed experts ×6',
+  io: 'x̂[4096] + six W1/W3/W2 sets → routed_out[6×4096]',
+  color: C.expert,
+  formula: 'for k in 6: out[k] = swiglu(x̂, W1_k, W3_k, W2_k)',
+  detail:
+    'Six of 256 routed experts, selected by the hash lookup. Each expert is a SwiGLU FFN with 2048 intermediate channels. The weights are FP4 and streamed through the expert cache.',
+});
+addOperation('combine', P.combine, {
+  title: 'combine experts',
+  io: 'routed_out[6×4096] × weights[6] + shared_out[4096] → ffn_out[4096]',
+  color: C.ffn,
+  formula: 'ffn_out = Σ_k w[k] · routed_out[k] + shared_out',
+  detail:
+    'Weighted sum of the six routed experts in k order, then the shared expert is added unweighted. This is the FFN half output before mHC post.',
+});
+addOperation('mhcPostF', P.mhcPostF, {
+  title: 'mHC post F',
+  io: 'ffn_out[4096] + h[4×4096] + post[4] + comb[4×4] → h_out[4×4096]',
+  color: C.mhc,
+  radius: 0.62,
+  formula: 'h′ = post ⊙ ffn_out + combᵀ · h_residual',
+  detail:
+    'Write the FFN result back into the four residual streams. h_out is the input of the next decoder layer.',
+});
+
+// Compact labels for the 3D spheres; the full I/O and formula live in the
+// inspector. This keeps every operation readable without hiding the shapes.
+const OP_SHORT = {
+  mhcPreA: '[4×4096] → [4096]+[4]+[4×4]',
+  rmsA: '[4096] → [4096]',
+  wqA: '[4096] → [1024]',
+  qNorm: '[1024] → [1024]',
+  wqB: '[1024] → [64×512]',
+  qRope: '[64×512] → [64×512]',
+  wkv: '[4096] → [512]',
+  kvNorm: '[512] → [512]',
+  kvWrite: '[512] → ring[512]',
+  compProj: '[4096] → 2×[1024]',
+  compress: '[512]+2×[1024] → [512]',
+  idxQProj: '[1024] → [64×128]',
+  idxWProj: '[4096] → [64]',
+  idxScore: '[64×128]+[64]+[n×512] → [≤512]',
+  sparseAttn: '[64×512] × [640×512] → [64×512]',
+  derope: '[64×512] → [64×512]',
+  woA: '[64×512] → [8×1024]',
+  woB: '[8×1024] → [4096]',
+  mhcPostA: '[4096]+[4×4096] → [4×4096]',
+  mhcPreF: '[4×4096] → [4096]+[4]+[4×4]',
+  rmsF: '[4096] → [4096]',
+  gate: '[4096] → [256]',
+  route: '[256] → [6]+[6]',
+  shared: '[4096] → [4096]',
+  routed: '[4096] → [6×4096]',
+  combine: '[6×4096]+[4096] → [4096]',
+  mhcPostF: '[4096]+[4×4096] → [4×4096]',
+};
+for (const [key, text] of Object.entries(OP_SHORT)) {
+  const node = nodes.get(key);
+  const el = node?.labelObj?.element?.querySelector('.op-io');
+  if (el) el.textContent = text;
+}
+
+// ---------------------------------------------------------------- weights ---
+const W = (x, y, z = -3.0) => V(x, y - 2.4, z);
+
+addWeight('w_hc_attn', [24, 16384], W(7, 0), {
+  label: 'hc_attn_fn', op: 'mhcPreA', color: C.mhc,
+  detail: 'mHC attention mixing weights: 24 rows × 16384 columns. Produces the pre/post/comb parameters for the attention half.',
+});
+addWeight('w_attn_norm', [4096], W(19, 0), {
+  label: 'attn_norm', op: 'rmsA', color: C.attn,
+  detail: 'Learned RMSNorm weight for the attention half.',
+});
+addWeight('w_q_a', [1024, 4096], W(31, 18), {
+  label: 'Wq_a', op: 'wqA', color: C.attn,
+  detail: 'Low-rank Q down-projection: 4096 → 1024.',
+});
+addWeight('w_q_norm', [1024], W(43, 18), {
+  label: 'q_norm', op: 'qNorm', color: C.attn,
+  detail: 'Learned RMSNorm weight on the 1024-wide Q latent.',
+});
+addWeight('w_q_b', [32768, 1024], W(55, 18), {
+  label: 'Wq_b', op: 'wqB', color: C.attn,
+  detail: 'Q up-projection: 1024 → 32768 (64 heads × 512 channels).',
+});
+addWeight('w_kv', [512, 4096], W(31, 9), {
+  label: 'Wkv', op: 'wkv', color: C.kv,
+  detail: 'One KV head: 4096 → 512.',
+});
+addWeight('w_kv_norm', [512], W(43, 9), {
+  label: 'kv_norm', op: 'kvNorm', color: C.kv,
+  detail: 'Learned RMSNorm weight for the single KV head.',
+});
+addWeight('w_comp_kv', [1024, 4096], W(31, -8.5), {
+  label: 'Wc_kv', op: 'compProj', color: C.comp,
+  detail: 'HCA key/value projection, widened to 1024 channels because ratio 4 is overlapped.',
+});
+addWeight('w_comp_gate', [1024, 4096], W(35, -12), {
+  label: 'Wc_gate', op: 'compProj', color: C.comp,
+  detail: 'HCA gate projection, widened to 1024 channels for the overlapped ratio-4 compressor.',
+});
+addWeight('w_ape', [4, 1024], W(45, -13), {
+  label: 'APE', op: 'compress', color: C.comp,
+  detail: 'Absolute positional embedding added by the HCA compressor, one 1024-wide row per ratio phase.',
+});
+addWeight('w_comp_norm', [512], W(45, -8.5), {
+  label: 'comp_norm', op: 'compress', color: C.comp,
+  detail: 'Learned RMSNorm weight used when a compressed row is committed.',
+});
+addWeight('w_idx_q', [8192, 1024], W(55, -18), {
+  label: 'Widx_q', op: 'idxQProj', color: C.idx,
+  detail: 'CSA indexer Q projection: 1024 → 8192 (64 indexer heads × 128 channels).',
+});
+addWeight('w_idx_w', [64, 4096], W(43, -28), {
+  label: 'Widx_w', op: 'idxWProj', color: C.idx,
+  detail: 'CSA indexer head weights: 4096 → 64, one score weight per indexer head.',
+});
+addWeight('w_sink', [64], W(82, 12), {
+  label: 'sink', op: 'sparseAttn', color: C.attn,
+  detail: 'One learned attention-sink logit per head. It contributes to the softmax denominator only.',
+});
+addWeight('w_wo_a', [8, 1024, 512], W(106, 12), {
+  label: 'Wo_a', op: 'woA', color: C.attn,
+  detail: 'Grouped output down-projection: eight [1024×512] slices.',
+});
+addWeight('w_wo_b', [4096, 8192], W(118, 12), {
+  label: 'Wo_b', op: 'woB', color: C.attn,
+  detail: 'Output up-projection: 8192 → 4096.',
+});
+addWeight('w_hc_ffn', [24, 16384], W(134, -42), {
+  label: 'hc_ffn_fn', op: 'mhcPreF', color: C.mhc,
+  detail: 'mHC FFN mixing weights: 24 rows × 16384 columns.',
+});
+addWeight('w_ffn_norm', [4096], W(122, -42), {
+  label: 'ffn_norm', op: 'rmsF', color: C.ffn,
+  detail: 'Learned RMSNorm weight for the FFN half.',
+});
+addWeight('w_gate', [256, 4096], W(108, -33), {
+  label: 'Wgate', op: 'gate', color: C.route,
+  detail: 'Router gate: 4096 → 256 expert scores.',
+});
+addWeight('w_tid2eid', [129280, 6], W(96, -33), {
+  label: 'tid2eid', op: 'route', color: C.route, tag: 'L2',
+  detail: 'Layer-2 hash routing table: one token id maps to six expert ids. Layers 0–2 use this static lookup.',
+});
+addWeight('w_shared', [2048, 4096], W(110, -50), {
+  label: 'shared W1/W3/W2', op: 'shared', color: C.expert,
+  shapeLabel: 'W1/W3 [2048×4096] · W2 [4096×2048]',
+  detail: 'Shared expert weights: two 2048×4096 projections around SwiGLU, then a 4096×2048 down projection. One always-on expert.',
+});
+addWeight('w_routed', [2048, 4096], W(110, -58), {
+  label: 'routed W1/W3/W2 ×6', op: 'routed', color: C.expert,
+  shapeLabel: '6 × (W1/W3 [2048×4096] + W2 [4096×2048])',
+  detail: 'Six selected routed experts, each a SwiGLU FFN with two 2048×4096 up projections and one 4096×2048 down projection. FP4 and streamed from the expert cache.',
+});
+
+// ------------------------------------------------------------------ edges ---
+// Every activation-carrying edge carries its tensor shape.
+addEdge('hIn', 'mhcPreA', [4, 4096], { labelT: 0.48 });
+addEdge('mhcPreA', 'rmsA', [4096], { via: 'x1A', labelT: 0.30 });
+addEdge('mhcPreA', 'mhcPostA', [4], { via: 'postA', bendY: 1.2, labelT: 0.20, width: 0.016 });
+addEdge('mhcPreA', 'mhcPostA', [4, 4], { via: 'combA', bendY: 1.5, labelT: 0.20, width: 0.016 });
+addEdge('rmsA', 'xa', [4096], { labelT: 0.50 });
+addEdge('xa', 'wqA', [4096], { labelT: 0.50 });
+addEdge('wqA', 'qNorm', [1024], { via: 'qr', labelT: 0.30 });
+addEdge('qNorm', 'qrN', [1024], { labelT: 0.50 });
+addEdge('qrN', 'wqB', [1024], { labelT: 0.50 });
+addEdge('wqB', 'qRope', [64, 512], { via: 'q', labelT: 0.30 });
+addEdge('qRope', 'qR', [64, 512], { labelT: 0.50 });
+addEdge('qR', 'sparseAttn', [64, 512], { labelT: 0.50 });
+addEdge('xa', 'wkv', [4096], { labelT: 0.50 });
+addEdge('wkv', 'kvNorm', [512], { via: 'kv', labelT: 0.30 });
+addEdge('kvNorm', 'kvR', [512], { labelT: 0.50 });
+addEdge('kvR', 'kvWrite', [512], { labelT: 0.50 });
+addEdge('kvWrite', 'ring', [512], { labelT: 0.50 });
+addEdge('xa', 'compProj', [4096], { labelT: 0.50 });
+addEdge('compProj', 'compress', [2, 1024], { via: 'compKV', labelT: 0.30 });
+addEdge('kvR', 'compress', [512], { labelT: 0.50 });
+addEdge('compress', 'compCache', [512], { via: 'compRow', labelT: 0.30 });
+addEdge('qrN', 'idxQProj', [1024], { labelT: 0.50 });
+addEdge('idxQProj', 'idxScore', [64, 128], { via: 'idxQ', labelT: 0.30 });
+addEdge('xa', 'idxWProj', [4096], { labelT: 0.50 });
+addEdge('idxWProj', 'idxScore', [64], { via: 'idxW', labelT: 0.30 });
+addEdge('compCache', 'idxScore', [16, 512], { shapeLabel: '[n×512]', labelT: 0.50 });
+addEdge('idxScore', 'idxSel', [512], { shapeLabel: '[≤512]', labelT: 0.50 });
+addEdge('idxSel', 'sparseAttn', [512], { shapeLabel: '[≤512]', labelT: 0.50 });
+addEdge('ring', 'sparseAttn', [128, 512], { labelT: 0.50 });
+addEdge('compCache', 'sparseAttn', [16, 512], { shapeLabel: '[≤512×512]', labelT: 0.50 });
+addEdge('sparseAttn', 'derope', [64, 512], { via: 'o', labelT: 0.30 });
+addEdge('derope', 'woA', [64, 512], { via: 'oD', labelT: 0.30 });
+addEdge('woA', 'woB', [8, 1024], { via: 'ogrp', labelT: 0.30 });
+addEdge('woB', 'mhcPostA', [4096], { via: 'attnOut', labelT: 0.30 });
+addEdge('hIn', 'mhcPostA', [4, 4096], {
+  bendY: -3.8,
+  labelT: 0.50,
+  width: 0.018,
+  opacity: 0.30,
+  labelY: -0.10,
+});
+addEdge('mhcPostA', 'hMid', [4, 4096], { labelT: 0.50 });
+addEdge('hMid', 'mhcPreF', [4, 4096], { labelT: 0.50 });
+addEdge('mhcPreF', 'rmsF', [4096], { via: 'x1F', labelT: 0.30 });
+addEdge('mhcPreF', 'mhcPostF', [4], { via: 'postF', bendY: 1.0, labelT: 0.18, width: 0.016 });
+addEdge('mhcPreF', 'mhcPostF', [4, 4], { via: 'combF', bendY: 1.3, labelT: 0.18, width: 0.016 });
+addEdge('rmsF', 'xf', [4096], { labelT: 0.50 });
+addEdge('xf', 'gate', [4096], { labelT: 0.50 });
+addEdge('gate', 'route', [256], { via: 'scores', labelT: 0.30 });
+addEdge('xf', 'shared', [4096], { labelT: 0.50 });
+addEdge('xf', 'routed', [4096], { labelT: 0.50 });
+addEdge('route', 'routed', [6], { via: 'ids', labelT: 0.30 });
+addEdge('route', 'combine', [6], { via: 'routeW', labelT: 0.30 });
+addEdge('shared', 'combine', [4096], { via: 'shOut', labelT: 0.30 });
+addEdge('routed', 'combine', [6, 4096], { via: 'rOut', labelT: 0.30 });
+addEdge('combine', 'mhcPostF', [4096], { via: 'ffnOut', labelT: 0.30 });
+addEdge('hMid', 'mhcPostF', [4, 4096], {
+  bendY: -3.8,
+  labelT: 0.50,
+  width: 0.018,
+  opacity: 0.30,
+  labelY: -0.10,
+});
+addEdge('mhcPostF', 'hOut', [4, 4096], { labelT: 0.50 });
+
+// ------------------------------------------------------------------ lanes ---
+lanes.push(makeLabel('attention half →', 'lane-label', null, V(0, 24.5, 0)).obj);
+lanes.push(makeLabel('HCA compressor', 'lane-label', null, V(27, -16.5, 0)).obj);
+lanes.push(makeLabel('CSA indexer', 'lane-label', null, V(53, -30, 0)).obj);
+lanes.push(makeLabel('FFN half ←', 'lane-label', null, V(56, -66, 0)).obj);
+lanes.push(makeLabel('MoE · top-6 of 256', 'lane-label', null, V(92, -65, 0)).obj);
+lanes.push(makeLabel('to next layer', 'lane-label', null, V(44, -46, 0)).obj);
+
+// --------------------------------------------------------------- views ------
+// A layer has too much structure to read in one shot. The map view keeps the
+// whole layer, while each path view shows only its own subgraph so every edge
+// in that view can carry a readable shape tag.
+
+const VIEW_KEYS = {
+  q: [
+    'hIn','mhcPreA','x1A','rmsA','xa',
+    'wqA','qr','qNorm','qrN','wqB','q','qRope','qR',
+  ],
+  kv: [
+    'hIn','mhcPreA','x1A','rmsA','xa',
+    'wkv','kv','kvNorm','kvR','kvWrite','ring',
+    'compProj','compKV','compress','compRow','compCache',
+  ],
+  indexer: [
+    'hIn','mhcPreA','x1A','rmsA','xa',
+    'qNorm','qrN','idxQProj','idxQ','idxWProj','idxW',
+    'idxScore','idxSel','compCache',
+  ],
+  attention: [
+    'hIn','mhcPreA','x1A','rmsA','xa',
+    'qRope','qR','ring','compCache','idxScore','idxSel',
+    'sparseAttn','o','derope','oD','woA','ogrp','woB','attnOut',
+    'postA','combA','mhcPostA','hMid',
+  ],
+  ffn: [
+    'mhcPreF','x1F','postF','combF','rmsF','xf',
+    'gate','scores','route','ids','routeW',
+    'shared','shOut','routed','rOut','combine','ffnOut',
+    'mhcPostF','hOut',
+  ],
+  experts: [
+    'xf','gate','scores','route','ids','routeW',
+    'shared','shOut','routed','rOut','combine','ffnOut',
+  ],
+  output: [
+    'woB','attnOut','mhcPostA','hMid',
+    'mhcPreF','x1F','postF','combF','rmsF','xf',
+    'combine','ffnOut','mhcPostF','hOut',
+  ],
+};
+
+const viewSets = { overview: new Set(nodes.keys()) };
+for (const [view, keys] of Object.entries(VIEW_KEYS)) {
+  const set = new Set(keys.filter((k) => nodes.has(k)));
+  viewSets[view] = set;
+}
+
+// Every node carries the set of views it belongs to.
+for (const node of nodes.values()) node.views = new Set();
+for (const [view, set] of Object.entries(viewSets)) {
+  if (view === 'overview') continue;
+  for (const key of set) nodes.get(key)?.views.add(view);
+}
+// A weight is visible exactly where its operation is visible.
+for (const node of nodes.values()) {
+  if (node.type !== 'weight') continue;
+  const op = node.data.op ? nodes.get(node.data.op) : null;
+  node.views = new Set(op ? op.views : []);
+}
+// The ring and compressed cache are values, not weights, and they belong to
+// the views that consume them.
+for (const view of ['kv','attention']) {
+  nodes.get('ring')?.views.add(view);
+}
+for (const view of ['kv','indexer','attention']) {
+  nodes.get('compCache')?.views.add(view);
+}
+
+let currentView = 'overview';
+
+function edgeVisibleInView(edge, view) {
+  if (view === 'overview') return true;
+  const set = viewSets[view];
+  if (!set) return true;
+  if (!set.has(edge.from) || !set.has(edge.to)) return false;
+  if (edge.via && !set.has(edge.via)) return false;
+  return true;
+}
+
+function applyView(view) {
+  currentView = view;
+  const set = viewSets[view] || viewSets.overview;
+
+  for (const node of nodes.values()) {
+    node.group.visible = view === 'overview' || node.views.has(view);
+  }
+  for (const edge of edges) {
+    const show = edgeVisibleInView(edge, view);
+    edge.tube.visible = show;
+    edge.labelObj.obj.visible = show;
+  }
+  for (const wl of weightLinks) {
+    const show = view === 'overview' ||
+      (nodes.get(wl.weightKey)?.group.visible && nodes.get(wl.op)?.group.visible);
+    wl.line.visible = Boolean(show);
+  }
+  for (const lane of lanes) lane.visible = view === 'overview';
+
+  // Clear a hover/selection that is no longer in the current subgraph.
+  if (selectedKey && !nodes.get(selectedKey)?.group.visible) {
+    selectedKey = null;
+    refreshHighlights();
+  }
+  if (hoverKey && !nodes.get(hoverKey)?.group.visible) setHover(null);
+
+  document.querySelectorAll('#views button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+}
+
+// -------------------------------------------------------------- inspector ---
+const infoKicker = document.getElementById('infoKicker');
+const infoTitle = document.getElementById('infoTitle');
+const infoShape = document.getElementById('infoShape');
+const infoIO = document.getElementById('infoIO');
+const infoFormula = document.getElementById('infoFormula');
+const infoDesc = document.getElementById('infoDesc');
+
+function showInfo(node) {
+  const d = node.data;
+  infoKicker.textContent = d.type;
+  infoTitle.textContent = d.title;
+  infoShape.textContent = d.shapeText || '';
+  infoShape.style.color =
+    d.type === 'weight' ? '#fbbf24' :
+    d.type === 'operation' ? '#93c5fd' : '#67e8f9';
+  infoIO.textContent = d.io || '';
+  infoIO.style.display = d.io ? 'block' : 'none';
+  infoFormula.textContent = d.formula || '';
+  infoFormula.style.display = d.formula ? 'block' : 'none';
+  infoDesc.textContent = d.detail || '';
+}
+
+const VIEW_INFO = {
+  overview: {
+    title: 'Full decoder layer',
+    shape: '43-layer DeepSeek-V4-Flash · layer 2',
+    detail:
+      'The whole-layer map. The attention half runs left to right, then the FFN half runs right to left through mHC pre, RMSNorm, the router, the shared expert, the six routed experts, and mHC post. Choose a path button for exact edge shapes.',
+  },
+  q: {
+    title: 'Q path',
+    shape: 'x̂ [4096] → Wq_a [1024] → q_norm → Wq_b [64×512] → q norm + RoPE',
+    detail:
+      'The MLA-shaped low-rank query path. It first down-projects 4096 to the 1024-wide Q latent, normalizes the latent, up-projects to 64 heads × 512 channels, then applies per-head RMSNorm and RoPE on the last 64 channels.',
+  },
+  kv: {
+    title: 'KV + HCA compressor',
+    shape: 'x̂ [4096] → kv [512] → ring; + compressor state → compressed row [512]',
+    detail:
+      'One KV head of 512 floats is written to the 128-slot sliding ring. In parallel, the ratio-4 HCA compressor pools four tokens into one compressed row and appends it to the compressed cache.',
+  },
+  indexer: {
+    title: 'CSA lightning indexer',
+    shape: 'q_latent_norm [1024] + x̂ [4096] + compressed cache → selected [≤512]',
+    detail:
+      'The layer-2 indexer projects its own 64×128 query from the Q latent, learns one score weight per indexer head, scores every compressed row, and keeps at most 512 positions for sparse attention.',
+  },
+  attention: {
+    title: 'Sparse attention half',
+    shape: 'q_rope [64×512] × (window + selected compressed rows) → o [64×512] → Wo_a/Wo_b → attn_out [4096]',
+    detail:
+      'Queries attend to the 128-row sliding window plus the compressed rows selected by the CSA indexer. The learned sink contributes only to the softmax denominator. The output is de-rotated, projected in eight groups, lifted back to 4096, and written into the four residual streams by mHC post.',
+  },
+  ffn: {
+    title: 'FFN half',
+    shape: 'x̂_ffn [4096] → router + shared/routed SwiGLU experts → combine → ffn_out [4096]',
+    detail:
+      'The router produces 256 scores; layer 2 is a hash layer, so its six expert ids come from tid2eid while the six combining weights come from the scores. Six routed experts plus one shared expert are combined and written back by mHC post.',
+  },
+  experts: {
+    title: 'MoE experts',
+    shape: 'x̂_ffn [4096] + six routed experts + one shared expert → ffn_out [4096]',
+    detail:
+      'Each expert is a SwiGLU FFN with 2048 intermediate channels. The shared expert is always on. The six routed experts are selected by the hash route on layer 2; their outputs are weighted by the six route weights and summed in k order.',
+  },
+  output: {
+    title: 'Layer output',
+    shape: 'Wo_b [4096] + mHC post → h_out [4×4096]',
+    detail:
+      'The end of the layer: the attention result is written back by mHC post A, the FFN result by mHC post F, and the four updated residual streams leave as h_out for layer 3.',
+  },
+};
+
+function showViewInfo(view) {
+  const v = VIEW_INFO[view] || VIEW_INFO.overview;
+  infoKicker.textContent = 'view';
+  infoTitle.textContent = v.title;
+  infoShape.textContent = v.shape;
+  infoShape.style.color = '#67e8f9';
+  infoIO.textContent = '';
+  infoIO.style.display = 'none';
+  infoFormula.textContent = '';
+  infoFormula.style.display = 'none';
+  infoDesc.textContent = v.detail;
+}
+
+// ---------------------------------------------------------------- camera ----
+let camGoal = null;
+
+function flyTo(pos, target) {
+  camGoal = {
+    pos: Array.isArray(pos) ? V(...pos) : pos.clone(),
+    target: Array.isArray(target) ? V(...target) : target.clone(),
+  };
+}
+
+function visibleBox(view) {
+  const box = new THREE.Box3();
+  for (const node of nodes.values()) {
+    if (view === 'overview' || node.views.has(view)) {
+      box.expandByPoint(node.pos);
+    }
+  }
+  if (box.isEmpty()) box.expandByPoint(V(0, 0, 0));
+  return box;
+}
+
+function viewCamera(view) {
+  const box = visibleBox(view);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const vfov = THREE.MathUtils.degToRad(camera.fov);
+  const fitH = size.y / (2 * Math.tan(vfov / 2));
+  const fitW = size.x / (2 * Math.tan(vfov / 2) * camera.aspect);
+  const dist = Math.max(fitH, fitW) * (view === 'overview' ? 1.34 : 1.36);
+  const dir = view === 'overview'
+    ? new THREE.Vector3(0.18, 0.16, 1)
+    : new THREE.Vector3(0.26, 0.22, 1);
+  dir.normalize();
+
+  // Leave the top-left HUD and top-right inspector clear. The shift is in
+  // screen pixels converted to world units, so it behaves the same in every
+  // path view regardless of zoom.
+  const worldPerPixel = (2 * dist * Math.tan(vfov / 2)) / innerHeight;
+  const shift = view === 'overview'
+    ? new THREE.Vector3(0, 0, 0)
+    : new THREE.Vector3(worldPerPixel * 30, worldPerPixel * 110, 0);
+  return {
+    pos: center.clone().add(shift).addScaledVector(dir, dist),
+    target: center.clone().add(shift),
+  };
+}
+
+function goToView(name) {
+  applyView(name);
+  showViewInfo(name);
+  const v = viewCamera(name);
+  flyTo(v.pos, v.target);
+}
+
+document.querySelectorAll('#views button').forEach((b) => {
+  b.addEventListener('click', () => goToView(b.dataset.view));
+});
+
+// Set the initial view without animation, or use a deep-linked subgraph.
+const initialView = new URLSearchParams(location.search).get('view');
+const startView = initialView && (initialView === 'overview' || VIEW_KEYS[initialView]) ? initialView : 'attention';
+applyView(startView);
+showViewInfo(startView);
+const startCam = viewCamera(startView);
+camera.position.copy(startCam.pos);
+controls.target.copy(startCam.target);
+controls.update();
+
+// --------------------------------------------------------------- picking ----
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const tooltip = document.getElementById('tooltip');
+
+function pickAt(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(pickables, false);
+  for (const h of hits) {
+    const key = h.object.userData.nodeKey;
+    const node = key ? nodes.get(key) : null;
+    if (node && node.group.visible) return h.object;
+  }
+  return null;
+}
+
+let down = { x: 0, y: 0, t: 0 };
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  down = { x: e.clientX, y: e.clientY, t: performance.now() };
+});
+
+renderer.domElement.addEventListener('pointerup', (e) => {
+  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+  if (moved < 5 && performance.now() - down.t < 500) {
+    const hit = pickAt(e.clientX, e.clientY);
+    if (hit) selectKey(hit.userData.nodeKey);
+  }
+});
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  const hit = pickAt(e.clientX, e.clientY);
+  if (hit) {
+    const key = hit.userData.nodeKey;
+    setHover(key);
+    const node = nodes.get(key);
+    if (node) {
+      const d = node.data;
+      tooltip.style.opacity = '1';
+      tooltip.style.left = `${e.clientX}px`;
+      tooltip.style.top = `${e.clientY}px`;
+      tooltip.innerHTML =
+        `<b>${d.title}</b><br>` +
+        `<span style="color:#67e8f9;font-family:monospace">${d.shapeText || ''}</span>` +
+        (d.type === 'operation'
+          ? `<br><span style="color:#94a3b8">${d.formula || ''}</span>`
+          : '');
+    }
+  } else {
+    setHover(null);
+    tooltip.style.opacity = '0';
+  }
+});
+
+renderer.domElement.addEventListener('pointerleave', () => {
+  setHover(null);
+  tooltip.style.opacity = '0';
+});
+
+// ----------------------------------------------------------- token state ----
+const tokenSlider = document.getElementById('tokenSlider');
+const tokenPosEl = document.getElementById('tokenPos');
+const ringNode = nodes.get('ring');
+const compNode = nodes.get('compCache');
+let tokenPos = 12;
+
+function setTokenPos(p) {
+  tokenPos = p;
+  tokenPosEl.textContent = `${p}`;
+  tokenSlider.value = `${p}`;
+
+  const slot = p % CFG.window;
+  ringNode.slots.forEach((m, i) => {
+    const active = i === slot;
+    m.material.color.setHex(active ? 0xfbbf24 : 0x115e59);
+    m.material.emissive.setHex(active ? 0xfbbf24 : 0x0f766e);
+    m.material.emissiveIntensity = active ? 0.75 : 0.18;
+  });
+  ringNode.labelObj.el.textContent = `slot ${slot} / 128`;
+
+  const n = Math.min(16, Math.floor(p / CFG.ratio));
+  compNode.rows.forEach((m, i) => {
+    const active = i < n;
+    const chosen = active && ((i * 7 + p) % Math.max(1, n) < 3);
+    const color = chosen ? 0xc084fc : active ? 0x2dd4bf : 0x134e4a;
+    m.material.color.setHex(color);
+    m.material.emissive.setHex(color);
+    m.material.emissiveIntensity = chosen ? 0.65 : active ? 0.30 : 0.10;
+  });
+  compNode.labelObj.el.textContent = `rows ${Math.floor(p / CFG.ratio)} · indexer picks ≤512`;
+}
+
+tokenSlider.addEventListener('input', () => setTokenPos(Number(tokenSlider.value)));
+setTokenPos(tokenPos);
+
+// ---------------------------------------------------------------- animate ---
+let last = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  if (camGoal) {
+    camera.position.lerp(camGoal.pos, 0.09);
+    controls.target.lerp(camGoal.target, 0.09);
+    if (
+      camera.position.distanceTo(camGoal.pos) < 0.12 &&
+      controls.target.distanceTo(camGoal.target) < 0.12
+    ) {
+      camera.position.copy(camGoal.pos);
+      controls.target.copy(camGoal.target);
+      camGoal = null;
+    }
+  }
+
+  for (const w of weightLabelObjects) {
+    w.obj.getWorldPosition(tmpWorld);
+    w.obj.visible = currentView !== 'overview' || hoverKey === w.key || selectedKey === w.key;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+
+requestAnimationFrame(animate);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  labelRenderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
