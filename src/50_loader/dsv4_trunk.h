@@ -53,7 +53,9 @@ int  dsv4_trunk_open(DSV4Trunk *tr, const char *dir, const DSV4Cfg *c,
                      int64_t budget_bytes);
 void dsv4_trunk_close(DSV4Trunk *tr);
 int64_t dsv4_trunk_resident_bytes(const DSV4Trunk *tr);
-int  dsv4_trunk_bind(DSV4Trunk *tr, int L, DSV4LayerW *w);
+
+/* The layer binding built at load time, or NULL if the layer is absent. */
+const DSV4LayerW *dsv4_trunk_weights(const DSV4Trunk *tr, int L);
 
 /* One tensor of a layer by slot, or NULL. */
 const DSV4TrunkTensor *dsv4_trunk_slot(const DSV4Trunk *tr, int L, int slot);

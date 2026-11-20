@@ -160,14 +160,14 @@ int dsv4_forward(Engine *e, int32_t tid, int pos, int want_logits,
         memcpy(e->h + (size_t)j * d, e->xh, (size_t)d * sizeof(float));
 
     for (int L = 0; L < e->c.n_layers; L++) {
-        DSV4LayerW lw;
-        if (dsv4_trunk_bind(&e->tr, L, &lw) != 0) {
-            dsv4_emit_error("trunk bind failed on layer %d at position %d",
+        const DSV4LayerW *lw = dsv4_trunk_weights(&e->tr, L);
+        if (!lw) {
+            dsv4_emit_error("trunk layer %d is unavailable at position %d",
                             L, pos);
             return -1;
         }
         const int comp = dsv4_compress_ratio(&e->c, L) != 0;
-        dsv4_layer_forward(e->h, &lw, &e->c, &e->scratch, &e->cache,
+        dsv4_layer_forward(e->h, lw, &e->c, &e->scratch, &e->cache,
                            &e->lst[L], comp ? e->cs_c : e->cs_d,
                            comp ? e->sn_c : e->sn_d, pos, tid);
         dsv4_emit_layer(e, phase, L);

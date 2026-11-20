@@ -151,16 +151,9 @@ void dsv4_trunk_close(DSV4Trunk *tr)
     tr->bfd = -1;
 }
 
-int dsv4_trunk_bind(DSV4Trunk *tr, int L, DSV4LayerW *w)
+const DSV4LayerW *dsv4_trunk_weights(const DSV4Trunk *tr, int L)
 {
-    if (L < 0 || L >= tr->n_layers || tr->lay[L].nt == 0) {
-        fprintf(stderr, "dsv4_trunk: layer %d is not in the trunk\n", L);
-        return -1;
-    }
-    if (!tr->lay[L].bind_ready) {
-        fprintf(stderr, "dsv4_trunk: layer %d was not bound at load time\n", L);
-        return -1;
-    }
-    *w = tr->lay[L].bind_cached;
-    return 0;
+    if (!tr || L < 0 || L >= tr->n_layers || !tr->lay[L].bind_ready)
+        return NULL;
+    return &tr->lay[L].bind_cached;
 }

@@ -106,8 +106,8 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
     for (int L = 0; L < c->n_layers; L++) {
         if (dsv4_prefill_cancelled(p))
             return dsv4_prefill_cancel_code(p);
-        DSV4LayerW lw;
-        if (dsv4_trunk_bind(p->tr, L, &lw) != 0) return -1;
+        const DSV4LayerW *lw = dsv4_trunk_weights(p->tr, L);
+        if (!lw) return -1;
 
         const int comp = dsv4_compress_ratio(c, L) != 0;
         const float *cs = comp ? cs_c : cs_d;
@@ -120,7 +120,7 @@ int dsv4_prefill_range(DSV4Prefill *p, const int32_t *ids, int n, int pos0,
                               dsv4_now_s() - t0, frac);
         /* From here on layer state can change; a stop now needs a reset. */
         p->state_dirty = 1;
-        const int lrc = prefill_layer(p, L, &lw, n, pos0, ids, cs, sn);
+        const int lrc = prefill_layer(p, L, lw, n, pos0, ids, cs, sn);
         if (lrc) {
             dsv4_prefill_moe_abort(p);
             return lrc;
