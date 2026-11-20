@@ -49,7 +49,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     }
 
     const double t0 = dsv4_now_s();
-    dsv4_cancel = 0;
+    dsv4_runtime_clear_cancel();
 
     const int n = dsv4_append_ids(e, tokens, n_tokens);
     if (n < 0) {
@@ -72,7 +72,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
 
     if (rc != 0) {
         dsv4_engine_reset_context(e);
-        dsv4_cancel = 0;
+        dsv4_runtime_clear_cancel();
         return;
     }
 
@@ -80,7 +80,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     model_tag(e->model_dir, tag, sizeof tag);
     if (dsv4_kv_save(path, tag, &e->c, e->lst, e->ids, n) != 0) {
         dsv4_emit_error("KV: could not write the KV cache file");
-        dsv4_cancel = 0;
+        dsv4_runtime_clear_cancel();
         return;
     }
 
@@ -88,7 +88,7 @@ void dsv4_engine_kv_build(Engine *e, const int32_t *tokens, int n_tokens,
     long long bytes = stat(path, &sb) == 0 ? (long long)sb.st_size : 0;
     e->kv_prefix = 1;
     dsv4_emit_kv_built(n, dsv4_now_s() - t0, bytes);
-    dsv4_cancel = 0;
+    dsv4_runtime_clear_cancel();
 }
 
 void dsv4_engine_kv_load(Engine *e, const int32_t *tokens, int n_tokens,

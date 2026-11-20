@@ -22,7 +22,7 @@ static int region_push(DSV4PrefillVk *v, const DSV4VkRegion *r)
 
 /* Import one existing host allocation. `avail` is the allocation size; the
  * imported range is rounded down to the driver's alignment. */
-int dsv4_prefill_vk_region_import(DSV4PrefillVk *v, unsigned char *base,
+static int dsv4_prefill_vk_region_import(DSV4PrefillVk *v, unsigned char *base,
                                   size_t avail)
 {
     if (!v || !base || avail < DSV4_VK_SLOT_ALIGN || v->import_align == 0)

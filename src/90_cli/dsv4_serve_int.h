@@ -11,6 +11,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
 #include "dsv4_prefill.h"
+#include "dsv4_runtime.h"
 #include "dsv4_st.h"
 #include "dsv4_trunk.h"
 
@@ -59,9 +60,9 @@ typedef struct {
 
 } Engine;
 
-/* SIGUSR1 sets this. Prefill polls it between layers and sequential-stage
- * tokens; decode stops at the next token boundary. */
-extern volatile sig_atomic_t dsv4_cancel;
+/* SIGUSR1 requests cancellation through the runtime layer. Prefill polls it
+ * between layers and sequential-stage tokens; decode stops at the next token
+ * boundary. */
 
 /* ---- util ---- */
 double dsv4_proc_rss_mb(void);
@@ -80,7 +81,7 @@ void dsv4_emit_token(Engine *e, int32_t id, int index,
 void dsv4_emit_done(Engine *e, int prompt_tokens, int generated,
                     double seconds, double ttft, const char *stop);
 void dsv4_emit_reset(const Engine *e, const char *reason);
-void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p);
+void dsv4_emit_prefill_progress(Engine *e, const DSV4Progress *p);
 void dsv4_emit_kv_built(int tokens, double seconds, long long bytes);
 void dsv4_emit_kv_loaded(int tokens, int context_cap, double seconds);
 

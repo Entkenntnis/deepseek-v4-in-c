@@ -82,8 +82,5 @@ void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
 void dsv4_layer_attention(float *out, const float *x, const DSV4LayerW *w,
                           const DSV4Cfg *c, DSV4Scratch *s, DSV4LayerState *st,
                           const float *cs, const float *sn, int pos, int n_idx);
-void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
-                    const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
-                    int layer, int token_id);
 
 #endif /* DSV4_LAYER_H */

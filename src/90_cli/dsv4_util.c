@@ -1,11 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_util.c - timing, process stats and the cancel flag. */
-#include <signal.h>
+/* dsv4_util.c - process memory and I/O statistics. */
 #include <stdio.h>
 
 #include "dsv4_serve_int.h"
 
-volatile sig_atomic_t dsv4_cancel;
 
 double dsv4_proc_rss_mb(void)
 {

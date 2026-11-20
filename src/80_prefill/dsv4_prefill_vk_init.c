@@ -11,26 +11,15 @@
 #include "gemm_fp4_spv.h"
 #include "swiglu_spv.h"
 
-int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
-                         DSV4Trunk *tr, DSV4Cache *cache)
+static int vk_make_sync(DSV4PrefillVk *v)
 {
-    if (!out || !cfg) return -1;
-    *out = NULL;
-    DSV4PrefillVk *v = (DSV4PrefillVk *)calloc(1, sizeof *v);
-    if (!v) return -1;
-    v->cfg = cfg;
-    v->tr = tr;
-    v->cache = cache;
-
-    if (dsv4_prefill_vk_open(v) != 0) goto fail;
-
     VkCommandPoolCreateInfo pci;
     memset(&pci, 0, sizeof pci);
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = v->qfam;
     if (vkCreateCommandPool(v->dev, &pci, NULL, &v->cpool) != VK_SUCCESS)
-        goto fail;
+        return -1;
     VkCommandBufferAllocateInfo cbi;
     memset(&cbi, 0, sizeof cbi);
     cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -38,13 +27,17 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbi.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(v->dev, &cbi, &v->cmd) != VK_SUCCESS)
-        goto fail;
+        return -1;
     VkFenceCreateInfo fci;
     memset(&fci, 0, sizeof fci);
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     if (vkCreateFence(v->dev, &fci, NULL, &v->fence) != VK_SUCCESS)
-        goto fail;
+        return -1;
+    return 0;
+}
 
+static int vk_make_descriptors(DSV4PrefillVk *v)
+{
     VkDescriptorSetLayoutBinding b[4];
     memset(b, 0, sizeof b);
     for (int i = 0; i < 4; i++) {
@@ -59,7 +52,7 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     dli.bindingCount = 4;
     dli.pBindings = b;
     if (vkCreateDescriptorSetLayout(v->dev, &dli, NULL, &v->dsl)
-        != VK_SUCCESS) goto fail;
+        != VK_SUCCESS) return -1;
 
     VkPushConstantRange pcr;
     pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -73,7 +66,7 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
     if (vkCreatePipelineLayout(v->dev, &pli, NULL, &v->pl) != VK_SUCCESS)
-        goto fail;
+        return -1;
 
     VkPushConstantRange pcr_sw;
     pcr_sw.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -87,7 +80,7 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     pli_sw.pushConstantRangeCount = 1;
     pli_sw.pPushConstantRanges = &pcr_sw;
     if (vkCreatePipelineLayout(v->dev, &pli_sw, NULL, &v->pl_sw)
-        != VK_SUCCESS) goto fail;
+        != VK_SUCCESS) return -1;
 
     VkDescriptorPoolSize psz;
     psz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -99,7 +92,7 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &psz;
     if (vkCreateDescriptorPool(v->dev, &dpi, NULL, &v->dpool)
-        != VK_SUCCESS) goto fail;
+        != VK_SUCCESS) return -1;
     VkDescriptorSetAllocateInfo ai;
     memset(&ai, 0, sizeof ai);
     ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -107,7 +100,7 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &v->dsl;
     if (vkAllocateDescriptorSets(v->dev, &ai, &v->dset) != VK_SUCCESS)
-        goto fail;
+        return -1;
     VkDescriptorSetLayout xl[4] = { v->dsl, v->dsl, v->dsl, v->dsl };
     VkDescriptorSetAllocateInfo xai;
     memset(&xai, 0, sizeof xai);
@@ -116,18 +109,12 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     xai.descriptorSetCount = 4;
     xai.pSetLayouts = xl;
     if (vkAllocateDescriptorSets(v->dev, &xai, v->xdset) != VK_SUCCESS)
-        goto fail;
+        return -1;
+    return 0;
+}
 
-    if (dsv4_prefill_vk_make_pipeline(v, gemm_fp8_spv, gemm_fp8_spv_len,
-                                      &v->pipe_fp8) ||
-        dsv4_prefill_vk_make_pipeline(v, gemm_bf16_spv, gemm_bf16_spv_len,
-                                      &v->pipe_bf16) ||
-        dsv4_prefill_vk_make_pipeline(v, gemm_fp4_spv, gemm_fp4_spv_len,
-                                      &v->pipe_fp4) ||
-        dsv4_prefill_vk_make_pipeline_layout(v, swiglu_spv, swiglu_spv_len,
-                                             v->pl_sw, &v->pipe_sw))
-        goto fail;
-
+static int vk_make_buffers(DSV4PrefillVk *v, const DSV4Cfg *cfg)
+{
     uint32_t max_m = (uint32_t)cfg->n_heads * (uint32_t)cfg->head_dim;
     uint32_t max_k = (uint32_t)cfg->hidden;
     if ((uint32_t)cfg->o_groups * (uint32_t)cfg->o_lora > max_k)
@@ -143,9 +130,9 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
     v->xbytes = (size_t)DSV4_VK_TILE_N * max_k * sizeof(float);
     v->ybytes = (size_t)DSV4_VK_TILE_N * max_m * sizeof(float);
     if (dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->xbytes, &v->xbuf,
-                                    &v->xmem, &v->xmap) != 0) goto fail;
+                                    &v->xmem, &v->xmap) != 0) return -1;
     if (dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->ybytes, &v->ybuf,
-                                    &v->ymem, &v->ymap) != 0) goto fail;
+                                    &v->ymem, &v->ymap) != 0) return -1;
     v->expert_mid_bytes = (size_t)DSV4_VK_TILE_N
                         * (size_t)cfg->moe_inter * sizeof(float);
     if (dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->expert_mid_bytes,
@@ -154,7 +141,34 @@ int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
                                     &v->ubuf, &v->umem, &v->umap) != 0 ||
         dsv4_prefill_vk_make_mapped(v, (VkDeviceSize)v->expert_mid_bytes,
                                     &v->mbuf, &v->mmem, &v->mmap) != 0)
+        return -1;
+    return 0;
+}
+
+int dsv4_prefill_vk_init(DSV4PrefillVk **out, const DSV4Cfg *cfg,
+                         DSV4Trunk *tr, DSV4Cache *cache)
+{
+    if (!out || !cfg) return -1;
+    *out = NULL;
+    DSV4PrefillVk *v = (DSV4PrefillVk *)calloc(1, sizeof *v);
+    if (!v) return -1;
+    v->cfg = cfg;
+    v->tr = tr;
+    v->cache = cache;
+
+    if (dsv4_prefill_vk_open(v) != 0) goto fail;
+    if (vk_make_sync(v) != 0) goto fail;
+    if (vk_make_descriptors(v) != 0) goto fail;
+    if (dsv4_prefill_vk_make_pipeline(v, gemm_fp8_spv, gemm_fp8_spv_len,
+                                      &v->pipe_fp8) ||
+        dsv4_prefill_vk_make_pipeline(v, gemm_bf16_spv, gemm_bf16_spv_len,
+                                      &v->pipe_bf16) ||
+        dsv4_prefill_vk_make_pipeline(v, gemm_fp4_spv, gemm_fp4_spv_len,
+                                      &v->pipe_fp4) ||
+        dsv4_prefill_vk_make_pipeline_layout(v, swiglu_spv, swiglu_spv_len,
+                                             v->pl_sw, &v->pipe_sw))
         goto fail;
+    if (vk_make_buffers(v, cfg) != 0) goto fail;
 
     fprintf(stderr, "prefill: Vulkan GEMM on %s (tile %u tokens, import %llu)\n",
             v->devname, DSV4_VK_TILE_N,

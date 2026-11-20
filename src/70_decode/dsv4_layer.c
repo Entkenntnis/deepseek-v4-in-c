@@ -10,6 +10,10 @@
 #include "dsv4_matmul.h"
 #include "dsv4_layer.h"
 
+static void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
+                           const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
+                           int layer, int token_id);
+
 /* One decoder layer. `h` is [hc_mult][hidden] in and out. */
 void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
                         DSV4Scratch *s, DSV4Cache *cache,
@@ -41,9 +45,9 @@ void dsv4_layer_forward(float *h, const DSV4LayerW *w, const DSV4Cfg *c,
     dsv4_hc_post(h, s->qr, s->resid, s->post, s->comb, hc, d);
 }
 
-void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
-                    const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
-                    int layer, int token_id)
+static void dsv4_layer_moe(float *out, const float *x, const DSV4LayerW *w,
+                           const DSV4Cfg *c, DSV4Scratch *s, DSV4Cache *cache,
+                           int layer, int token_id)
 {
     dsv4_mmq(s->gate_scores, x, &w->moe.gate);
     dsv4_route(s->topk_idx, s->topk_w, s->gate_scores, s->gate_orig,

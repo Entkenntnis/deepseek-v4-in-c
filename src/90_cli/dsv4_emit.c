@@ -140,7 +140,7 @@ void dsv4_emit_done(Engine *e, int prompt_tokens, int generated,
 
 /* The block is the whole prompt: every layer walks all of it before the next
  * layer starts, so tokens_done is an estimate while a layer is mid-flight. */
-void dsv4_emit_prefill_progress(Engine *e, const DSV4PrefillProgress *p)
+void dsv4_emit_prefill_progress(Engine *e, const DSV4Progress *p)
 {
     printf("prefill stage=%s layer=%d layers=%d tokens_done=%d "
            "tokens_total=%d elapsed=%.4f progress=%.4f",

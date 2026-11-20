@@ -126,7 +126,8 @@ struct DSV4Prefill {
 
 static inline int dsv4_prefill_cancelled(const DSV4Prefill *p)
 {
-    return p->opt.is_cancelled && p->opt.is_cancelled(p->opt.cancel_ctx);
+    (void)p;
+    return dsv4_runtime_cancelled();
 }
 
 static inline int dsv4_prefill_cancel_code(const DSV4Prefill *p)
@@ -146,8 +147,6 @@ int  dsv4_prefill_oproj(DSV4Prefill *p, const DSV4LayerW *w, int n);
 int  dsv4_prefill_moe(DSV4Prefill *p, int L, const DSV4LayerW *w,
                       int n, const int32_t *ids);
 
-/* Whether this bucket is in the always-GPU class. */
-int  dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count);
 /* Explicit routing for the scheduler-visible bands. AUTO keeps the old
  * count-based decision (9+ -> GPU). CPU and GPU are used by the union
  * scheduler so it can place a contested 5..8 bucket on either backend. */
@@ -191,6 +190,6 @@ typedef struct {
     int io_done;
 } DSV4PFillCtx;
 
-int dsv4_pf_union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f);
+int dsv4_prefill_union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f);
 
 #endif /* DSV4_PREFILL_INT_H */

@@ -83,8 +83,6 @@ uint32_t dsv4_prefill_vk_pick_mem_type(
     const VkPhysicalDeviceMemoryProperties *mp, uint32_t allowed);
 int  dsv4_prefill_vk_open(DSV4PrefillVk *v);
 
-int  dsv4_prefill_vk_region_import(DSV4PrefillVk *v, unsigned char *base,
-                                   size_t avail);
 DSV4VkRegion *dsv4_prefill_vk_region_for(DSV4PrefillVk *v, const void *ptr,
                                          size_t need);
 

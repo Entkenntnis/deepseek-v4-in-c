@@ -147,8 +147,7 @@ void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
                            int tokens_done, int tokens_total,
                            double elapsed, double progress)
 {
-    if (!p->opt.on_progress) return;
-    DSV4PrefillProgress pr;
+    DSV4Progress pr;
     pr.stage = stage;
     pr.layer = layer;
     pr.layers = p->c->n_layers;
@@ -156,5 +155,5 @@ void dsv4_prefill_progress(DSV4Prefill *p, const char *stage, int layer,
     pr.tokens_total = tokens_total;
     pr.elapsed = elapsed;
     pr.progress = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
-    p->opt.on_progress(p->opt.progress_ctx, &pr);
+    dsv4_runtime_report_progress(&pr);
 }

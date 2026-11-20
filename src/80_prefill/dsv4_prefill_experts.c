@@ -9,7 +9,7 @@
 #include "dsv4_prefill_int.h"
 #include "dsv4_prefill_vk.h"
 
-int dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count)
+static int dsv4_prefill_expert_is_gpu(const DSV4Prefill *p, int count)
 {
     return p && p->vk && count >= DSV4_PF_GPU_ALWAYS_MIN;
 }

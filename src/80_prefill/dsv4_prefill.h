@@ -44,33 +44,11 @@
 #include "dsv4_bind.h"
 #include "dsv4_cache.h"
 #include "dsv4_layer.h"
+#include "dsv4_runtime.h"
 #include "dsv4_trunk.h"
-
-/* Progress. The prefill block is the whole prompt: every layer walks every
- * token before the next layer starts. `layer` is the layer currently running
- * (1-based); `tokens_done` is an estimate while the block is mid-layer. */
-typedef struct {
-    const char *stage;      /* start | layer | done */
-    int layer, layers;      /* current layer (1-based) / total layers */
-    int tokens_done;        /* estimated from completed layers */
-    int tokens_total;       /* tokens in this block */
-    double elapsed;         /* seconds since this prefill call began */
-    double progress;        /* 0..1, estimated across the block */
-} DSV4PrefillProgress;
-
-typedef void (*DSV4PrefillProgressFn)(void *ctx,
-                                      const DSV4PrefillProgress *p);
-
-/* Polled at layer and token boundaries. Returning nonzero asks the block to
- * stop; the callback must be cheap and must not touch the prefill state. */
-typedef int (*DSV4PrefillCancelFn)(void *ctx);
 
 typedef struct {
     int max_pos;    /* same bound the decode scratch/state were built with */
-    DSV4PrefillProgressFn on_progress; /* optional; NULL in one-shot use */
-    void *progress_ctx;
-    DSV4PrefillCancelFn is_cancelled;  /* optional; NULL never cancels */
-    void *cancel_ctx;
 } DSV4PrefillOpts;
 
 typedef struct DSV4Prefill DSV4Prefill;
@@ -115,7 +93,7 @@ int64_t dsv4_prefill_guard_slack(const DSV4Prefill *p);
  * positions pos0..pos0+n-1. On return `h_out` is the last token's residual
  * stream, ready for the output head.
  *
- * The optional is_cancelled callback is polled between layers and between the
+ * Cancellation is polled from the runtime layer between layers and between the
  * tokens of the sequential stages. A cancelled block is not a shorter block:
  * the layer-major schedule means a mid-block stop can leave some layers' KV and
  * compressor rows written and others untouched. DSV4_PREFILL_CANCELLED means

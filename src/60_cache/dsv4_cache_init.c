@@ -10,14 +10,9 @@
 #include "dsv4_cache_int.h"
 #include "dsv4_threads.h"
 
-int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
-                    const DSV4Cfg *cfg, int64_t budget_bytes)
+static int cache_check_budget(DSV4Cache *c, const DSV4Cfg *cfg,
+                              int64_t budget_bytes)
 {
-    memset(c, 0, sizeof *c);
-    c->st = st; c->tr = tr; c->cfg = cfg;
-    c->stream_cap = 6;   /* fixed: miss reads in flight per layer */
-    dsv4_cache_expert_geometry(c, cfg);
-
     /* A cache smaller than topk cannot serve begin(), which will not evict a
      * slot it already claimed for the same batch. This stays a warning here
      * because the budget planner is the layer that turns it into an error;
@@ -35,7 +30,11 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
                 (long long)budget_bytes, (long long)c->expert_bytes);
         return -1;
     }
+    return 0;
+}
 
+static int cache_make_bounce(DSV4Cache *c, const DSV4St *st)
+{
     /* The largest coalesced run is the three weights; the widened window can
      * overhang by up to one alignment unit at each end. */
     int64_t widest_run = 0;
@@ -65,6 +64,69 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
         fprintf(stderr, "dsv4_cache: O_DIRECT unavailable; expert reads go "
                         "through the page cache, which at a 148 GB working set "
                         "evicts more than it saves\n");
+    return 0;
+}
+
+static int cache_make_slots(DSV4Cache *c)
+{
+    /* One arena instead of nslot separate allocations: the GPU path imports
+     * it in <=1 GiB chunks, and a 4 KiB page per slot would otherwise mean one
+     * VkBuffer per slot. If the arena allocation fails, fall back to the old
+     * per-slot allocation; the GPU path then simply imports more buffers. */
+    if (c->nslot > 0 &&
+        posix_memalign((void **)&c->slot_arena, 4096,
+                       (size_t)c->nslot * (size_t)c->slot_bytes) != 0)
+        c->slot_arena = NULL;
+
+    for (int i = 0; i < c->nslot; i++) {
+        c->slot[i].layer = -1;
+        c->slot[i].expert = -1;
+        c->slot[i].pending = 0;
+        /* 4096-aligned so a widened O_DIRECT window can be read straight in. */
+        if (c->slot_arena) {
+            c->slot[i].bytes = c->slot_arena
+                             + (size_t)i * (size_t)c->slot_bytes;
+        } else if (posix_memalign((void **)&c->slot[i].bytes, 4096,
+                                  (size_t)c->slot_bytes) != 0) {
+            c->slot[i].bytes = NULL;
+            return -1;
+        }
+        /* Until the first load, the compact layout is the honest description
+         * of an empty slot -- bind_slot needs SOMETHING coherent to point at. */
+        for (int k = 0; k < 3; k++) {
+            c->slot[i].toff[k]     = c->off_s[k];
+            c->slot[i].toff[3 + k] = c->off_w[k];
+        }
+        dsv4_cache_bind_slot(c, &c->slot[i]);
+    }
+    return 0;
+}
+
+static int cache_make_queues(DSV4Cache *c)
+{
+    /* One FIFO for every reader job: normal begin() batches and the optional
+     * hash prefetch. Overflow is a hard error, not a stall. */
+    c->rq_cap = c->nslot + 64;
+    if (c->rq_cap < 256) c->rq_cap = 256;
+    c->rq = (struct DSV4CacheJob *)calloc((size_t)c->rq_cap, sizeof *c->rq);
+    if (!c->rq) return -1;
+    c->rq_head = c->rq_tail = c->rq_n = 0;
+
+    c->batch = (DSV4CacheBatch *)calloc(1, sizeof *c->batch);
+    if (!c->batch) return -1;
+    return 0;
+}
+
+int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
+                    const DSV4Cfg *cfg, int64_t budget_bytes)
+{
+    memset(c, 0, sizeof *c);
+    c->st = st; c->tr = tr; c->cfg = cfg;
+    c->stream_cap = 6;   /* fixed: miss reads in flight per layer */
+    dsv4_cache_expert_geometry(c, cfg);
+
+    if (cache_check_budget(c, cfg, budget_bytes) != 0) return -1;
+    if (cache_make_bounce(c, st) != 0) return -1;
 
     /* Charged against slot_bytes, not expert_bytes: alignment slack is real
      * memory and the budget is a promise about peak RSS. */
@@ -88,48 +150,8 @@ int dsv4_cache_init(DSV4Cache *c, const DSV4St *st, struct DSV4Trunk *tr,
 
     c->slot = (DSV4Slot *)calloc((size_t)c->nslot, sizeof(DSV4Slot));
     if (!c->slot) return -1;
-
-    /* One arena instead of nslot separate allocations: the GPU path imports
-     * it in <=1 GiB chunks, and a 4 KiB page per slot would otherwise mean one
-     * VkBuffer per slot. If the arena allocation fails, fall back to the old
-     * per-slot allocation; the GPU path then simply imports more buffers. */
-    if (c->nslot > 0 &&
-        posix_memalign((void **)&c->slot_arena, 4096,
-                       (size_t)c->nslot * (size_t)c->slot_bytes) != 0)
-        c->slot_arena = NULL;
-
-    for (int i = 0; i < c->nslot; i++) {
-        c->slot[i].layer = -1;
-        c->slot[i].expert = -1;
-        c->slot[i].pending = 0;
-        /* 4096-aligned so a widened O_DIRECT window can be read straight in. */
-        if (c->slot_arena) {
-            c->slot[i].bytes = c->slot_arena
-                             + (size_t)i * (size_t)c->slot_bytes;
-        } else if (posix_memalign((void **)&c->slot[i].bytes, 4096,
-                                  (size_t)c->slot_bytes) != 0) {
-            c->slot[i].bytes = NULL;
-            dsv4_cache_free(c); return -1;
-        }
-        /* Until the first load, the compact layout is the honest description
-         * of an empty slot -- bind_slot needs SOMETHING coherent to point at. */
-        for (int k = 0; k < 3; k++) {
-            c->slot[i].toff[k]     = c->off_s[k];
-            c->slot[i].toff[3 + k] = c->off_w[k];
-        }
-        dsv4_cache_bind_slot(c, &c->slot[i]);
-    }
-
-    /* One FIFO for every reader job: normal begin() batches and the optional
-     * hash prefetch. Overflow is a hard error, not a stall. */
-    c->rq_cap = c->nslot + 64;
-    if (c->rq_cap < 256) c->rq_cap = 256;
-    c->rq = (struct DSV4CacheJob *)calloc((size_t)c->rq_cap, sizeof *c->rq);
-    if (!c->rq) { dsv4_cache_free(c); return -1; }
-    c->rq_head = c->rq_tail = c->rq_n = 0;
-
-    c->batch = (DSV4CacheBatch *)calloc(1, sizeof *c->batch);
-    if (!c->batch) { dsv4_cache_free(c); return -1; }
+    if (cache_make_slots(c) != 0) { dsv4_cache_free(c); return -1; }
+    if (cache_make_queues(c) != 0) { dsv4_cache_free(c); return -1; }
 
     dsv4_cache_pool_start(c);
     /* Hash prefetch is automatic; pf_has_room still decides whether this cache

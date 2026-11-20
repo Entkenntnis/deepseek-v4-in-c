@@ -25,15 +25,9 @@ static int64_t mem_available_bytes(void)
     return kb < 0 ? -1 : (int64_t)kb * 1024;
 }
 
-static void prefill_progress_cb(void *ctx, const DSV4PrefillProgress *p)
+static void engine_progress_cb(void *ctx, const DSV4Progress *p)
 {
     dsv4_emit_prefill_progress((Engine *)ctx, p);
-}
-
-static int prefill_cancel_cb(void *ctx)
-{
-    (void)ctx;
-    return dsv4_cancel != 0;
 }
 
 int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
@@ -125,11 +119,7 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
         fprintf(stderr, "serve: no prefill rollback snapshot\n");
 
     {
-        const DSV4PrefillOpts po = {
-            .max_pos = e->maxpos,
-            .on_progress = prefill_progress_cb, .progress_ctx = e,
-            .is_cancelled = prefill_cancel_cb, .cancel_ctx = NULL,
-        };
+        const DSV4PrefillOpts po = { .max_pos = e->maxpos };
         if (dsv4_prefill_init(&e->pf, &e->c, &e->tr, e->lst, &e->cache,
                               &e->mb.w, &po) != 0) {
             fprintf(stderr, "serve: block prefill init failed\n");
@@ -149,11 +139,14 @@ int dsv4_engine_init(Engine *e, const char *model, const char *trunkdir,
     e->in_cap = e->cap_ids;
     e->in_ids = malloc((size_t)e->in_cap * sizeof(int32_t));
     if (!e->in_ids) return -1;
+    dsv4_runtime_clear_cancel();
+    dsv4_runtime_set_progress_sink(engine_progress_cb, e);
     return 0;
 }
 
 void dsv4_engine_free(Engine *e)
 {
+    dsv4_runtime_set_progress_sink(NULL, NULL);
     dsv4_prefill_free(e->pf);
     dsv4_state_snapshot_free(e->snap);
     for (int L = 0; L < e->c.n_layers && e->lst; L++) dsv4_state_free(&e->lst[L]);

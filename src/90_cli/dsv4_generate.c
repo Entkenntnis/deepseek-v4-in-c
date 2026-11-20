@@ -35,7 +35,7 @@ int dsv4_prefill_run(Engine *e, const int32_t *ids, int n, int pos0,
     }
 
     for (int i = 0; i < n; i++) {
-        if (dsv4_cancel) return DSV4_PREFILL_CANCELLED;
+        if (dsv4_runtime_cancelled()) return DSV4_PREFILL_CANCELLED;
         if (dsv4_forward(e, ids[i], pos0 + i, 0, emit_layers, phase,
                          dsv4_now_s() - t0, NULL) != 0)
             return -1;
@@ -47,7 +47,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
                           int ngen, int eos, int emit_layers)
 {
     const double t0 = dsv4_now_s();
-    dsv4_cancel = 0;
+    dsv4_runtime_clear_cancel();
     e->head_s = 0.0;
 
     if (ngen < 0) ngen = 0;
@@ -141,12 +141,12 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     e->prefill_tokens = n_added;
     /* No token has been emitted yet, so a stop here still drops this turn and
      * restores the context from before it. */
-    if (dsv4_cancel) {
+    if (dsv4_runtime_cancelled()) {
         dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;
     }
     if (use_batched) {
-        const DSV4PrefillProgress hp = {
+        const DSV4Progress hp = {
             .stage = "head",
             .layer = e->c.n_layers,
             .layers = e->c.n_layers,
@@ -159,7 +159,7 @@ void dsv4_engine_generate(Engine *e, const int32_t *tokens, int n_tokens,
     }
     int32_t best = 0;
     dsv4_head_from_h(e, &best);
-    if (dsv4_cancel) {
+    if (dsv4_runtime_cancelled()) {
         dsv4_cancel_prefill_turn(e, snap_ok, start_pos, n_added, t0, tp0);
         return;
     }

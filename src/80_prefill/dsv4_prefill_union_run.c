@@ -40,7 +40,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         /* 1. Run one ready bucket through the GPU-first policy. A GPU bucket
          *    fills its waits with CPU work; if none is ready, the CPU takes
          *    the smallest available bucket. */
-        if (dsv4_pf_union_run_one_ready(p, &fill)) continue;
+        if (dsv4_prefill_union_run_one_ready(p, &fill)) continue;
 
         /* 2. Nothing ready: take the next published bucket from the source. */
         int k = -1;
@@ -73,7 +73,7 @@ static int union_run_group(DSV4Prefill *p, int L, const DSV4ExpertW **ex,
         }
         q[qt++] = j;
     }
-    while (remaining > 0 && dsv4_pf_union_run_one_ready(p, &fill))
+    while (remaining > 0 && dsv4_prefill_union_run_one_ready(p, &fill))
         ;
     for (int j = 0; j < ng; j++) {
         if (done[j]) continue;

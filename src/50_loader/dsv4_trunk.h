@@ -66,7 +66,6 @@ int  dsv4_trunk_bind(DSV4Trunk *tr, const DSV4Cfg *c, int L, DSV4LayerW *w);
 const DSV4TrunkTensor *dsv4_trunk_slot(const DSV4Trunk *tr, int L, int slot);
 
 /* Reader used by bind; exposed for the trunk implementation files. */
-int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst);
 int dsv4_trunk_load_manifest(DSV4Trunk *tr, const char *dir);
 
 #endif /* DSV4_TRUNK_H */

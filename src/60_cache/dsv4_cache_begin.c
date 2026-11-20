@@ -5,7 +5,7 @@
 #include "dsv4_cache.h"
 #include "dsv4_cache_int.h"
 
-int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
+static int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
                               int n, const DSV4ExpertW **out,
                               DSV4CacheBatch *b)
 {
@@ -111,7 +111,7 @@ int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
     return b->rc;
 }
 
-int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
+static int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
 {
     if (!c || !b || !k || !b->streaming) return 0;
     int expert = -1;
@@ -121,7 +121,7 @@ int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
     return got;
 }
 
-int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
+static int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k)
 {
     if (!c || !b || !k) return 0;
     if (!b->streaming) return 0;

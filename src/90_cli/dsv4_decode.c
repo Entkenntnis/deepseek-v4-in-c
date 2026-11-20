@@ -17,7 +17,7 @@ void dsv4_decode_loop(Engine *e, int n_added, int start_pos, int snap_ok,
     const char *stop = "max";
 
     while (generated < ngen) {
-        if (dsv4_cancel) {
+        if (dsv4_runtime_cancelled()) {
             /* Before the first token there is nothing to keep from this turn,
              * so a stop rolls the context back rather than leaving a prompt
              * with no answer in it. */
@@ -88,13 +88,13 @@ void dsv4_cancel_prefill_turn(Engine *e, int rollback, int start_pos,
     } else {
         if (dsv4_engine_reset_context(e) != 0) {
             dsv4_emit_error("prefill cancelled; context reset failed");
-            dsv4_cancel = 0;
+            dsv4_runtime_clear_cancel();
             return;
         }
         dsv4_emit_reset(e, "cancel");
     }
     dsv4_emit_done(e, prompt_tokens, 0, dsv4_now_s() - t0, 0.0, "cancel");
-    dsv4_cancel = 0;
+    dsv4_runtime_clear_cancel();
 }
 
 /* The head's own hc reduction. Small model math, kept here because this is the

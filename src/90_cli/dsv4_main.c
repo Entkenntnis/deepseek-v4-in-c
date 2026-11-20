@@ -25,7 +25,7 @@ static void usage(const char *me)
 static void handle_cancel(int sig)
 {
     (void)sig;
-    dsv4_cancel = 1;
+    dsv4_runtime_request_cancel();
 }
 
 int main(int argc, char **argv)

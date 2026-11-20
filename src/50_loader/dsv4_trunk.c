@@ -11,7 +11,7 @@
 #include "dsv4_trunk.h"
 #include "dsv4_bind.h"
 
-int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
+static int dsv4_trunk_read_run(DSV4Trunk *tr, int L, unsigned char *dst)
 {
     const int64_t off = tr->lay[L].file_off;
     int64_t want = tr->lay[L].nbytes;

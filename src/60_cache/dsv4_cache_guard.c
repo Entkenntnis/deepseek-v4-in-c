@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* dsv4_cache_evict.c - shrink the resident slot window for a block prefill.
+/* dsv4_cache_guard.c - shrink the resident slot window for a block prefill.
  *
  * The arena is allocated once, so invalidating slot keys does not lower RSS.
  * The guard therefore waits for readers, empties the tail slots and asks the

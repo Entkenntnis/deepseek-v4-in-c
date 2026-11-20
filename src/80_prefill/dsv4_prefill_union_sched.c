@@ -101,7 +101,7 @@ static int union_fill_cpu(void *ctx)
 }
 
 /* Run at most one ready bucket: GPU class first, then CPU class. */
-int dsv4_pf_union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
+int dsv4_prefill_union_run_one_ready(DSV4Prefill *p, DSV4PFillCtx *f)
 {
     int pick = union_pick_gpu(f);
     if (pick >= 0) {

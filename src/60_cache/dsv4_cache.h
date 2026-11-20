@@ -153,10 +153,6 @@ typedef struct DSV4CacheBatch {
     int rc;
 } DSV4CacheBatch;
 
-int dsv4_cache_get_many_begin(DSV4Cache *c, int layer, const int *experts,
-                              int n, const DSV4ExpertW **out,
-                              DSV4CacheBatch *b);
-
 /* Engine-facing wrappers: one batch is owned by the cache. */
 int dsv4_cache_begin(DSV4Cache *c, int layer, const int *experts, int n,
                      const DSV4ExpertW **out);
@@ -171,13 +167,5 @@ int dsv4_cache_get_many_end(DSV4Cache *c, const DSV4ExpertW **out,
  * stream instead of first-use order. Numerically neutral: the caller still
  * accumulates each request in k order. */
 void dsv4_cache_sort_experts(const DSV4Cache *c, int layer, int *experts, int n);
-
-/* Block until one miss has landed; *k indexes the caller's out array. Returns 1
- * when one was handed out, 0 when every miss has been consumed. A prefetch
- * slot that was still reading at begin() counts as one of these. */
-int dsv4_cache_wait_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
-
-/* Non-blocking variant: hand out one already-published miss, or return 0. */
-int dsv4_cache_try_any(DSV4Cache *c, DSV4CacheBatch *b, int *k);
 
 #endif /* DSV4_CACHE_H */
