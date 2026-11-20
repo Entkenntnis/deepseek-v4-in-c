@@ -64,7 +64,7 @@ typedef struct {
  * between layers and sequential-stage tokens; decode stops at the next token
  * boundary. */
 
-/* ---- util ---- */
+/* ---- proc ---- */
 double dsv4_proc_rss_mb(void);
 double dsv4_proc_read_gb(void);
 
